@@ -238,23 +238,6 @@ final class ScreenshotTests: XCTestCase {
         XCTAssertTrue(playPause.waitForExistence(timeout: uiTimeout), "The player never opened")
         XCTAssertTrue(playPause.wait(for: \.label, toEqual: "Pause", timeout: uiTimeout), "The picture never came up")
     }
-
-    /// A tab: a button in the tab bar, a row in iPad's sidebar, or a button in the bar down the
-    /// side of iPhone Duo's outer display, which isn't a tab bar to XCUITest. A tab reads its
-    /// badge's count after its name. Not the back button to the tab's first screen, which can
-    /// have the same name.
-    @MainActor
-    private func tab(_ name: String, in app: XCUIApplication) -> XCUIElement {
-        let named = NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ", ")
-        let places = [app.tabBars.buttons.matching(named).firstMatch, app.cells.matching(named).firstMatch,
-                      app.buttons.matching(named).matching(NSPredicate(format: "identifier != 'BackButton'")).firstMatch]
-        let deadline = Date.now.addingTimeInterval(uiTimeout)
-        while Date.now < deadline {
-            if let tab = places.first(where: \.exists) { return tab }
-            RunLoop.current.run(until: .now.addingTimeInterval(0.25))
-        }
-        return places[0]
-    }
     #endif
 
     #if os(iOS)

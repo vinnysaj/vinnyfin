@@ -83,6 +83,7 @@ struct TrackPanel: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label(panel.title, systemImage: panel.symbol).font(.headline)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 #if !os(tvOS)
                 Button("Close", systemImage: "xmark", action: onClose)
@@ -141,6 +142,8 @@ struct TrackPanel: View {
         .onAppear { focusedRow = rows.first(where: \.isSelected)?.id ?? rows.first?.id }
         #endif
         .accessibilityElement(children: .contain)
+        // VoiceOver's two-finger scrub, and Escape, close it.
+        .accessibilityAction(.escape, onClose)
         .accessibilityIdentifier("player.panel")
     }
 

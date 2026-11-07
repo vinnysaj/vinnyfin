@@ -12,6 +12,8 @@ struct EpisodeStrip: View {
 
     @Environment(\.session) private var session
     @Environment(DownloadManager.self) private var downloads
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var seasons: [JellyfinItem] = []
     @State private var seasonId: String?
     @State private var episodes: [JellyfinItem] = []
@@ -90,20 +92,22 @@ struct EpisodeStrip: View {
                         RoundedRectangle(cornerRadius: 10).strokeBorder(.white, lineWidth: 2)
                         Image(systemName: "waveform")
                             .font(.title2.weight(.semibold))
-                            .symbolEffect(.variableColor.iterative, isActive: model.isPlaying)
+                            // Still with Reduce Motion: the stroke around it marks it.
+                            .symbolEffect(.variableColor.iterative, isActive: model.isPlaying && !reduceMotion)
                             .shadow(radius: 4)
                     }
                 }
             Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.lineLimit(1))
             if let runtime = episode.runtimeText {
                 Text(runtime).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .frame(width: 168)
+        .frame(width: dynamicTypeSize.cardWidth(168))
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isPlaying ? .isSelected : [])
+        .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
     }
 
     private func loadSeasons() async {

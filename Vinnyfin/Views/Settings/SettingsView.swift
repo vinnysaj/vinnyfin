@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct SettingsView: View {
@@ -47,7 +48,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Plays the best version up to this quality, untouched. When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
                 }
-                Section("Audio and Subtitles") {
+                Section {
                     SettingPicker("Audio Language", selection: $settings.audioLanguage) {
                         Text("The Video's Default").tag("")
                         ForEach(AppSettings.languages, id: \.code) { Text($0.name).tag($0.code) }
@@ -64,6 +65,10 @@ struct SettingsView: View {
                         Text("Large").tag(1.25)
                         Text("Extra Large").tag(1.5)
                     }
+                } header: {
+                    Text("Audio and Subtitles")
+                } footer: {
+                    AccessibleMediaNote()
                 }
                 #if !os(tvOS)
                 Section {
@@ -436,5 +441,40 @@ private struct LicenseView: View {
 
     static func paragraphs(of text: String) -> [String] {
         text.components(separatedBy: "\n\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+/// What the system's Accessibility settings change about the audio and subtitle choices, while
+/// they change something: nothing shows otherwise.
+private struct AccessibleMediaNote: View {
+    @State private var captions = AccessibleMedia.prefersCaptions
+    @State private var captionStyle = AccessibleMedia.hasCaptionStyle
+    @State private var descriptions = AccessibleMedia.prefersAudioDescriptions
+
+    var body: some View {
+        let notes = [
+            captions ? "Closed Captions + SDH is on in Accessibility settings, so subtitles always show, closed captions first, in the subtitle language or else the audio's." : nil,
+            captionStyle ? "Subtitles take the caption style chosen in Accessibility settings, at the size chosen here." : nil,
+            descriptions ? "Audio Descriptions is on in Accessibility settings, so a title plays its audio description when it has one." : nil,
+        ].compactMap(\.self)
+        Group {
+            if !notes.isEmpty { Text(notes.joined(separator: " ")) }
+        }
+        .onReceive(Self.changes) { _ in
+            captions = AccessibleMedia.prefersCaptions
+            captionStyle = AccessibleMedia.hasCaptionStyle
+            descriptions = AccessibleMedia.prefersAudioDescriptions
+        }
+    }
+
+    /// Either setting changing. On the Mac, System Settings changes them from its own process.
+    private static var changes: AnyPublisher<Notification, Never> {
+        let names = [AccessibleMedia.captionsChanged, AccessibleMedia.audioDescriptionsChanged]
+        #if os(macOS)
+        let centers = [NotificationCenter.default, DistributedNotificationCenter.default()]
+        #else
+        let centers = [NotificationCenter.default]
+        #endif
+        return Publishers.MergeMany(centers.flatMap { center in names.map { center.publisher(for: $0) } }).eraseToAnyPublisher()
     }
 }

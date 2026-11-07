@@ -111,8 +111,23 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         return season + episode
     }
 
+    /// The episode code as it's said: "Season 1, Episode 2", "Season 1, Episodes 2 to 3".
+    var spokenEpisodeCode: String? {
+        guard let indexNumber else { return nil }
+        let season = parentIndexNumber.map { $0 == 0 ? "Specials" : "Season \($0)" }
+        let episode = if let end = indexNumberEnd, end > indexNumber { "Episodes \(indexNumber) to \(end)" } else { "Episode \(indexNumber)" }
+        return [season, episode].compactMap(\.self).joined(separator: ", ")
+    }
+
     var runtime: Duration? {
         runTimeTicks.map { .milliseconds($0 / 10_000) }
+    }
+
+    /// "1 hour, 52 minutes": `runtimeText` as it's said.
+    var spokenRuntime: String? {
+        guard let runtime, runtime > .zero else { return nil }
+        let units: Set<Duration.UnitsFormatStyle.Unit> = runtime < .seconds(60) ? [.seconds] : [.hours, .minutes]
+        return runtime.formatted(.units(allowed: units, width: .wide))
     }
 
     /// "1 hr, 52 min", or seconds for a clip under a minute.
@@ -157,6 +172,17 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         }
         if let resume = resumeSeconds, let total = runtimeSeconds, total > resume {
             return "\(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
+        }
+        return premiereYearText ?? ""
+    }
+
+    /// `cardDetail` as it's said, with the episode's number and the time left in words.
+    var spokenCardDetail: String {
+        if isEpisode {
+            return [spokenEpisodeCode, name].compactMap(\.self).joined(separator: ", ")
+        }
+        if let resume = resumeSeconds, let total = runtimeSeconds, total > resume {
+            return "\(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .wide))) left"
         }
         return premiereYearText ?? ""
     }

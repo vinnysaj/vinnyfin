@@ -80,6 +80,10 @@ nonisolated struct TranscodeChoices: Equatable, Sendable {
     var burnIn = BurnIn.automatic
     var subtitleMode = AppSettings.SubtitleMode.off
     var subtitleLanguage = ""
+    /// The system's Audio Descriptions setting: the audio description, when there's one.
+    var audioDescriptions = false
+    /// The system's Closed Captions + SDH setting: closed captions, whatever `subtitleMode` says.
+    var captions = false
 
     enum BurnIn: Equatable, Sendable {
         /// The stream the subtitle settings pick, when it's picture-based.
@@ -90,10 +94,11 @@ nonisolated struct TranscodeChoices: Equatable, Sendable {
 }
 
 extension TranscodeChoices {
-    /// The person's audio and subtitle settings.
+    /// The person's audio and subtitle settings, and the system's for audio descriptions and captions.
     init(_ settings: AppSettings, burnIn: BurnIn = .automatic) {
         self.init(audioLanguage: settings.audioLanguage, burnIn: burnIn, subtitleMode: settings.subtitleMode,
-                  subtitleLanguage: settings.subtitleLanguage)
+                  subtitleLanguage: settings.subtitleLanguage, audioDescriptions: AccessibleMedia.prefersAudioDescriptions,
+                  captions: AccessibleMedia.prefersCaptions)
     }
 }
 
@@ -134,7 +139,7 @@ nonisolated struct TranscodeRequest: Codable, Equatable, Sendable {
         let height = quality.maxHeight ?? 2160
         maxHeight = height
         maxWidth = height * 16 / 9
-        let audio = Self.audioStream(in: source, language: choices.audioLanguage)
+        let audio = Self.audioStream(in: source, language: choices.audioLanguage, descriptions: choices.audioDescriptions)
         audioStreamIndex = audio?.index
         copiesAudio = audio.map(Self.isCopyable) ?? true
         audioBitrate = Self.audioBitrate(of: audio, copied: copiesAudio)
@@ -188,11 +193,14 @@ nonisolated struct TranscodeRequest: Codable, Equatable, Sendable {
 
     // MARK: Streams
 
-    /// The person's audio language, else the version's default, else its first.
-    static func audioStream(in source: MediaSource, language: String) -> MediaStream? {
+    /// The audio description when `descriptions` asks for one, else the person's audio language,
+    /// else the version's default, else its first.
+    static func audioStream(in source: MediaSource, language: String, descriptions: Bool) -> MediaStream? {
         let audio = source.audioStreams
-        if !language.isEmpty, let match = audio.first(where: { AppSettings.sameLanguage($0.language, language) }) { return match }
-        return audio.first { $0.index == source.defaultAudioStreamIndex } ?? audio.first
+        let picked = TrackChooser.audio(from: audio.compactMap(TrackChooser.Candidate.init), language: language,
+                                        defaultId: source.defaultAudioStreamIndex, descriptions: descriptions)
+        return audio.first { $0.index != nil && $0.index == picked }
+            ?? audio.first { $0.index == source.defaultAudioStreamIndex } ?? audio.first
     }
 
     /// Codecs an MP4 carries and every device here plays, which the server copies as they are.
@@ -229,7 +237,7 @@ nonisolated struct TranscodeRequest: Codable, Equatable, Sendable {
         case .automatic:
             let candidates = source.subtitleStreams.compactMap(TrackChooser.Candidate.init)
             guard let pick = TrackChooser.subtitle(from: candidates, audioLanguage: audio?.language, mode: choices.subtitleMode,
-                                                   language: choices.subtitleLanguage)
+                                                   language: choices.subtitleLanguage, captions: choices.captions)
             else { return nil }
             return pictures.first { $0.index == pick }
         }

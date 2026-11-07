@@ -114,7 +114,8 @@ struct ItemDetailView: View {
         #endif
     }
 
-    /// One row, or on a narrow screen Play above the rest.
+    /// One row, or on a narrow screen Play above the rest, or with text too large for even
+    /// that, one above the other.
     @ViewBuilder private var actions: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
@@ -124,6 +125,10 @@ struct ItemDetailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 playButton
                 HStack(spacing: 12) { secondaryButtons }
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                playButton
+                secondaryButtons
             }
         }
     }
@@ -148,6 +153,7 @@ struct ItemDetailView: View {
     private var versions: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(sources.count) Versions").font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             VStack(alignment: .leading, spacing: 14) {
                 VersionPicker(sources: sources, selection: Binding(get: { playbackSource?.id }, set: { pickedSourceId = $0 }))
             }
@@ -194,6 +200,7 @@ struct PlayButton: View {
     let focus: FocusState<Bool>.Binding
     #endif
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         Button {
@@ -204,8 +211,11 @@ struct PlayButton: View {
         }
         .buttonStyle(.platformGlassProminent)
         .controlSize(.large)
-        // Its title on one line: the row's other buttons would otherwise take width it needs.
-        .fixedSize(horizontal: true, vertical: false)
+        // Its title on one line: the row's other buttons would otherwise take width it needs. At
+        // the accessibility text sizes, where one line can be wider than the screen, it wraps.
+        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
+        .accessibilityLabel(spokenLabel)
+        .accessibilityInputLabels([item.resumeSeconds != nil ? "Resume" : "Play", label])
         .accessibilityIdentifier("detail.play")
         #if os(tvOS)
         .focused(focus)
@@ -228,6 +238,15 @@ struct PlayButton: View {
         }
         return "Resume"
     }
+
+    /// "Resume, 1 hour, 20 minutes left", rather than VoiceOver spelling out "h" and "m".
+    private var spokenLabel: String {
+        guard let resume = item.resumeSeconds else { return "Play" }
+        if let total = item.runtimeSeconds, total > resume {
+            return "Resume, \(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .wide))) left"
+        }
+        return "Resume"
+    }
 }
 
 struct WatchedButton: View {
@@ -240,11 +259,14 @@ struct WatchedButton: View {
         Button {
             Task { await toggle() }
         } label: {
-            Label(item.isPlayed ? "Watched" : "Mark Watched", systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
+            Label("Watched", systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
         }
         .buttonStyle(.platformGlass)
         .controlSize(.large)
         .labelStyle(.iconOnly)
+        // A switch to VoiceOver, on when watched; its name stays, for Voice Control.
+        .accessibilityAddTraits(item.isPlayed ? [.isToggle, .isSelected] : .isToggle)
+        .help(item.isPlayed ? "Mark as Unwatched" : "Mark as Watched")
         .accessibilityIdentifier("detail.watched")
     }
 
@@ -264,11 +286,13 @@ struct FavoriteButton: View {
         Button {
             Task { await toggle() }
         } label: {
-            Label(item.isFavorite ? "Favorite" : "Add to Favorites", systemImage: item.isFavorite ? "heart.fill" : "heart")
+            Label("Favorite", systemImage: item.isFavorite ? "heart.fill" : "heart")
         }
         .buttonStyle(.platformGlass)
         .controlSize(.large)
         .labelStyle(.iconOnly)
+        .accessibilityAddTraits(item.isFavorite ? [.isToggle, .isSelected] : .isToggle)
+        .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
     }
 
     private func toggle() async {
@@ -317,6 +341,7 @@ struct DownloadButton: View {
                         }
                     }
                 }
+                .accessibilityValue(job.status == .failed ? "" : DownloadRing.spokenProgress(of: job, downloads: downloads))
             } else {
                 Button {
                     download()
@@ -344,18 +369,31 @@ struct DownloadButton: View {
 struct DownloadRing: View {
     let job: DownloadJob
     @Environment(DownloadManager.self) private var downloads
+    /// As wide as a line of body text, growing with it.
+    @ScaledMetric(relativeTo: .body) private var diameter: CGFloat = 18
 
     var body: some View {
-        let received = downloads.receivedBytes[job.id] ?? job.bytesOnDisk
-        let fraction = job.displayTotalBytes.map { $0 > 0 ? Double(received) / Double($0) : 0 } ?? 0
+        let fraction = Self.fraction(of: job, downloads: downloads)
         ZStack {
             Circle().stroke(.secondary.opacity(0.3), lineWidth: 2.5)
             Circle().trim(from: 0, to: fraction).stroke(.tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Image(systemName: "arrow.down").font(.system(size: 8, weight: .bold))
+            Image(systemName: "arrow.down").font(.system(size: diameter * 0.44, weight: .bold))
         }
-        .frame(width: 18, height: 18)
-        .accessibilityLabel("Downloading, \(Int(fraction * 100)) percent")
+        .frame(width: diameter, height: diameter)
+        .accessibilityElement()
+        .accessibilityLabel("Downloading")
+        .accessibilityValue(Self.spokenProgress(of: job, downloads: downloads))
+    }
+
+    static func fraction(of job: DownloadJob, downloads: DownloadManager) -> Double {
+        let received = downloads.receivedBytes[job.id] ?? job.bytesOnDisk
+        return job.displayTotalBytes.map { $0 > 0 ? Double(received) / Double($0) : 0 } ?? 0
+    }
+
+    /// "40 percent".
+    static func spokenProgress(of job: DownloadJob, downloads: DownloadManager) -> String {
+        "\(Int(fraction(of: job, downloads: downloads) * 100)) percent"
     }
 }
 #endif

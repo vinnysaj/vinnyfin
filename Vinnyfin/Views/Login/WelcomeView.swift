@@ -21,8 +21,10 @@ struct WelcomeView: View {
                 .font(.system(size: 76))
                 .foregroundStyle(.tint)
                 .symbolRenderingMode(.hierarchical)
+                .accessibilityHidden(true)
             VStack(spacing: 8) {
                 Text("vinnyfin").font(.largeTitle.weight(.bold))
+                    .accessibilityAddTraits(.isHeader)
                 Text("Your Jellyfin library, and every video on this \(Device.name), in every format.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)

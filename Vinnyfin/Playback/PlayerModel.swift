@@ -298,6 +298,9 @@ final class PlayerModel: Identifiable {
             let streams = resolved.mediaSource?.audioStreams.compactMap(TrackChooser.Candidate.init) ?? []
             audioStreamIndex = TrackChooser.same(as: audio, in: streams).map(Int32.init)
             options.preferredAudioLanguages = [audio.language, settings.audioLanguage].compactMap { $0 }.filter { !$0.isEmpty }
+        } else if !resolved.isTranscode, let described = describedAudio(in: resolved.mediaSource) {
+            // Audio Descriptions asks for the description, which the engine ranks below the main mix.
+            audioStreamIndex = Int32(described)
         } else if !settings.audioLanguage.isEmpty {
             options.preferredAudioLanguages = [settings.audioLanguage]
         }
@@ -319,6 +322,7 @@ final class PlayerModel: Identifiable {
         isLoaded = true
         // A speed picked for one episode carries on to the next.
         if rate != 1 { engine.setRate(rate) }
+        applyAudioDescriptionPreference()
         applySubtitlePreference(engine.subtitleTracks)
         registerRemoteCommands()
         Self.keepScreenAwake(true)
@@ -571,7 +575,31 @@ final class PlayerModel: Identifiable {
     private func preferredSubtitle(from candidates: [TrackChooser.Candidate]) -> Int? {
         let audioLanguage = engine.audioTracks.first { $0.id == engine.activeAudioTrackIndex }?.language
         return TrackChooser.subtitle(from: candidates, audioLanguage: audioLanguage,
-                                     mode: settings.subtitleMode, language: settings.subtitleLanguage)
+                                     mode: settings.subtitleMode, language: settings.subtitleLanguage,
+                                     captions: AccessibleMedia.prefersCaptions)
+    }
+
+    /// The audio description that Audio Descriptions asks for, from the server's list of the
+    /// version's streams, whose indexes are the file's; nil when it's off or there's none.
+    private func describedAudio(in source: MediaSource?) -> Int? {
+        guard AccessibleMedia.prefersAudioDescriptions, let source else { return nil }
+        let candidates = source.audioStreams.compactMap(TrackChooser.Candidate.init)
+        guard let pick = TrackChooser.audio(from: candidates, language: settings.audioLanguage,
+                                            defaultId: source.defaultAudioStreamIndex, descriptions: true),
+              candidates.first(where: { $0.id == pick })?.describesVideo == true else { return nil }
+        return pick
+    }
+
+    /// For a file the server doesn't list the streams of, a file on this device: turns on the
+    /// audio description Audio Descriptions asks for, once the load has listed the tracks.
+    private func applyAudioDescriptionPreference() {
+        guard current?.mediaSource == nil, askedStreams?.audioStreamIndex == nil, carriedTracks == nil,
+              AccessibleMedia.prefersAudioDescriptions else { return }
+        let candidates = engine.audioTracks.map(TrackChooser.Candidate.init)
+        guard let active = candidates.first(where: { $0.id == engine.activeAudioTrackIndex }), !active.describesVideo,
+              let pick = TrackChooser.audio(from: candidates, language: settings.audioLanguage, defaultId: active.id, descriptions: true),
+              candidates.first(where: { $0.id == pick })?.describesVideo == true else { return }
+        engine.selectAudioTrack(index: pick)
     }
 
     // MARK: Commands
@@ -1173,6 +1201,8 @@ final class PlayerModel: Identifiable {
         if track.isForced { title += " · Forced" }
         if track.isHearingImpaired { title += " · SDH" }
         if track.isCommentary { title += " · Commentary" }
+        // A title that says so already shows in it.
+        if track.isVisualImpaired, !AccessibleMedia.namesAudioDescription(title) { title += " · Audio Description" }
         return title
     }
 
@@ -1194,6 +1224,7 @@ final class PlayerModel: Identifiable {
         var title = languageName(stream.language) ?? stream.title ?? stream.displayTitle ?? "Track \(stream.index ?? 0)"
         if stream.isForced == true { title += " · Forced" }
         if stream.isHearingImpaired == true { title += " · SDH" }
+        if stream.isAudioDescription, !AccessibleMedia.namesAudioDescription(title) { title += " · Audio Description" }
         return title
     }
 

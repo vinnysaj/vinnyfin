@@ -26,6 +26,9 @@ struct SeriesView: View {
     @State private var isSelecting = false
     @State private var selection = Set<String>()
     @State private var batch: Batch?
+    /// An episode whose page its menu opened.
+    @State private var episodePage: JellyfinItem?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var focusedEpisode: String?
     #if os(tvOS)
     /// The episodes the list holds.
@@ -112,6 +115,7 @@ struct SeriesView: View {
             if nextUp != nil, focusedEpisode == nil { focusedAction = .play }
         }
         #endif
+        .navigationDestination(item: $episodePage) { ItemDetailView(item: $0) }
         // Siri knows which show the page is about: "continue watching this".
         .appEntityIdentifier(EntityIdentifier.title(series))
         .task(id: series.id) { await load() }
@@ -124,7 +128,8 @@ struct SeriesView: View {
 
     // MARK: Actions
 
-    /// One row, or on a narrow screen Play above the rest.
+    /// One row, or on a narrow screen Play above the rest, or with text too large for even
+    /// that, one above the other.
     @ViewBuilder private var actions: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
@@ -134,6 +139,10 @@ struct SeriesView: View {
             VStack(alignment: .leading, spacing: 12) {
                 playButton
                 HStack(spacing: 12) { secondaryButtons }
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                playButton
+                secondaryButtons
             }
         }
     }
@@ -147,8 +156,11 @@ struct SeriesView: View {
             }
             .buttonStyle(.platformGlassProminent)
             .controlSize(.large)
-            // Its title on one line: the row's other buttons would otherwise take width it needs.
-            .fixedSize(horizontal: true, vertical: false)
+            // Its title on one line: the row's other buttons would otherwise take width it needs. At
+            // the accessibility text sizes, where one line can be wider than the screen, it wraps.
+            .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
+            .accessibilityLabel(spokenPlayLabel(for: nextUp))
+            .accessibilityInputLabels([nextUp.resumeSeconds != nil ? "Resume" : "Play", playLabel(for: nextUp)])
             .accessibilityIdentifier("series.play")
             #if os(tvOS)
             .focused($focusedAction, equals: .play)
@@ -172,6 +184,12 @@ struct SeriesView: View {
 
     private func playLabel(for episode: JellyfinItem) -> String {
         let code = episode.episodeCode ?? episode.name
+        return episode.resumeSeconds != nil ? "Resume \(code)" : "Play \(code)"
+    }
+
+    /// "Play Season 1, Episode 2", which VoiceOver would otherwise spell out from "S01E02".
+    private func spokenPlayLabel(for episode: JellyfinItem) -> String {
+        let code = episode.spokenEpisodeCode ?? episode.name
         return episode.resumeSeconds != nil ? "Resume \(code)" : "Play \(code)"
     }
 
@@ -277,6 +295,7 @@ struct SeriesView: View {
                                 .padding(.horizontal, 6)
                         }
                         .buttonStyle(SeasonChipStyle(isSelected: season.id == seasonId))
+                        .accessibilityAddTraits(season.id == seasonId ? .isSelected : [])
                         .accessibilityIdentifier("season.\(season.name)")
                     }
                 }
@@ -319,7 +338,8 @@ struct SeriesView: View {
             episode: episode,
             isSelecting: isSelecting,
             isSelected: selection.contains(episode.id),
-            focus: $focusedEpisode
+            focus: $focusedEpisode,
+            openPage: { episodePage = episode }
         ) {
             if isSelecting {
                 if selection.contains(episode.id) { selection.remove(episode.id) } else { selection.insert(episode.id) }
@@ -404,6 +424,7 @@ private struct SeasonChipStyle: ButtonStyle {
     let isSelected: Bool
     #if os(tvOS)
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     #endif
 
     func makeBody(configuration: Configuration) -> some View {
@@ -416,7 +437,8 @@ private struct SeasonChipStyle: ButtonStyle {
             .foregroundStyle(isSelected ? AnyShapeStyle(Color.pageBackground) : AnyShapeStyle(.primary))
             .background(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.quaternary), in: .capsule)
             #if os(tvOS)
-            .scaleEffect(isFocused ? 1.12 : 1)
+            // With Reduce Motion, focus lifts it with its shadow alone.
+            .scaleEffect(isFocused && !reduceMotion ? 1.12 : 1)
             .shadow(radius: isFocused ? 12 : 0)
             .animation(.easeOut(duration: 0.15), value: isFocused)
             #endif
@@ -430,26 +452,29 @@ private struct EpisodeRow: View {
     let isSelecting: Bool
     let isSelected: Bool
     let focus: FocusState<String?>.Binding
+    let openPage: () -> Void
     let action: () -> Void
     let onChange: (JellyfinItem) -> Void
 
     @Environment(\.session) private var session
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 14) {
+            // At the accessibility text sizes the still goes above the words, which need the width.
+            AdaptiveStack(rowAlignment: .top, spacing: 14) {
                 if isSelecting {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.title2)
                         .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                        .frame(maxHeight: .infinity)
+                        .frame(maxHeight: dynamicTypeSize.isAccessibilitySize ? nil : .infinity)
                 }
                 Artwork(url: session?.client.imageURL(itemId: episode.id, tag: episode.primaryImageTag, maxWidth: 600),
                         aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
-                    .frame(width: stillWidth)
+                    .frame(width: dynamicTypeSize.cardWidth(stillWidth))
                     .overlay(alignment: .bottom) {
                         if let progress = episode.progress { ProgressBar(fraction: progress).padding(6) }
                     }
@@ -469,7 +494,7 @@ private struct EpisodeRow: View {
                             .foregroundStyle(.secondary)
                     }
                     if let overview = episode.overview {
-                        Text(overview).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                        Text(overview).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(3))
                     }
                 }
                 Spacer(minLength: 0)
@@ -479,10 +504,12 @@ private struct EpisodeRow: View {
         .buttonStyle(.artwork)
         .foregroundStyle(.primary)
         .focused(focus, equals: episode.id)
-        .contextMenu {
-            ItemContextMenu(item: episode, onChange: onChange)
-            NavigationLink("Details", value: episode)
+        .titleMenu(episode, onChange: onChange) {
+            Button("Details", systemImage: "info.circle", action: openPage)
         }
+        .accessibilityAddTraits(isSelecting && isSelected ? .isSelected : [])
+        .accessibilityHint(isSelecting ? "" : "Plays the episode")
+        .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
         .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0)")
     }
 

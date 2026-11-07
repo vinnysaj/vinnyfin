@@ -123,10 +123,10 @@ final class VinnyfinUITests: XCTestCase {
             if !timeline.exists { picture.tap() }
             if timeline.waitForExistence(timeout: 2), let value = timeline.value as? String {
                 position = value
-                if !value.hasPrefix("0:00 ") { break }
+                if (timelinePosition(value)?.time ?? 0) > 0 { break }
             }
         }
-        XCTAssertFalse(position.isEmpty || position.hasPrefix("0:00 "), "Playback never got past 0:00 (\(position))")
+        XCTAssertTrue((timelinePosition(position)?.time ?? 0) > 0, "Playback never got past the start (\(position))")
         // The controls may fade between looking and tapping; bring them back until Close takes.
         let close = app.buttons["player.close"]
         for _ in 0..<5 where app.buttons["player.close"].exists || !app.buttons["detail.play"].exists {

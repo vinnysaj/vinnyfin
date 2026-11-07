@@ -66,6 +66,7 @@ struct LibraryGridView: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     /// The list's query as the menu has changed it; nil for a list that isn't a query.
     @State private var query: JellyfinClient.ItemQuery?
     @State private var items: PagedItems?
@@ -226,9 +227,11 @@ struct LibraryGridView: View {
         #endif
     }
 
+    /// A card's width here: wider at the accessibility text sizes.
+    private var cardWidth: CGFloat { dynamicTypeSize.cardWidth(list.style.cardWidth) }
+
     private var columns: [GridItem] {
-        let width = list.style.cardWidth
-        return [GridItem(.adaptive(minimum: width, maximum: width * 1.35), spacing: Metrics.gridSpacing, alignment: .top)]
+        [GridItem(.adaptive(minimum: cardWidth, maximum: cardWidth * 1.35), spacing: Metrics.gridSpacing, alignment: .top)]
     }
 
     /// One flat grid at any sort: letters don't head sections, since where each starts is
@@ -247,7 +250,7 @@ struct LibraryGridView: View {
             }
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                columnCount = max(1, Int((width + Metrics.gridSpacing) / (list.style.cardWidth + Metrics.gridSpacing)))
+                columnCount = max(1, Int((width + Metrics.gridSpacing) / (cardWidth + Metrics.gridSpacing)))
             }
             .scrollTargetLayout()
         }
@@ -339,6 +342,8 @@ struct LibraryGridView: View {
         } label: {
             Label("Sort and Filter", systemImage: "line.3.horizontal.decrease")
         }
+        // Apple TV's menu button reads out nothing of its label by itself.
+        .accessibilityLabel("Sort and Filter")
         .accessibilityIdentifier("library.sortFilter")
     }
 
@@ -461,9 +466,7 @@ private struct GridCell: View {
         }
         .buttonStyle(.artwork)
         .focused(focus, equals: index)
-        .contextMenu {
-            if let item { ItemContextMenu(item: item) { items.replace($0) } }
-        }
+        .titleMenu(item) { items.replace($0) }
         .onAppear { items.show(index) }
         #if os(tvOS)
         .onChange(of: item?.id, initial: true) {

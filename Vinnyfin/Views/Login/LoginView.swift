@@ -77,6 +77,9 @@ struct LoginView: View {
                     if previous == .host { flow.address.splitHost() }
                 }
                 .task(id: flow.step == .server ? flow.address : nil) { await checkServer() }
+                // Said where they show, in the form's footers, away from VoiceOver's cursor.
+                .onChange(of: flow.accountError) { _, error in if let error { announce(error) } }
+                .onChange(of: flow.serverError) { _, error in if let error { announce(error) } }
                 .onChange(of: nextFocus) { _, field in
                     guard let field else { return }
                     nextFocus = nil
@@ -184,6 +187,7 @@ struct LoginView: View {
                     .contextMenu {
                         Button("Forget", systemImage: "trash", role: .destructive) { knownServers.forget(signIn) }
                     }
+                    .accessibilityAction(named: "Forget") { knownServers.forget(signIn) }
                     .accessibilityIdentifier("login.knownServer")
                 }
             } header: {
@@ -469,9 +473,14 @@ struct LoginView: View {
         }
         check = .checking
         do {
-            check = .found(try await flow.address.firstAnswer { try await accounts.findServer(at: $0) }.answer)
+            let server = try await flow.address.firstAnswer { try await accounts.findServer(at: $0) }.answer
+            check = .found(server)
+            announce(description(of: server))
         } catch {
-            if !Task.isCancelled, !error.isCancellation { check = .failed(error.localizedDescription) }
+            if !Task.isCancelled, !error.isCancellation {
+                check = .failed(error.localizedDescription)
+                announce(error.localizedDescription)
+            }
         }
     }
 }
@@ -480,10 +489,12 @@ struct LoginView: View {
 private struct QuickConnectSheet: View {
     let code: String
     let onCancel: () -> Void
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         VStack(spacing: 24) {
             Text("Quick Connect").font(.title2.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             Text("In Jellyfin on a signed-in device, open your profile, choose Quick Connect and enter this code.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -491,11 +502,14 @@ private struct QuickConnectSheet: View {
             Text(code)
                 .font(.system(size: 64, weight: .bold, design: .monospaced))
                 .kerning(8)
+                // A digit at a time, as it's typed in, rather than as one number.
+                .speechSpellsOutCharacters()
                 .accessibilityIdentifier("login.quickConnectCode")
             ProgressView("Waiting for approval…")
             Button("Cancel", role: .cancel, action: onCancel)
         }
         .padding(40)
-        .presentationDetents([.medium])
+        // The whole screen for text too large for half of it.
+        .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium])
     }
 }

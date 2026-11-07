@@ -1,8 +1,11 @@
 import AetherEngine
+import MediaAccessibility
 import SwiftUI
 
 /// Draws the cues showing at the frame on screen: styled text near the bottom (or where the
-/// cue asks), and picture subtitles (Blu-ray, DVD, DVB) where they were authored.
+/// cue asks), and picture subtitles (Blu-ray, DVD, DVB) where they were authored. Text takes
+/// what the person chose in the system's caption style (Subtitles & Captioning › Style), on top
+/// of the player's own look, and goes to a braille display as it shows.
 struct SubtitleOverlay: View {
     let model: PlayerModel
     /// The picture's size in pixels, for placing picture subtitles; nil fills the view.
@@ -11,6 +14,7 @@ struct SubtitleOverlay: View {
     /// bottom move up above them.
     var controlsTop: CGFloat?
     @Environment(AppSettings.self) private var settings
+    @State private var captionStyle = CaptionStyleWatch()
 
     var body: some View {
         GeometryReader { geometry in
@@ -24,20 +28,41 @@ struct SubtitleOverlay: View {
                     case .image(let image):
                         picture(image, videoRect: videoRect)
                     case .text(let text):
-                        caption(Text(text), placement: cue.placement, videoRect: videoRect, clearAbove: clearAbove)
+                        caption(Self.styled([SubtitleTextRun(text: text, color: nil)], style: captionStyle.style),
+                                placement: cue.placement, videoRect: videoRect, clearAbove: clearAbove)
                     case .richText(let runs):
-                        caption(Self.styled(runs), placement: cue.placement, videoRect: videoRect, clearAbove: clearAbove)
+                        caption(Self.styled(runs, style: captionStyle.style), placement: cue.placement, videoRect: videoRect,
+                                clearAbove: clearAbove)
                     }
                 }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .onChange(of: Self.texts(of: active), initial: true) { _, texts in Self.tellAccessibility(texts) }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+        .onDisappear { Self.tellAccessibility([]) }
+    }
+
+    /// The words on screen, for a braille display to show.
+    private static func texts(of cues: [SubtitleCue]) -> [String] {
+        cues.compactMap { cue in
+            switch cue.body {
+            case .image: nil
+            case .text(let text): text
+            case .richText(let runs): runs.map(\.text).joined()
+            }
+        }
+    }
+
+    /// Tells the system which captions are showing, for a braille display; none when empty.
+    private static func tellAccessibility(_ texts: [String]) {
+        MACaptionAppearanceDidDisplayCaptions(texts as CFArray)
     }
 
     private func caption(_ text: Text, placement: SubtitleTextPlacement?, videoRect: CGRect, clearAbove: CGFloat?) -> some View {
-        let size = max(14, videoRect.height * 0.052 * settings.subtitleScale)
+        let style = captionStyle.style
+        let size = max(14, videoRect.height * 0.052 * settings.subtitleScale * style.sizeScale)
         let alignment = placement?.alignment ?? 2
         let vertical: VerticalAlignment = alignment >= 7 ? .top : (alignment >= 4 ? .center : .bottom)
         let margin = videoRect.height * 0.07
@@ -47,11 +72,13 @@ struct SubtitleOverlay: View {
         }
         let horizontal: HorizontalAlignment = [1, 4, 7].contains(alignment) ? .leading : ([3, 6, 9].contains(alignment) ? .trailing : .center)
         return text
-            .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(.white)
+            .font(style.fontName.map { .custom($0.value, fixedSize: size) } ?? .system(size: size, weight: .semibold))
             .multilineTextAlignment(horizontal == .leading ? .leading : (horizontal == .trailing ? .trailing : .center))
-            .shadow(color: .black.opacity(0.9), radius: 1.5, x: 0, y: 1)
-            .shadow(color: .black.opacity(0.7), radius: 5)
+            .modifier(CaptionEdge(style: style.edgeStyle?.value))
+            .padding(.horizontal, style.backgroundFill == nil ? 0 : size * 0.3)
+            .background(style.backgroundFill ?? .clear)
+            .padding(style.windowFill == nil ? 0 : size * 0.3)
+            .background(style.windowFill ?? .clear, in: .rect(cornerRadius: size * 0.2))
             .padding(.horizontal, videoRect.width * 0.06)
             .padding(.top, margin)
             .padding(.bottom, margin + lift)
@@ -71,6 +98,7 @@ struct SubtitleOverlay: View {
         )
         return Image(decorative: image.cgImage, scale: 1)
             .resizable()
+            .accessibilityIgnoresInvertColors()
             .frame(width: frame.width, height: frame.height)
             .position(x: frame.midX, y: frame.midY)
     }
@@ -83,17 +111,84 @@ struct SubtitleOverlay: View {
         return CGRect(x: (container.width - size.width) / 2, y: (container.height - size.height) / 2, width: size.width, height: size.height)
     }
 
-    static func styled(_ runs: [SubtitleTextRun]) -> Text {
-        runs.reduce(Text("")) { text, run in
+    /// The runs in their own styles, in the colors the cue and the system's caption style give
+    /// them by the style's precedence: white where neither gives one.
+    static func styled(_ runs: [SubtitleTextRun], style: SubtitleCaptionStyle) -> Text {
+        let opacity = style.textOpacity?.value ?? 1
+        return runs.reduce(Text("")) { text, run in
             var piece = Text(run.text)
             if run.isBold { piece = piece.bold() }
             if run.isItalic { piece = piece.italic() }
             if run.isUnderlined { piece = piece.underline() }
             if run.isStruckThrough { piece = piece.strikethrough() }
-            if let color = run.color {
-                piece = piece.foregroundStyle(Color(red: Double(color.r) / 255, green: Double(color.g) / 255, blue: Double(color.b) / 255))
-            }
+            let color = style.textColor?.resolved(cue: run.color) ?? run.color
+            piece = piece.foregroundStyle((color.map(Color.init) ?? .white).opacity(opacity))
             return Text("\(text)\(piece)")
         }
+    }
+}
+
+/// The system's caption style, kept current as the person changes it.
+@Observable
+private final class CaptionStyleWatch {
+    private(set) var style = SubtitleCaptionStyle.current()
+    @ObservationIgnored private var observation: SubtitleCaptionStyle.Observation?
+
+    init() {
+        observation = SubtitleCaptionStyle.observeChanges { [weak self] style in
+            Task { @MainActor in self?.style = style }
+        }
+    }
+}
+
+/// The edges of caption text. The player's own look, a soft shadow that reads over any picture,
+/// unless the system's caption style chose another.
+private struct CaptionEdge: ViewModifier {
+    let style: SubtitleCaptionStyle.EdgeStyle?
+
+    func body(content: Content) -> some View {
+        switch style {
+        case nil:
+            content
+                .shadow(color: .black.opacity(0.9), radius: 1.5, x: 0, y: 1)
+                .shadow(color: .black.opacity(0.7), radius: 5)
+        case .none?:
+            content
+        case .dropShadow?:
+            content.shadow(color: .black.opacity(0.9), radius: 1, x: 1.5, y: 1.5)
+        case .raised?:
+            content.shadow(color: .black, radius: 0, x: 1, y: 1)
+        case .depressed?:
+            content.shadow(color: .black, radius: 0, x: -1, y: -1)
+        case .uniform?:
+            content
+                .shadow(color: .black, radius: 0, x: 1, y: 0)
+                .shadow(color: .black, radius: 0, x: -1, y: 0)
+                .shadow(color: .black, radius: 0, x: 0, y: 1)
+                .shadow(color: .black, radius: 0, x: 0, y: -1)
+        }
+    }
+}
+
+private extension Color {
+    init(_ color: SubtitleColor) {
+        self.init(red: Double(color.r) / 255, green: Double(color.g) / 255, blue: Double(color.b) / 255)
+    }
+}
+
+private extension SubtitleCaptionStyle {
+    /// Behind each caption, when the system's style has a background; nil leaves the text on the
+    /// picture.
+    var backgroundFill: Color? {
+        guard backgroundColor != nil || backgroundOpacity != nil else { return nil }
+        let opacity = backgroundOpacity?.value ?? 1
+        guard opacity > 0 else { return nil }
+        return (backgroundColor.map { Color($0.value) } ?? .black).opacity(opacity)
+    }
+
+    /// Around the whole caption, when the system's style turns its window on.
+    var windowFill: Color? {
+        guard let opacity = windowOpacity?.value, opacity > 0 else { return nil }
+        return (windowColor.map { Color($0.value) } ?? .black).opacity(opacity)
     }
 }

@@ -86,7 +86,7 @@ final class VisionPlayerTests: XCTestCase {
         showControls(app)
         tap(app.buttons["player.playPause"])
         let timeline = app.descendants(matching: .any)["player.timeline"].firstMatch
-        let position = Self.timelinePosition(timeline.value as? String)
+        let position = timelinePosition(timeline.value as? String)
         XCTAssertTrue(position.map { (25...60).contains($0.time) } ?? false,
                       "Skipping didn't land past the intro (\(timeline.value ?? ""))")
         XCTAssertTrue(app.buttons["episodes.episode.2"].waitForExistence(timeout: uiTimeout), "The episodes aren't in the controls")
@@ -240,9 +240,9 @@ final class VisionPlayerTests: XCTestCase {
         let position = { (try? timeline.snapshot())?.value as? String }
         let moved = wait(until: {
             if !controlsAreUp(app) { _ = bringBackControls(app) }
-            return position().map { !$0.hasPrefix("0:00 ") } ?? false
+            return (timelinePosition(position())?.time ?? 0) > 0
         }, timeout: uiTimeout)
-        XCTAssertTrue(moved, "Playback never got past 0:00 (\(position() ?? "no timeline"))")
+        XCTAssertTrue(moved, "Playback never got past the start (\(position() ?? "no timeline"))")
     }
 
     /// Brings the controls back with a fresh four seconds before they fade. Up and playing,
@@ -280,7 +280,7 @@ final class VisionPlayerTests: XCTestCase {
     }
 
     /// Drags the playhead toward `fraction` of the timeline, steps it the rest of the way with the
-    /// ten-second buttons, and checks the position read starts with `expecting`. A UI test's drag
+    /// ten-second buttons, and checks the position, as the timeline shows it, starts with `expecting`. A UI test's drag
     /// on Vision Pro carries the playhead up to a few times further than the pointer went, not at
     /// all when it's short, and past the end ends the title for good, so the drag aims a quarter of
     /// the way. Callers pause first, so the playhead moves only with the test.
@@ -290,9 +290,9 @@ final class VisionPlayerTests: XCTestCase {
         let timeline = app.descendants(matching: .any)["player.timeline"].firstMatch
         // Read through a snapshot, as the timeline comes and goes with the controls.
         let reading = { (try? timeline.snapshot())?.value as? String }
-        let arrived = { reading()?.hasPrefix(expecting) ?? false }
+        let arrived = { timelinePosition(reading()).map { clockText($0.time).hasPrefix(expecting) } ?? false }
         let playhead = {
-            try XCTUnwrap(Self.timelinePosition(reading()).map { $0.time / $0.duration },
+            try XCTUnwrap(timelinePosition(reading()).map { $0.time / $0.duration },
                           "The timeline reads \(reading() ?? "nothing")")
         }
         let from = try playhead()
@@ -304,15 +304,6 @@ final class VisionPlayerTests: XCTestCase {
             reached = wait(until: arrived, timeout: 1)
         }
         XCTAssertTrue(reached, "Scrubbing didn't move the playhead to \(expecting)… (\(reading() ?? "no timeline"))")
-    }
-
-    /// The seconds in and the length a timeline reads, as "2:35 of 3:00" or "1:02:03 of 2:00:00".
-    private static func timelinePosition(_ value: String?) -> (time: Double, duration: Double)? {
-        let seconds = (value ?? "").components(separatedBy: " of ").map { part in
-            part.split(separator: ":").compactMap { Int($0) }.reduce(0) { $0 * 60 + $1 }
-        }
-        guard seconds.count == 2, seconds[1] > 0 else { return nil }
-        return (Double(seconds[0]), Double(seconds[1]))
     }
 
     @MainActor

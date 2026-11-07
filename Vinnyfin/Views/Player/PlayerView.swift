@@ -21,7 +21,13 @@ struct PlayerView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(PlayerCoordinator.self) private var coordinator
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var controlsVisible = true
+    /// The controls stay up until they're hidden the way they were shown. VoiceOver, Voice Control
+    /// and Switch Control take longer to reach a control than the few seconds they'd stay.
+    @State private var holdsControls = false
     /// Play On and SharePlay are up. Here rather than with the controls, which come and go under them.
     @State private var showsPlayElsewhere = false
     @State private var hideTask: Task<Void, Never>?
@@ -64,6 +70,7 @@ struct PlayerView: View {
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea()
                     .accessibilityHidden(true)
+                    .accessibilityIgnoresInvertColors()
             }
             #if os(tvOS)
             if !controlsVisible {
@@ -76,6 +83,9 @@ struct PlayerView: View {
                     .focusEffectDisabled()
                     .onTapGesture { showControls() }
                     .onMoveCommand { _ in showControls() }
+                    .accessibilityLabel("Video")
+                    .accessibilityHint("Shows the controls")
+                    .accessibilityAction { showControls(holding: true) }
             }
             #else
             // Taps on the picture show and hide the controls; taps on a control stay with it.
@@ -85,11 +95,13 @@ struct PlayerView: View {
                 .frame(maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea()
                 .onTapGesture { toggleControls() }
-                // So VoiceOver, too, can bring back controls that have faded.
+                // So VoiceOver, Voice Control ("Tap Video") and Switch Control, too, can bring back
+                // controls that have faded; brought back that way, they stay.
                 .accessibilityElement()
                 .accessibilityLabel("Video")
                 .accessibilityHint("Shows or hides the controls")
                 .accessibilityAddTraits(.isButton)
+                .accessibilityAction { toggleControls(holding: true) }
                 .accessibilityIdentifier("player.picture")
                 #if os(iOS)
                 .gesture(MagnifyGesture().onEnded { pinched($0.magnification) })
@@ -121,7 +133,7 @@ struct PlayerView: View {
                     .padding(.horizontal, Metrics.playerInset)
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    .motionTransition(.scale(scale: 0.6).combined(with: .opacity), reduceMotion: reduceMotion)
             }
             #endif
             // Over the controls' shading so captions stay bright; it takes no touches, and bottom
@@ -138,7 +150,7 @@ struct PlayerView: View {
                 inPictureArea {
                     PlayerNotice(text: notice, controlsBottom: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? topBarBottom : nil)
                 }
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .motionTransition(.move(edge: .top).combined(with: .opacity), reduceMotion: reduceMotion)
             }
             if let panel {
                 let clearsControls = controlsVisible && fold == nil && Self.controlsArePictureOverlay
@@ -153,7 +165,7 @@ struct PlayerView: View {
                         .padding(.top, top)
                         .padding(.bottom, bottom)
                 }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: controlsVisible)
@@ -219,6 +231,10 @@ struct PlayerView: View {
         // rather than making room for a vertical bar.
         .toolbarVerticalBehavior(.disabled)
         #endif
+        // VoiceOver's two-finger scrub closes a panel, else the player, as the remote's Menu does.
+        .accessibilityAction(.escape) {
+            if panel != nil { closePanel() } else { onClose() }
+        }
         .onChange(of: fillsScreen) { _, fills in model.engine.videoGravity = fills ? .resizeAspectFill : .resizeAspect }
         .onChange(of: model.status) { _, status in
             switch status {
@@ -228,6 +244,7 @@ struct PlayerView: View {
             case .preparing, .paused, .ended, .failed: showControls(autoHide: false)
             case .loading, .buffering: break
             }
+            if case .failed(let message) = status { announce("Couldn't play this. \(message)") }
             #if os(iOS) || os(macOS)
             pictureInPicture.attach(to: model.engine)
             #endif
@@ -236,7 +253,11 @@ struct PlayerView: View {
             if phase == .active { Task { await model.restoreAfterBackground() } }
         }
         .onChange(of: model.notice) { _, notice in
-            if let notice { AccessibilityNotification.Announcement(notice).post() }
+            if let notice { announce(notice) }
+        }
+        // Turned on mid-playback, they'd need the controls to stay.
+        .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
+            if assisted { hideTask?.cancel() }
         }
         // Another device asked this one to stop.
         .onChange(of: coordinator.stopRequest) { _, request in
@@ -359,9 +380,11 @@ struct PlayerView: View {
         case .failed(let message):
             VStack(spacing: 14) {
                 Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
+                    .accessibilityHidden(true)
                 Text("Couldn't Play This").font(.title3.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
-                HStack {
+                AdaptiveStack(alignment: .center) {
                     Button("Try Again") { Task { await model.retry() } }
                     if model.item != nil, !model.isTranscoding {
                         Button("Play Through the Server") { Task { await model.retryTranscoded() } }
@@ -383,13 +406,14 @@ struct PlayerView: View {
             let time = model.clock.time
             // In the credits the up-next card is the way past them, when there's a next episode.
             let upNext = model.showsUpNext(at: time) ? model.nextEpisode : nil
+            let skip = upNext == nil ? model.skippableSegment(at: time) : nil
             VStack {
                 Spacer()
                 HStack(alignment: .bottom) {
                     Spacer()
                     if let upNext {
                         UpNextCard(model: model, episode: upNext)
-                    } else if let segment = model.skippableSegment(at: time), let title = segment.skipTitle {
+                    } else if let segment = skip, let title = segment.skipTitle {
                         Button {
                             model.seek(to: segment.end)
                         } label: {
@@ -402,6 +426,13 @@ struct PlayerView: View {
                 }
                 .padding(.horizontal, Metrics.playerInset)
                 .padding(.bottom, fold != nil ? 16 : controlsVisible && Self.controlsArePictureOverlay ? 130 : 40)
+            }
+            // They come and go over the picture, where VoiceOver wouldn't find them in time.
+            .onChange(of: skip?.skipTitle) { _, title in
+                if let title { announce("\(title) available") }
+            }
+            .onChange(of: upNext?.id) {
+                if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
             }
         }
     }
@@ -435,13 +466,15 @@ struct PlayerView: View {
 
     // MARK: Controls visibility
 
-    private func toggleControls() {
+    /// `holding` keeps controls it shows up until they're hidden the same way, for an assistive
+    /// technology's activation.
+    private func toggleControls(holding: Bool = false) {
         if panel != nil {
             closePanel()
         } else if controlsVisible {
             hideControls()
         } else {
-            showControls()
+            showControls(holding: holding)
         }
     }
 
@@ -450,7 +483,8 @@ struct PlayerView: View {
         scheduleHide()
     }
 
-    private func showControls(autoHide: Bool = true) {
+    private func showControls(autoHide: Bool = true, holding: Bool = false) {
+        if holding { holdsControls = true }
         controlsVisible = true
         if autoHide { scheduleHide() } else { hideTask?.cancel() }
     }
@@ -459,10 +493,14 @@ struct PlayerView: View {
         hideTask?.cancel()
         guard model.isPlaying, scrubPosition == nil, panel == nil, fold == nil else { return }
         controlsVisible = false
+        holdsControls = false
     }
 
+    /// Hides the controls in a few seconds, unless they're held or VoiceOver or Switch Control is
+    /// on: those move through the controls one at a time, which takes longer.
     private func scheduleHide() {
         hideTask?.cancel()
+        guard !holdsControls, !voiceOverEnabled, !switchControlEnabled else { return }
         hideTask = Task {
             try? await Task.sleep(for: .seconds(4))
             if !Task.isCancelled { hideControls() }
@@ -501,19 +539,23 @@ private struct UpNextCard: View {
     let model: PlayerModel
     let episode: JellyfinItem
     @Environment(\.session) private var session
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        HStack(spacing: 14) {
-            Artwork(url: session?.landscape(episode, width: 480), aspectRatio: 16.0 / 9.0, cornerRadius: 8, placeholder: "play.rectangle")
-                .frame(width: 150)
+        AdaptiveStack(spacing: 14) {
+            // At the accessibility text sizes the words take the room.
+            if !dynamicTypeSize.isAccessibilitySize {
+                Artwork(url: session?.landscape(episode, width: 480), aspectRatio: 16.0 / 9.0, cornerRadius: 8, placeholder: "play.rectangle")
+                    .frame(width: 150)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 Text(model.upNextCountdown.map { "Next episode in \($0)" } ?? "Up Next")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · "))
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(2)
-                HStack {
+                    .lineLimit(dynamicTypeSize.lineLimit(2))
+                AdaptiveStack {
                     Button("Play Now") { Task { await model.play(episode) } }
                         .buttonStyle(.platformGlassProminent)
                         .accessibilityIdentifier("player.playNext")
@@ -524,7 +566,7 @@ private struct UpNextCard: View {
             }
         }
         .padding(12)
-        .frame(maxWidth: 440)
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 640 : 440)
         .platformGlass(in: .rect(cornerRadius: 20))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.upNext")

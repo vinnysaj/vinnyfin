@@ -179,6 +179,9 @@ private struct CircularView: View {
             }
             .gaugeStyle(.accessoryCircularCapacity)
             .widgetURL(download.title.openLink)
+            // What Siri says of the downloads, rather than a number beside an arrow.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(snapshot.summary)
         } else {
             ZStack {
                 AccessoryWidgetBackground()
@@ -188,6 +191,8 @@ private struct CircularView: View {
                 }
             }
             .widgetURL(snapshot.ready.first?.playLink)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(snapshot.summary)
         }
     }
 }

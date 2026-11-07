@@ -201,6 +201,7 @@ struct PlayElsewhereSheet: View {
                     .font(.title2)
                     .frame(width: 36)
                     .foregroundStyle(.tint)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(target.name).foregroundStyle(.primary)
                     Text(target.detail(signedInAs: accounts.account?.userName))
@@ -223,6 +224,7 @@ struct PlayElsewhereSheet: View {
                 .font(.title2)
                 .frame(width: 36)
                 .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name).foregroundStyle(.secondary)
                 Text("vinnyfin isn't open there. Open it to play on \(device.name).")

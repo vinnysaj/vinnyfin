@@ -40,6 +40,7 @@ struct PosterCard: View {
     let item: JellyfinItem
     var showsTitle = true
     @Environment(\.session) private var session
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
@@ -61,13 +62,12 @@ struct PosterCard: View {
                             .foregroundStyle(.white, .tint)
                             .font(.callout)
                             .padding(6)
-                            .accessibilityLabel("Downloaded")
                     }
                 }
                 #endif
             if showsTitle {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(item.name).font(.caption.weight(.medium)).lineLimit(1)
+                    Text(item.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
                     if let year = item.premiereYearText {
                         Text(year).font(.caption2).foregroundStyle(.secondary)
                     }
@@ -75,8 +75,19 @@ struct PosterCard: View {
             }
         }
         .contentShape(.rect)
-        .accessibilityElement(children: .combine)
+        // The name, then what the badges show: "Dune, 2021, watched, downloaded".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.name)
+        .accessibilityValue(details)
         .accessibilityIdentifier("poster.\(item.name)")
+    }
+
+    private var details: String {
+        var parts = [item.premiereYearText, WatchBadge.spokenState(of: item), item.progress.map(ProgressBar.spoken)]
+        #if !os(tvOS)
+        if item.progress == nil, downloads.isDownloaded(item.id) { parts.append("downloaded") }
+        #endif
+        return parts.compactMap(\.self).joined(separator: ", ")
     }
 }
 
@@ -84,6 +95,7 @@ struct PosterCard: View {
 /// TV's tint and accent color are white, which hid the badge's white text and checkmark.
 struct WatchBadge: View {
     let item: JellyfinItem
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         if item.isSeries, let unplayed = item.userData?.unplayedItemCount, unplayed > 0 {
@@ -92,15 +104,30 @@ struct WatchBadge: View {
                 .monospacedDigit()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(.blue, in: .capsule)
+                .background(fill, in: .capsule)
                 .foregroundStyle(.white)
+                .accessibilityLabel(Self.spokenState(of: item) ?? "")
         } else if item.isPlayed {
             Image(systemName: "checkmark.circle.fill")
                 .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, .blue)
+                .foregroundStyle(.white, fill)
                 .font(.callout)
                 .accessibilityLabel("Watched")
         }
+    }
+
+    /// Blue, deep enough with Increase Contrast that white reads on it at 4.5 to 1 whatever blue
+    /// the system has made it.
+    private var fill: Color {
+        contrast == .increased ? .blue.mix(with: .black, by: 0.4) : .blue
+    }
+
+    /// What the badge shows, as VoiceOver says it: "watched", "3 unwatched episodes"; nil for none.
+    static func spokenState(of item: JellyfinItem) -> String? {
+        if item.isSeries, let unplayed = item.userData?.unplayedItemCount, unplayed > 0 {
+            return unplayed == 1 ? "1 unwatched episode" : "\(unplayed) unwatched episodes"
+        }
+        return item.isPlayed ? "watched" : nil
     }
 }
 
@@ -116,7 +143,12 @@ struct ProgressBar: View {
         }
         .frame(height: 4)
         .accessibilityElement()
-        .accessibilityLabel("\(Int(fraction * 100))% watched")
+        .accessibilityLabel(Self.spoken(fraction))
+    }
+
+    /// "40% watched".
+    static func spoken(_ fraction: Double) -> String {
+        "\(min(1, max(0, fraction)).formatted(.percent.precision(.fractionLength(0)))) watched"
     }
 }
 
@@ -124,6 +156,7 @@ struct ProgressBar: View {
 struct LandscapeCard: View {
     let item: JellyfinItem
     @Environment(\.session) private var session
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -136,12 +169,15 @@ struct LandscapeCard: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.titleName)
                     .font(.subheadline.weight(.medium))
-                    .lineLimit(1)
-                Text(item.cardDetail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .lineLimit(dynamicTypeSize.lineLimit(1))
+                Text(item.cardDetail).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
             }
         }
         .contentShape(.rect)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(item.titleName)
+        .accessibilityValue([item.spokenCardDetail, item.progress.map(ProgressBar.spoken)].compactMap { $0?.isEmpty == false ? $0 : nil }
+            .joined(separator: ", "))
         .accessibilityIdentifier("card.\(item.name)")
     }
 }
@@ -178,8 +214,11 @@ struct Shelf<Item: Identifiable, Card: View>: View {
     let items: [Item]
     let cardWidth: CGFloat
     @ViewBuilder let card: (Item) -> Card
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityShowButtonShapes) private var showsButtonShapes
 
     var body: some View {
+        let cardWidth = dynamicTypeSize.cardWidth(cardWidth)
         VStack(alignment: .leading, spacing: 10) {
             header
                 .padding(.horizontal, Metrics.edge)
@@ -221,7 +260,8 @@ struct Shelf<Item: Identifiable, Card: View>: View {
         if let seeAll {
             NavigationLink(value: seeAll) {
                 HStack(spacing: 4) {
-                    text
+                    // Button Shapes marks the title as one, being plain text.
+                    text.underline(showsButtonShapes)
                     Image(systemName: "chevron.right")
                         .font(.title3.weight(.semibold))
                         .imageScale(.small)
@@ -285,54 +325,74 @@ private struct SeeAllCard: View {
 }
 #endif
 
-/// What a version offers: 4K, HDR, Dolby Vision, Atmos, surround.
+/// What a version offers: 4K, HDR, Dolby Vision, Atmos, surround, subtitles (SDH when they're
+/// for the deaf and hard of hearing) and audio description.
 struct MediaBadges: View {
     let source: MediaSource
+
+    struct Badge: Hashable {
+        /// As it shows: "SDH".
+        let text: String
+        /// As VoiceOver says it, when that's not the text: "Subtitles for the deaf and hard of hearing".
+        var spoken: String?
+    }
 
     var body: some View {
         let badges = Self.badges(for: source)
         if !badges.isEmpty {
             HStack(spacing: 6) {
                 ForEach(badges, id: \.self) { badge in
-                    Text(badge)
+                    Text(badge.text)
                         .font(.caption2.weight(.bold))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary, lineWidth: 1))
                         .foregroundStyle(.secondary)
+                        .accessibilityLabel(badge.spoken ?? badge.text)
                 }
             }
             .accessibilityElement(children: .combine)
         }
     }
 
-    static func badges(for source: MediaSource) -> [String] {
-        var badges: [String] = []
+    static func badges(for source: MediaSource) -> [Badge] {
+        var badges: [Badge] = []
         switch VersionTraits(source).resolutionClass {
-        case let height? where height >= 2160: badges.append("4K")
-        case let height? where height >= 1080: badges.append("HD")
+        case let height? where height >= 2160: badges.append(Badge(text: "4K"))
+        case let height? where height >= 1080: badges.append(Badge(text: "HD"))
         default: break
         }
         let range = source.videoStream?.videoRangeType?.uppercased() ?? ""
         let name = (source.name ?? "").uppercased()
         if range.hasPrefix("DOVI") || name.contains("DOLBY VISION") || name.contains(" DV") {
-            badges.append("Dolby Vision")
+            badges.append(Badge(text: "Dolby Vision"))
         } else if range.contains("HDR10PLUS") || name.contains("HDR10+") {
-            badges.append("HDR10+")
+            badges.append(Badge(text: "HDR10+", spoken: "HDR 10 plus"))
         } else if range.contains("HDR") || name.contains("HDR") {
-            badges.append("HDR")
+            badges.append(Badge(text: "HDR"))
         } else if range.contains("HLG") {
-            badges.append("HLG")
+            badges.append(Badge(text: "HLG"))
         }
         let audio = source.audioStreams.first
         let audioText = [audio?.audioSpatialFormat, audio?.profile, audio?.displayTitle, source.name].compactMap(\.self).joined(separator: " ").lowercased()
         if audioText.contains("atmos") {
-            badges.append("Atmos")
+            badges.append(Badge(text: "Atmos", spoken: "Dolby Atmos"))
         } else if audioText.contains("dts:x") || audioText.contains("dtsx") {
-            badges.append("DTS:X")
+            badges.append(Badge(text: "DTS:X", spoken: "DTS X"))
         }
         if let channels = audio?.channels, channels >= 6 {
-            badges.append(channels >= 8 ? "7.1" : "5.1")
+            badges.append(channels >= 8 ? Badge(text: "7.1", spoken: "7.1 surround") : Badge(text: "5.1", spoken: "5.1 surround"))
+        }
+        let subtitles = source.subtitleStreams.filter { $0.isForced != true }
+        let languages = Set(subtitles.compactMap(\.language).map { AppSettings.displayName(for: $0) }).sorted().formatted(.list(type: .and))
+        let inLanguages = languages.isEmpty ? "" : ", in \(languages)"
+        if subtitles.contains(where: { $0.isHearingImpaired == true }) {
+            badges.append(Badge(text: "SDH", spoken: "Subtitles for the deaf and hard of hearing\(inLanguages)"))
+        } else if !subtitles.isEmpty {
+            badges.append(Badge(text: "CC", spoken: "Subtitles\(inLanguages)"))
+        }
+        if source.audioStreams.contains(where: \.isAudioDescription) {
+            badges.append(Badge(text: "AD", spoken: "Audio description"))
         }
         return badges
     }

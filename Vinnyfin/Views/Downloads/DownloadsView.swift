@@ -49,6 +49,10 @@ struct DownloadsView: View {
                 BackgroundNotices(hasActiveDownloads: unfinished.contains { $0.status == .active })
                 #endif
                 spaceNotice
+                if isEmpty {
+                    Section { emptyState }
+                        .listRowBackground(Color.clear)
+                }
                 if !unfinished.isEmpty {
                     Section {
                         ForEach(unfinished) { job in JobRow(job: job, isFirst: job.id == unfinished.first?.id) }
@@ -91,23 +95,33 @@ struct DownloadsView: View {
                     Text(FinishedFiles.hint)
                 }
             }
-            .overlay {
-                if downloads.jobs.isEmpty, localLibrary.recents.isEmpty, localLibrary.folderFiles.isEmpty {
-                    ContentUnavailableView {
-                        Label("Nothing Downloaded", systemImage: "arrow.down.circle")
-                    } description: {
-                        Text("Download movies and episodes to watch them offline, or open a video file from this device.")
-                    } actions: {
-                        Button("Open a File…") { importing = true }
-                    }
-                }
-            }
             .navigationTitle("Downloads")
             .toolbar { toolbar }
             .fileImporter(isPresented: $importing, allowedContentTypes: Self.videoTypes, allowsMultipleSelection: false) { result in
                 openPicked(result)
             }
             .onAppear { localLibrary.scanFolder(excluding: Set(downloads.jobs.compactMap(\.savedPath))) }
+        }
+    }
+
+    private var isEmpty: Bool {
+        downloads.jobs.isEmpty && localLibrary.recents.isEmpty && localLibrary.folderFiles.isEmpty
+    }
+
+    /// In the list above the storage summary: over the list, in the middle of the screen, it would
+    /// run into the summary at the larger text sizes, and into Smart Downloads and notices at any.
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label("Nothing Downloaded", systemImage: "arrow.down.circle")
+        } description: {
+            Text("Download movies and episodes to watch them offline, or open a video file from this device.")
+        } actions: {
+            Button {
+                importing = true
+            } label: {
+                // A touch target's height: the link alone is a line of text high.
+                Text("Open a File…").frame(minHeight: 44).contentShape(.rect)
+            }
         }
     }
 
@@ -217,6 +231,7 @@ private struct JobRow: View {
     /// First in the list, so first to download.
     let isFirst: Bool
     @Environment(DownloadManager.self) private var downloads
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     /// The network or Only While Charging holds it back, which Download Now lifts.
     private var mayDownloadNow: Bool {
@@ -224,15 +239,15 @@ private struct JobRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        AdaptiveStack(spacing: 12) {
             OfflineArtwork(itemId: job.itemId, aspectRatio: job.isEpisode ? 16.0 / 9.0 : 2.0 / 3.0)
                 .frame(width: job.isEpisode ? 96 : 44)
             VStack(alignment: .leading, spacing: 4) {
-                Text(job.title).font(.headline).lineLimit(2)
+                Text(job.title).font(.headline).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 if let subtitle = job.subtitle {
                     Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
                 }
-                Text(job.versionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(job.versionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                 Group {
                     JobProgress(job: job)
                     JobStatusLine(job: job)
@@ -265,9 +280,7 @@ private struct JobRow: View {
             if mayDownloadNow {
                 Button("Download Now", systemImage: "arrow.down.to.line") { downloads.downloadNow(job.id) }
             }
-            if !isFirst {
-                Button("Download Next", systemImage: "text.line.first.and.arrowtriangle.forward") { downloads.downloadNext(job.id) }
-            }
+            downloadNext
             switch job.status {
             case .active:
                 Button("Pause", systemImage: "pause") { downloads.pause(job.id) }
@@ -275,12 +288,28 @@ private struct JobRow: View {
                 Button("Resume", systemImage: "play") { downloads.resume(job.id) }
             case .failed:
                 Button("Retry", systemImage: "arrow.clockwise") { downloads.resume(job.id) }
-                Button("Start Over", systemImage: "arrow.counterclockwise") { downloads.restart(job.id) }
+                startOver
             case .completed:
                 EmptyView()
             }
             Button("Cancel Download", systemImage: "xmark", role: .destructive) { downloads.remove(job.id) }
         }
+        // What only the long press offers, among the swipe actions VoiceOver, Voice Control and
+        // Switch Control already have; Download Next stands in for dragging it to the top.
+        .accessibilityActions {
+            downloadNext
+            if job.status == .failed { startOver }
+        }
+    }
+
+    @ViewBuilder private var downloadNext: some View {
+        if !isFirst {
+            Button("Download Next", systemImage: "text.line.first.and.arrowtriangle.forward") { downloads.downloadNext(job.id) }
+        }
+    }
+
+    private var startOver: some View {
+        Button("Start Over", systemImage: "arrow.counterclockwise") { downloads.restart(job.id) }
     }
 }
 
@@ -291,36 +320,43 @@ private struct DownloadedRow: View {
     @Environment(WatchHistory.self) private var history
     @Environment(PlayerCoordinator.self) private var player
     @Environment(\.openURL) private var openURL
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var confirmingDelete = false
 
     var body: some View {
         Button {
             player.play(PlaybackRequest(source: .item(id: job.itemId, mediaSourceId: job.mediaSourceId), title: job.title))
         } label: {
-            HStack(spacing: 12) {
+            AdaptiveStack(spacing: 12) {
                 OfflineArtwork(itemId: job.itemId, aspectRatio: job.isEpisode ? 16.0 / 9.0 : 2.0 / 3.0)
                     .frame(width: job.isEpisode ? 110 : 50)
                     .overlay(alignment: .bottom) {
                         if let progress { ProgressBar(fraction: progress).padding(4) }
                     }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(job.isEpisode ? [job.item?.episodeCode, job.title].compactMap(\.self).joined(separator: " · ") : job.title)
-                        .font(.body.weight(.medium))
-                        .lineLimit(2)
-                    Text([job.versionLabel, DownloadManager.bytes(job.storedBytes)].joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    if isWatched {
-                        Label("Watched", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.tint)
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(job.isEpisode ? [job.item?.episodeCode, job.title].compactMap(\.self).joined(separator: " · ") : job.title)
+                            .font(.body.weight(.medium))
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                            .accessibilityLabel(job.isEpisode ? [job.item?.spokenEpisodeCode, job.title].compactMap(\.self).joined(separator: ", ")
+                                                              : job.title)
+                        Text([job.versionLabel, DownloadManager.bytes(job.storedBytes)].joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                        if isWatched {
+                            Label("Watched", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.tint)
+                        }
                     }
+                    Spacer(minLength: 0)
+                    Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(.tint)
+                        .accessibilityHidden(true)
                 }
-                Spacer(minLength: 0)
-                Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(.tint)
             }
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .accessibilityHint("Plays it")
         .accessibilityIdentifier("downloaded.\(job.title)")
         .swipeActions(edge: .trailing) {
             // Not the destructive role: that takes the row out of the list at once, and the
@@ -329,17 +365,27 @@ private struct DownloadedRow: View {
         }
         .contextMenu {
             if let file = downloads.savedFileURL(of: job) {
-                Button("Show in \(FinishedFiles.browser)", systemImage: "folder") {
-                    openURL(FinishedFiles.browserURL(for: file.deletingLastPathComponent()))
-                }
+                showInFiles(file)
                 ShareLink(item: file)
             }
             Button("Delete Download", systemImage: "trash", role: .destructive) { confirmingDelete = true }
+        }
+        // What only the long press offers, beside the swipe's Delete that VoiceOver, Voice Control
+        // and Switch Control already have. Sharing needs the menu's own sheet, which a long press
+        // still opens for them: VoiceOver's double-tap held, Voice Control's "Long press".
+        .accessibilityActions {
+            if let file = downloads.savedFileURL(of: job) { showInFiles(file) }
         }
         .confirmationDialog("Delete \(job.title)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete Download", role: .destructive) { downloads.deleteDownloads(ofItem: job.itemId) }
         } message: {
             Text("This deletes \(job.savedPath ?? "the file") from \(FinishedFiles.place).")
+        }
+    }
+
+    private func showInFiles(_ file: URL) -> some View {
+        Button("Show in \(FinishedFiles.browser)", systemImage: "folder") {
+            openURL(FinishedFiles.browserURL(for: file.deletingLastPathComponent()))
         }
     }
 

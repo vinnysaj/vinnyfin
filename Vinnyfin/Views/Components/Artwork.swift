@@ -17,6 +17,9 @@ struct Artwork: View {
     var cornerRadius: CGFloat = 10
     var placeholder = "film"
     var contentMode = ContentMode.fill
+    /// What the picture says, for one that stands for words, as a title's logo stands for its
+    /// name; nil hides a picture that's only decoration from VoiceOver.
+    var label: String?
     /// How many times the image has been loaded again since `url` was set.
     @State private var retries = 0
     /// How long to wait before loading it again, after a failure worth trying again.
@@ -55,7 +58,12 @@ struct Artwork: View {
             .id(retries)
         }
         .clipShape(.rect(cornerRadius: cornerRadius))
-        .accessibilityHidden(true)
+        // Pictures keep their colors under Smart Invert.
+        .accessibilityIgnoresInvertColors()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label ?? "")
+        .accessibilityAddTraits(label == nil ? [] : .isImage)
+        .accessibilityHidden(label == nil)
         .task(id: retryDelay) {
             guard let retryDelay else { return }
             do {

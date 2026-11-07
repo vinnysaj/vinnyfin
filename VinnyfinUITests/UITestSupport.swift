@@ -191,7 +191,10 @@ extension XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         #else
         tap(app.buttons["home.settings"])
-        tap(app.buttons["settings.signOut"])
+        // Down the list to it, past the screen's bottom at the largest text sizes.
+        let signOut = app.buttons["settings.signOut"]
+        for _ in 0..<8 where !signOut.waitForExistence(timeout: 2) { app.swipeUp() }
+        tap(signOut)
         tap(confirm)
         #endif
     }
@@ -222,5 +225,48 @@ extension XCTestCase {
         XCTAssertTrue(element.wait(for: \.isEnabled, toEqual: true, timeout: uiTimeout), "\(element) never became enabled", file: file, line: line)
         element.tap()
     }
+
+    /// A tab: a button in the tab bar, a row in iPad's sidebar, or a button in the bar down the
+    /// side of iPhone Duo's outer display, which isn't a tab bar to XCUITest. A tab reads its
+    /// badge's count after its name. Not the back button to the tab's first screen, which can
+    /// have the same name.
+    @MainActor
+    func tab(_ name: String, in app: XCUIApplication) -> XCUIElement {
+        let named = NSPredicate(format: "label == %@ OR label BEGINSWITH %@", name, name + ", ")
+        let places = [app.tabBars.buttons.matching(named).firstMatch, app.cells.matching(named).firstMatch,
+                      app.buttons.matching(named).matching(NSPredicate(format: "identifier != 'BackButton'")).firstMatch]
+        let deadline = Date.now.addingTimeInterval(uiTimeout)
+        while Date.now < deadline {
+            if let tab = places.first(where: \.exists) { return tab }
+            RunLoop.current.run(until: .now.addingTimeInterval(0.25))
+        }
+        return places[0]
+    }
     #endif
+}
+
+/// The position and length in seconds that the player's timeline reads out, as VoiceOver says
+/// them: "4 minutes, 9 seconds of 1 hour, 30 minutes", with the chapter after when it has one.
+func timelinePosition(_ value: String?) -> (time: Double, duration: Double)? {
+    // The first " of " only: a chapter's name may have its own.
+    guard let value, let separator = value.range(of: " of ") else { return nil }
+    let sides = [value[..<separator.lowerBound], value[separator.upperBound...]]
+    func seconds(_ text: Substring) -> Double {
+        let units = ["hour": 3600.0, "minute": 60.0, "second": 1.0]
+        let words = text.split { $0 == " " || $0 == "," }
+        return zip(words, words.dropFirst()).reduce(0) { total, pair in
+            guard let count = Double(pair.0), let unit = units.first(where: { pair.1.hasPrefix($0.key) })?.value else { return total }
+            return total + count * unit
+        }
+    }
+    let duration = seconds(sides[1])
+    guard duration > 0 else { return nil }
+    return (seconds(sides[0]), duration)
+}
+
+/// A position in seconds as the timeline shows it on screen: "4:09", "1:04:09".
+func clockText(_ seconds: Double) -> String {
+    let total = Int(seconds)
+    let (hours, minutes, rest) = (total / 3600, total / 60 % 60, total % 60)
+    return hours > 0 ? String(format: "%d:%02d:%02d", hours, minutes, rest) : String(format: "%d:%02d", minutes, rest)
 }

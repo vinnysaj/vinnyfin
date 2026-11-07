@@ -7,6 +7,9 @@ struct RemoteScreen: View {
     @Environment(RemoteControl.self) private var remote
     @Environment(\.session) private var session
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// Play and Pause, larger than the buttons beside it and growing as they do.
+    @ScaledMetric(relativeTo: .title) private var playPauseSize: CGFloat = 44
     @State private var scrubPosition: Double?
 
     var body: some View {
@@ -51,6 +54,7 @@ struct RemoteScreen: View {
                     Text(item.isEpisode ? item.name : item.titleWithYear)
                         .font(.title2.weight(.semibold))
                         .multilineTextAlignment(.center)
+                        .accessibilityAddTraits(.isHeader)
                     if let subtitle = PlaybackResolver.subtitle(item) {
                         Text(subtitle).foregroundStyle(.secondary)
                     }
@@ -108,7 +112,7 @@ struct RemoteScreen: View {
                     .disabled(remote.isStarting || remote.duration == 0)
                     .accessibilityElement()
                     .accessibilityLabel("Position")
-                    .accessibilityValue("\(Scrubber.format(position)) of \(Scrubber.format(remote.duration))")
+                    .accessibilityValue(SpokenTime.position(position, of: remote.duration))
                     .accessibilityAdjustableAction { direction in
                         switch direction {
                         case .increment: remote.skip(by: RemoteCommand.skipInterval)
@@ -129,11 +133,12 @@ struct RemoteScreen: View {
     }
 
     private func transport(_ target: RemoteControl.Target) -> some View {
-        HStack(spacing: 36) {
+        // Closer together at the accessibility sizes, where the buttons have grown into the space.
+        HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 16 : 36) {
             Button("Back 10 Seconds", systemImage: "gobackward.10") { remote.skip(by: -RemoteCommand.skipInterval) }
                 .font(.title)
             Button(remote.isPaused ? "Play" : "Pause", systemImage: remote.isPaused ? "play.fill" : "pause.fill") { remote.togglePause() }
-                .font(.system(size: 44))
+                .font(.system(size: playPauseSize))
                 .contentTransition(.symbolEffect(.replace))
                 .accessibilityIdentifier("remote.playPause")
             Button("Forward 10 Seconds", systemImage: "goforward.10") { remote.skip(by: RemoteCommand.skipInterval) }
@@ -219,6 +224,7 @@ struct RemoteMiniPlayer: View {
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "tv").foregroundStyle(.tint)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(remote.item?.name ?? "Starting…").font(.subheadline.weight(.semibold)).lineLimit(1)
                             Text("On \(target.name)").font(.caption).foregroundStyle(.secondary).lineLimit(1)

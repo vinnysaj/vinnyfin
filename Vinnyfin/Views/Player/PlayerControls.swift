@@ -25,6 +25,7 @@ struct PlayerControls: View {
     let playElsewhere: (() -> Void)?
     var isBelowFold = false
     @Environment(SharePlay.self) private var sharePlay
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #if os(tvOS)
     /// The controls the remote moves between. Moving counts as using them, so they stay up.
     private enum Control: Hashable {
@@ -121,60 +122,88 @@ struct PlayerControls: View {
     // MARK: Top
 
     private var topBar: some View {
-        HStack(alignment: .top, spacing: 14) {
-            #if !os(tvOS)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.headline)
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.platformGlass)
-            .buttonBorderShape(.circle)
-            .controlSize(.large)
-            .accessibilityLabel("Close")
-            .accessibilityIdentifier("player.close")
-            #endif
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.title).font(.headline).lineLimit(1)
-                if let subtitle = model.subtitle {
-                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 14) {
+                #if !os(tvOS)
+                closeButton
+                #endif
+                if !isTitleOwnRow { titleBlock.padding(.top, 6) }
+                Spacer()
+                HStack(alignment: .top, spacing: 14) {
+                    FormatBadge(model: model).padding(.top, 6)
+                    if let playElsewhere {
+                        Button {
+                            playElsewhere()
+                            onInteraction()
+                        } label: {
+                            Image(systemName: PlayElsewhereSheet.symbol(sharePlay)).font(.headline).frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.platformGlass)
+                        .buttonBorderShape(.circle)
+                        .controlSize(.large)
+                        .accessibilityLabel(PlayElsewhereSheet.title)
+                        .accessibilityShowsLargeContentViewer()
+                        .accessibilityIdentifier("player.playElsewhere")
+                    }
+                    #if os(iOS) || os(macOS)
+                    RoutePicker()
+                    if let pictureInPicture {
+                        Button(action: pictureInPicture) {
+                            Image(systemName: "pip.enter").font(.headline).frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.platformGlass)
+                        .buttonBorderShape(.circle)
+                        .controlSize(.large)
+                        .accessibilityLabel("Picture in Picture")
+                        .accessibilityShowsLargeContentViewer()
+                    }
+                    #endif
+                    #if os(iOS)
+                    // Last, where it shows by itself as the phone turns.
+                    RotateButton(onUse: onInteraction)
+                    #endif
                 }
+                .dynamicTypeSize(...Self.largestControlSize)
             }
-            .padding(.top, 6)
-            Spacer()
-            FormatBadge(model: model).padding(.top, 6)
-            if let playElsewhere {
-                Button {
-                    playElsewhere()
-                    onInteraction()
-                } label: {
-                    Image(systemName: PlayElsewhereSheet.symbol(sharePlay)).font(.headline).frame(width: 22, height: 22)
-                }
-                .buttonStyle(.platformGlass)
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
-                .accessibilityLabel(PlayElsewhereSheet.title)
-                .accessibilityIdentifier("player.playElsewhere")
-            }
-            #if os(iOS) || os(macOS)
-            RoutePicker()
-            if let pictureInPicture {
-                Button(action: pictureInPicture) {
-                    Image(systemName: "pip.enter").font(.headline).frame(width: 22, height: 22)
-                }
-                .buttonStyle(.platformGlass)
-                .buttonBorderShape(.circle)
-                .controlSize(.large)
-                .accessibilityLabel("Picture in Picture")
-            }
-            #endif
-            #if os(iOS)
-            // Last, where it shows by itself as the phone turns.
-            RotateButton(onUse: onInteraction)
-            #endif
+            if isTitleOwnRow { titleBlock }
         }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topBarBottom = $0 }
     }
+
+    /// Like the system player's, the buttons keep their size past the default text size, where a
+    /// row of them would run off the screen; the Large Content Viewer shows each one large.
+    private static let largestControlSize = DynamicTypeSize.large
+
+    /// At the accessibility sizes the title gets a row of its own, under the buttons, rather than
+    /// a word or two between them.
+    private var isTitleOwnRow: Bool { dynamicTypeSize.isAccessibilitySize }
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(model.title).font(.headline).lineLimit(dynamicTypeSize.lineLimit(1))
+                .accessibilityAddTraits(.isHeader)
+            if let subtitle = model.subtitle {
+                Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
+            }
+        }
+    }
+
+    #if !os(tvOS)
+    private var closeButton: some View {
+        Button(action: onClose) {
+            Image(systemName: "xmark")
+                .font(.headline)
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.platformGlass)
+        .buttonBorderShape(.circle)
+        .controlSize(.large)
+        .accessibilityLabel("Close")
+        .accessibilityShowsLargeContentViewer()
+        .accessibilityIdentifier("player.close")
+        .dynamicTypeSize(...Self.largestControlSize)
+    }
+    #endif
 
     // MARK: Middle
 
@@ -189,7 +218,7 @@ struct PlayerControls: View {
         #endif
         return HStack(spacing: 44 * scale) {
             transportButton("gobackward.10", label: "Back 10 Seconds", size: 30 * scale) { model.skip(by: -PlayerModel.skipInterval) }
-            transportButton(playPauseSymbol, label: model.isPlaying ? "Pause" : "Play", size: 44 * scale, showsProgress: isWaiting) {
+            transportButton(playPauseSymbol, label: playPauseLabel, size: 44 * scale, showsProgress: isWaiting) {
                 model.togglePlayPause()
             }
             .accessibilityIdentifier("player.playPause")
@@ -217,6 +246,7 @@ struct PlayerControls: View {
         .buttonStyle(.platformGlass)
         .buttonBorderShape(.circle)
         .accessibilityLabel(label)
+        .accessibilityShowsLargeContentViewer()
     }
     #endif
 
@@ -225,6 +255,13 @@ struct PlayerControls: View {
         switch model.status {
         case .preparing, .loading, .buffering: true
         default: false
+        }
+    }
+
+    private var playPauseLabel: String {
+        switch model.status {
+        case .ended: "Play Again"
+        default: model.isPlaying ? "Pause" : "Play"
         }
     }
 
@@ -253,7 +290,7 @@ struct PlayerControls: View {
                 } label: {
                     Image(systemName: playPauseSymbol)
                 }
-                .accessibilityLabel(model.isPlaying ? "Pause" : "Play")
+                .accessibilityLabel(playPauseLabel)
                 .focused($focusedControl, equals: .playPause)
                 #endif
                 trackMenus
@@ -268,6 +305,7 @@ struct PlayerControls: View {
                     }
                     .buttonStyle(.platformGlass)
                     .accessibilityHint(next.name)
+                    .accessibilityShowsLargeContentViewer()
                     #if os(tvOS)
                     .focused($focusedControl, equals: .next)
                     #endif
@@ -281,12 +319,14 @@ struct PlayerControls: View {
                 }
                 .buttonStyle(.platformGlass)
                 .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
+                .accessibilityShowsLargeContentViewer()
                 #endif
                 #if os(visionOS)
                 CinemaButton(onUse: onInteraction)
                 #endif
             }
             .controlSize(controlSize)
+            .dynamicTypeSize(...Self.largestControlSize)
             #if os(visionOS)
             // In the middle of the row, whatever is at its ends.
             .overlay { transport.controlSize(controlSize) }
@@ -304,16 +344,19 @@ struct PlayerControls: View {
     }
 
     @ViewBuilder private var trackMenus: some View {
-        panelButton(.audio, identifier: "player.audio")
+        panelButton(.audio, identifier: "player.audio", value: model.audioOptions.first { $0.id == model.selectedAudio }?.title)
             .disabled(model.audioOptions.isEmpty)
-        panelButton(.subtitles, identifier: "player.subtitles", filled: model.selectedSubtitle != nil)
-        panelButton(.speed, identifier: "player.speed")
+        panelButton(.subtitles, identifier: "player.subtitles", filled: model.selectedSubtitle != nil,
+                    value: model.subtitleOptions.first { $0.id == model.selectedSubtitle }?.title ?? "Off")
+        panelButton(.speed, identifier: "player.speed", value: model.rate == 1 ? "Normal" : "\(model.rate.formatted())×")
         if !model.chapters.isEmpty {
-            panelButton(.chapters, identifier: "player.chapters")
+            panelButton(.chapters, identifier: "player.chapters",
+                        value: ChapterMark.current(in: model.chapters, at: model.clock.time)?.name)
         }
     }
 
-    private func panelButton(_ kind: PlayerPanel, identifier: String, filled: Bool = false) -> some View {
+    /// `value` is what's chosen, which VoiceOver says after the button's name.
+    private func panelButton(_ kind: PlayerPanel, identifier: String, filled: Bool = false, value: String?) -> some View {
         Button {
             panel = panel == kind ? nil : kind
             onInteraction()
@@ -321,6 +364,8 @@ struct PlayerControls: View {
             Label(kind.title, systemImage: filled ? kind.symbol + ".fill" : kind.symbol)
         }
         .buttonStyle(.platformGlass)
+        .accessibilityValue(value ?? "")
+        .accessibilityShowsLargeContentViewer()
         #if os(tvOS)
         .focused($focusedControl, equals: .panel(kind))
         #endif
@@ -342,6 +387,7 @@ private struct FormatBadge: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .platformGlass(in: .capsule)
+                .accessibilityShowsLargeContentViewer()
                 .accessibilityIdentifier("player.format")
         }
     }
@@ -446,7 +492,7 @@ struct Scrubber: View {
         #endif
         .accessibilityElement()
         .accessibilityLabel("Timeline")
-        .accessibilityValue("\(Self.format(time)) of \(Self.format(duration))")
+        .accessibilityValue(spokenPosition(time, of: duration))
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: model.skip(by: PlayerModel.skipInterval)
@@ -455,6 +501,13 @@ struct Scrubber: View {
             }
         }
         .accessibilityIdentifier("player.timeline")
+    }
+
+    /// Where it is, with the chapter when there are chapters.
+    private func spokenPosition(_ time: Double, of duration: Double) -> String {
+        let position = SpokenTime.position(time, of: duration)
+        guard let chapter = ChapterMark.current(in: model.chapters, at: time) else { return position }
+        return "\(position), \(chapter.name)"
     }
 
     private var barHeight: CGFloat {

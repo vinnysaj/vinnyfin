@@ -103,12 +103,89 @@ struct TrackChooserTests {
         #expect(TrackChooser.subtitle(from: [french], audioLanguage: "eng", mode: .always, language: "eng") == nil)
     }
 
+    @Test func closedCaptionsShowCaptionsFirstWhateverTheMode() {
+        let tracks = [english, englishSDH, englishForced, french]
+        #expect(TrackChooser.subtitle(from: tracks, audioLanguage: "eng", mode: .off, language: "eng", captions: true) == 4)
+        #expect(TrackChooser.subtitle(from: tracks, audioLanguage: "eng", mode: .forcedOnly, language: "eng", captions: true) == 4)
+        #expect(TrackChooser.subtitle(from: [englishForced, english], audioLanguage: "eng", mode: .off, language: "eng", captions: true) == 3)
+    }
+
+    @Test func closedCaptionsFallBackToTheAudiosLanguage() {
+        let frenchSDH = TrackChooser.Candidate(id: 7, language: "fra", isForced: false, isHearingImpaired: true, isDefault: false)
+        #expect(TrackChooser.subtitle(from: [french, frenchSDH], audioLanguage: "fre", mode: .off, language: "eng", captions: true) == 7)
+        #expect(TrackChooser.subtitle(from: [french], audioLanguage: "jpn", mode: .always, language: "eng", captions: true) == nil)
+    }
+
     @Test func matchesLanguageTagsInAnyForm() {
         #expect(AppSettings.sameLanguage("eng", "en-US"))
         #expect(AppSettings.sameLanguage("fra", "fre"))
         #expect(AppSettings.sameLanguage("de", "ger"))
         #expect(!AppSettings.sameLanguage("eng", "spa"))
         #expect(!AppSettings.sameLanguage(nil, "eng"))
+    }
+}
+
+struct AudioDescriptionTests {
+    let main = TrackChooser.Candidate(id: 1, language: "eng", isForced: false, isHearingImpaired: false, isDefault: true)
+    let described = TrackChooser.Candidate(id: 2, language: "eng", isForced: false, isHearingImpaired: false, isDefault: false,
+                                           name: "Audio Description", describesVideo: true)
+    let spanish = TrackChooser.Candidate(id: 3, language: "spa", isForced: false, isHearingImpaired: false, isDefault: false)
+
+    @Test func audioDescriptionsPlayTheDescriptionInTheLanguageThatPlays() {
+        #expect(TrackChooser.audio(from: [main, described, spanish], language: "", defaultId: 1, descriptions: true) == 2)
+        #expect(TrackChooser.audio(from: [main, described, spanish], language: "eng", defaultId: 3, descriptions: true) == 2)
+    }
+
+    @Test func withoutADescriptionInTheLanguageTheMainMixPlays() {
+        #expect(TrackChooser.audio(from: [main, described, spanish], language: "spa", defaultId: 1, descriptions: true) == 3)
+        #expect(TrackChooser.audio(from: [main, spanish], language: "", defaultId: 1, descriptions: true) == nil)
+    }
+
+    @Test func theAudioLanguagePassesOverADescriptionListedFirst() {
+        #expect(TrackChooser.audio(from: [described, main], language: "eng", defaultId: 1, descriptions: false) == 1)
+        #expect(TrackChooser.audio(from: [described, main], language: "", defaultId: 1, descriptions: false) == nil)
+    }
+
+    @Test func anotherVersionKeepsTheDescription() {
+        let otherMain = TrackChooser.Candidate(id: 5, language: "eng", isForced: false, isHearingImpaired: false, isDefault: true)
+        let otherDescribed = TrackChooser.Candidate(id: 6, language: "eng", isForced: false, isHearingImpaired: false, isDefault: false,
+                                                    describesVideo: true)
+        #expect(TrackChooser.same(as: described, in: [otherMain, otherDescribed]) == 6)
+        #expect(TrackChooser.same(as: main, in: [otherDescribed, otherMain]) == 5)
+    }
+
+    @Test func titlesNameAudioDescriptions() {
+        for title in ["English AD", "Audio Description", "Descriptive Audio - English", "DVS", "Audiodescripción", "Deutsch Audiodeskription",
+                      "Français (audiodescription)", "Svenska synstolkning"] {
+            #expect(AccessibleMedia.namesAudioDescription(title), "\(title)")
+        }
+        for title in ["English - Dolby Digital - 5.1 - Default", "Commentary", "Arabic", "Headphones", ""] {
+            #expect(!AccessibleMedia.namesAudioDescription(title), "\(title)")
+        }
+        #expect(!AccessibleMedia.namesAudioDescription(nil))
+    }
+
+    @Test func streamsCarryTheirTitlesDescription() {
+        var stream = MediaStream(type: "Audio")
+        stream.index = 2
+        stream.title = "English AD"
+        #expect(stream.isAudioDescription)
+        #expect(TrackChooser.Candidate(stream)?.describesVideo == true)
+        var subtitle = MediaStream(type: "Subtitle")
+        subtitle.title = "English AD"
+        #expect(!subtitle.isAudioDescription)
+    }
+
+    @Test func episodeCodesAreSaidInWords() {
+        var episode = JellyfinItem(id: "e", name: "Pilot", type: "Episode")
+        episode.parentIndexNumber = 1
+        episode.indexNumber = 2
+        #expect(episode.spokenEpisodeCode == "Season 1, Episode 2")
+        episode.indexNumberEnd = 3
+        #expect(episode.spokenEpisodeCode == "Season 1, Episodes 2 to 3")
+        episode.parentIndexNumber = 0
+        episode.indexNumberEnd = nil
+        #expect(episode.spokenEpisodeCode == "Specials, Episode 2")
     }
 }
 

@@ -32,7 +32,7 @@ struct SearchView: View {
                               items: episodes, cardWidth: Metrics.landscapeWidth) { item in
                             NavigationLink(value: item) { LandscapeCard(item: item) }
                                 .buttonStyle(.artwork)
-                                .contextMenu { ItemContextMenu(item: item, onChange: replace) }
+                                .titleMenu(item, onChange: replace)
                         }
                     }
                 }
@@ -70,6 +70,17 @@ struct SearchView: View {
         }
     }
 
+    /// What was found, for VoiceOver, whose cursor stays in the search field as results come in:
+    /// "3 movies, 1 show and 12 episodes", or "No results".
+    private var resultsSummary: String {
+        func count(_ found: [JellyfinItem], _ one: String, _ many: String) -> String? {
+            found.isEmpty ? nil : found.count == 1 ? "1 \(one)" : "\(found.count) \(many)"
+        }
+        let counts = [count(movies, "movie", "movies"), count(shows, "show", "shows"), count(episodes, "episode", "episodes")]
+            .compactMap(\.self)
+        return counts.isEmpty ? "No results" : counts.formatted(.list(type: .and))
+    }
+
     /// Swaps in a result whose watch state changed.
     private func replace(_ item: JellyfinItem) {
         let swap = { (result: JellyfinItem) in result.id == item.id ? item : result }
@@ -83,7 +94,7 @@ struct SearchView: View {
             Shelf(title: list.title, seeAll: list, items: items, cardWidth: Metrics.posterWidth) { item in
                 NavigationLink(value: item) { PosterCard(item: item) }
                     .buttonStyle(.artwork)
-                    .contextMenu { ItemContextMenu(item: item, onChange: replace) }
+                    .titleMenu(item, onChange: replace)
             }
         }
     }
@@ -132,8 +143,12 @@ struct SearchView: View {
             self.episodes = try await episodes.items
             searched = term
             searchError = nil
+            announce(resultsSummary)
         } catch {
-            if !error.isCancellation { searchError = error.localizedDescription }
+            if !error.isCancellation {
+                searchError = error.localizedDescription
+                announce("Search failed. \(error.localizedDescription)")
+            }
         }
     }
 }

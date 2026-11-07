@@ -7,6 +7,8 @@ struct AlphabetIndex: View {
     let onSelect: (String) -> Void
 
     @State private var active: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
     private let letters = LibraryIndex.alphabet
 
     var body: some View {
@@ -20,7 +22,7 @@ struct AlphabetIndex: View {
                     Text(letter)
                         .font(.system(size: 18, weight: .semibold))
                         .frame(width: 44, height: 25)
-                        .foregroundStyle(available.contains(letter) ? .primary : .tertiary)
+                        .foregroundStyle(available.contains(letter) ? .primary : dimmed)
                 }
                 .buttonStyle(IndexLetterStyle())
                 .accessibilityIdentifier("index.\(letter)")
@@ -35,11 +37,13 @@ struct AlphabetIndex: View {
                     Text(letter)
                         .font(.system(size: rowHeight - 4, weight: .semibold, design: .rounded))
                         .frame(width: 22, height: rowHeight)
-                        .foregroundStyle(available.contains(letter) ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .foregroundStyle(available.contains(letter) ? AnyShapeStyle(.tint) : AnyShapeStyle(dimmed))
                         .accessibilityElement()
                         .accessibilityLabel(letter == "#" ? "Numbers and symbols" : letter)
                         .accessibilityAddTraits(.isButton)
                         .accessibilityAction { select(letter) }
+                        // Too small to grow with the text, its letter shows large when held.
+                        .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("index.\(letter)")
                 }
             }
@@ -65,7 +69,7 @@ struct AlphabetIndex: View {
                         .frame(width: 72, height: 72)
                         .platformGlass(in: .rect(cornerRadius: 18))
                         .offset(x: -48)
-                        .transition(.scale.combined(with: .opacity))
+                        .motionTransition(.scale.combined(with: .opacity), reduceMotion: reduceMotion)
                         .allowsHitTesting(false)
                 }
             }
@@ -78,6 +82,11 @@ struct AlphabetIndex: View {
         #endif
     }
 
+    /// A letter without titles: faint, or with Increase Contrast, readable still.
+    private var dimmed: HierarchicalShapeStyle {
+        contrast == .increased ? .secondary : .tertiary
+    }
+
     private func select(_ letter: String) {
         guard letter != active else { return }
         active = letter
@@ -88,12 +97,13 @@ struct AlphabetIndex: View {
 #if os(tvOS)
 private struct IndexLetterStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(isFocused ? AnyShapeStyle(.white) : AnyShapeStyle(.clear), in: .rect(cornerRadius: 8))
             .foregroundStyle(isFocused ? .black : .primary)
-            .scaleEffect(isFocused ? 1.25 : 1)
+            .scaleEffect(isFocused && !reduceMotion ? 1.25 : 1)
             .animation(.easeOut(duration: 0.15), value: isFocused)
     }
 }

@@ -134,12 +134,9 @@ final class ContinuityUITests: XCTestCase {
         XCTAssertTrue(app.buttons["home.settings"].waitForExistence(timeout: timeout), "Signing in again didn't open Home")
     }
 
-    /// "1:05 of 10:00" as 65.
+    /// "1 minute, 5 seconds of 10 minutes" as 65.
     private static func seconds(_ value: String?) -> Double? {
-        guard let first = value?.components(separatedBy: " of ").first else { return nil }
-        let parts = first.split(separator: ":").compactMap { Double($0) }
-        guard !parts.isEmpty else { return nil }
-        return parts.reduce(0) { $0 * 60 + $1 }
+        timelinePosition(value)?.time
     }
 }
 #endif

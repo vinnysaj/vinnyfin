@@ -377,16 +377,20 @@ struct PlaybackResolver {
         }
     }
 
+    /// The audio stream the audio language and Audio Descriptions ask for, from the server's list
+    /// of streams; nil leaves it to the version's default.
     static func preferredAudioIndex(in source: MediaSource, language: String) -> Int? {
-        guard !language.isEmpty else { return nil }
-        return source.audioStreams.first { AppSettings.sameLanguage($0.language, language) }?.index
+        TrackChooser.audio(from: source.audioStreams.compactMap(TrackChooser.Candidate.init), language: language,
+                           defaultId: source.defaultAudioStreamIndex, descriptions: AccessibleMedia.prefersAudioDescriptions)
     }
 
-    /// The subtitle stream the subtitle setting asks for, from the server's list of streams.
+    /// The subtitle stream the subtitle setting and Closed Captions + SDH ask for, from the
+    /// server's list of streams.
     static func preferredSubtitleIndex(in source: MediaSource, audioIndex: Int?, settings: AppSettings) -> Int? {
         let audio = source.audioStreams.first { $0.index == (audioIndex ?? source.defaultAudioStreamIndex) } ?? source.audioStreams.first
         return TrackChooser.subtitle(from: source.subtitleStreams.compactMap(TrackChooser.Candidate.init), audioLanguage: audio?.language,
-                                     mode: settings.subtitleMode, language: settings.subtitleLanguage)
+                                     mode: settings.subtitleMode, language: settings.subtitleLanguage,
+                                     captions: AccessibleMedia.prefersCaptions)
     }
 
     static func subtitle(_ item: JellyfinItem) -> String? {
@@ -399,8 +403,9 @@ struct PlaybackResolver {
     }
 }
 
-/// Picks subtitle tracks for the subtitle setting, and finds a track chosen in one version of a
-/// title among another's. Works on the server's streams and on the player's tracks alike.
+/// Picks audio and subtitle tracks for the language settings and the system's Accessibility
+/// settings, and finds a track chosen in one version of a title among another's. Works on the
+/// server's streams and on the player's tracks alike.
 nonisolated enum TrackChooser {
     struct Candidate: Equatable, Sendable {
         let id: Int
@@ -410,6 +415,8 @@ nonisolated enum TrackChooser {
         let isDefault: Bool
         /// The title the file gives the track, such as "Commentary".
         var name: String?
+        /// An audio description, narrating what's on screen.
+        var describesVideo = false
     }
 
     /// The candidate that is the same choice as `chosen`, made in another version of the title,
@@ -419,7 +426,9 @@ nonisolated enum TrackChooser {
         let sameLanguage = candidates.filter {
             AppSettings.sameLanguage($0.language, chosen.language) || (isUnknown($0.language) && isUnknown(chosen.language))
         }
-        let sameKind = sameLanguage.filter { $0.isForced == chosen.isForced && $0.isHearingImpaired == chosen.isHearingImpaired }
+        let sameKind = sameLanguage.filter {
+            $0.isForced == chosen.isForced && $0.isHearingImpaired == chosen.isHearingImpaired && $0.describesVideo == chosen.describesVideo
+        }
         let pool = sameKind.isEmpty ? sameLanguage : sameKind
         let sameName = chosen.name.flatMap { name in pool.first { $0.name?.caseInsensitiveCompare(name) == .orderedSame } }
         return (sameName ?? pool.first)?.id
@@ -429,11 +438,38 @@ nonisolated enum TrackChooser {
         language == nil || language == "und" || language?.isEmpty == true
     }
 
-    static func subtitle(from candidates: [Candidate], audioLanguage: String?, mode: AppSettings.SubtitleMode, language: String) -> Int? {
+    /// The audio track to play. With `descriptions` (Audio Descriptions), an audio description in
+    /// `language`, or with no language set, in the default track's; otherwise, or when there's
+    /// none, the first track in `language` that isn't one. Nil leaves it to the default track.
+    static func audio(from candidates: [Candidate], language: String, defaultId: Int?, descriptions: Bool) -> Int? {
+        if descriptions {
+            let spoken = language.isEmpty ? candidates.first { $0.id == defaultId }?.language : language
+            let described = candidates.filter(\.describesVideo)
+            if let match = described.first(where: { AppSettings.sameLanguage($0.language, spoken) })
+                ?? (isUnknown(spoken) ? described.first : nil) {
+                return match.id
+            }
+        }
+        guard !language.isEmpty else { return nil }
+        let inLanguage = candidates.filter { AppSettings.sameLanguage($0.language, language) }
+        return (inLanguage.first { !$0.describesVideo } ?? inLanguage.first)?.id
+    }
+
+    /// The subtitle track `mode` asks for in `language`. With `captions` (Closed Captions + SDH)
+    /// subtitles show whatever the mode: closed captions first, in `language`, else in the audio's.
+    static func subtitle(from candidates: [Candidate], audioLanguage: String?, mode: AppSettings.SubtitleMode, language: String,
+                         captions: Bool = false) -> Int? {
         let inLanguage = candidates.filter { AppSettings.sameLanguage($0.language, language) }
         let forced = inLanguage.first { $0.isForced }
             ?? candidates.first { $0.isForced && AppSettings.sameLanguage($0.language, audioLanguage) }
         let full = inLanguage.first { !$0.isForced && !$0.isHearingImpaired } ?? inLanguage.first { !$0.isForced }
+        if captions {
+            for spoken in [language, audioLanguage] {
+                let tracks = candidates.filter { !$0.isForced && AppSettings.sameLanguage($0.language, spoken) }
+                if let caption = tracks.first(where: \.isHearingImpaired) ?? tracks.first { return caption.id }
+            }
+            return forced?.id
+        }
         switch mode {
         case .off:
             return nil
@@ -456,14 +492,15 @@ nonisolated extension TrackChooser.Candidate {
         guard let index = stream.index else { return nil }
         self.init(id: index, language: stream.language, isForced: stream.isForced ?? false,
                   isHearingImpaired: stream.isHearingImpaired ?? false, isDefault: stream.isDefault ?? false,
-                  name: stream.title)
+                  name: stream.title, describesVideo: stream.isAudioDescription)
     }
 
     /// One of the player's tracks.
     init(_ track: TrackInfo) {
+        let name = TrackChooser.ownName(of: track)
         self.init(id: track.id, language: track.language, isForced: track.isForced,
                   isHearingImpaired: track.isHearingImpaired, isDefault: track.isDefault,
-                  name: TrackChooser.ownName(of: track))
+                  name: name, describesVideo: track.isVisualImpaired || AccessibleMedia.namesAudioDescription(name))
     }
 }
 

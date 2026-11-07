@@ -15,6 +15,7 @@ struct BatchDownloadSheet: View {
     @Environment(AppSettings.self) private var settings
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorSchemeContrast) private var contrast
     @State private var details: [String: Result<JellyfinItem, LoadFailure>] = [:]
     @State private var plans: [String: DownloadPlan] = [:]
     /// Why the account may not download what was picked.
@@ -144,7 +145,9 @@ struct BatchDownloadSheet: View {
                         Text("No versions").font(.caption).foregroundStyle(.red)
                     }
                     if sources.count > 1 {
-                        Text("\(sources.count) versions").font(.caption2).foregroundStyle(.tertiary)
+                        // Too faint to read at 4.5 to 1 but as a hint, so with Increase Contrast it isn't.
+                        Text("\(sources.count) versions").font(.caption2)
+                            .foregroundStyle(contrast == .increased ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                     }
                 }
             }

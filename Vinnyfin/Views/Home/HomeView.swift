@@ -79,7 +79,7 @@ struct HomeView: View {
             Text("The server no longer accepts this sign-in, for example after a password change or a server reset. Downloads still play.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            HStack {
+            AdaptiveStack {
                 Button("Sign In Again") { Task { await accounts.signOut() } }
                     .accessibilityIdentifier("home.signInAgain")
                 #if !os(tvOS)
@@ -99,7 +99,7 @@ struct HomeView: View {
             Label("Can't reach \(session?.account.serverName ?? "the server")", systemImage: "wifi.exclamationmark")
                 .font(.headline)
             Text(message).font(.subheadline).foregroundStyle(.secondary)
-            HStack {
+            AdaptiveStack {
                 Button("Try Again") { Task { await load() } }
                 #if !os(tvOS)
                 Button("Watch Downloads", action: openDownloads)
@@ -160,12 +160,11 @@ private struct HomeRowView: View {
         case .poster:
             NavigationLink(value: item) { PosterCard(item: item) }
                 .buttonStyle(.artwork)
-                .contextMenu { ItemContextMenu(item: item) { feed.replace($0) } }
+                .titleMenu(item) { feed.replace($0) }
         case .landscape:
             NavigationLink(value: item) { LandscapeCard(item: item) }
                 .buttonStyle(.artwork)
-                .contextMenu {
-                    ItemContextMenu(item: item) { feed.replace($0) }
+                .titleMenu(item) { feed.replace($0) } more: {
                     if item.isEpisode, let seriesId = item.seriesId {
                         Button("Go to Show", systemImage: "tv") {
                             open(JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series"))
@@ -194,7 +193,9 @@ private struct HomeRowView: View {
 }
 
 /// The featured titles, one at a time across the top, turning every few seconds. It holds still
-/// while one of its buttons has focus, so the title they act on doesn't change under them.
+/// while one of its buttons has focus, so the title they act on doesn't change under them, and
+/// with Reduce Motion, VoiceOver or Switch Control on, which would have it change under them too;
+/// there the titles turn by hand, with the adjustable dots.
 private struct HeroBanner: View {
     let items: [JellyfinItem]
     let openDetails: (JellyfinItem) -> Void
@@ -202,6 +203,12 @@ private struct HeroBanner: View {
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.topBarsHeight) private var topBarsHeight
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var index = 0
     @State private var isInteracting = false
     @FocusState private var focusedButton: HeroButton?
@@ -212,67 +219,32 @@ private struct HeroBanner: View {
 
     var body: some View {
         let item = items[min(index, items.count - 1)]
-        ZStack(alignment: .bottomLeading) {
-            Artwork(url: session?.backdrop(item), aspectRatio: nil, cornerRadius: 0)
-                .frame(height: height)
-                .frame(maxWidth: .infinity)
-                .clipped()
-                .id(item.id)
-                .transition(.opacity)
-                .overlay {
-                    LinearGradient(stops: [
-                        .init(color: .clear, location: 0.3),
-                        .init(color: Color.pageBackground.opacity(0.7), location: 0.72),
-                        .init(color: Color.pageBackground, location: 1),
-                    ], startPoint: .top, endPoint: .bottom)
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack(alignment: .bottomLeading) {
+                Artwork(url: session?.backdrop(item), aspectRatio: nil, cornerRadius: 0)
+                    .frame(height: height)
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                    .id(item.id)
+                    .transition(.opacity)
+                    .overlay { DetailHero<EmptyView>.scrim(increased: contrast == .increased, from: 0.3, middle: 0.7, at: 0.72) }
+                    // Past the safe area at the sides, under any bars there: clipped and faded first,
+                    // so that part is too.
+                    .ignoresSafeArea(edges: .horizontal)
+                VStack(alignment: .leading, spacing: 10) {
+                    heading(item)
+                    if !isStacked { details(item) }
                 }
-                // Past the safe area at the sides, under any bars there: clipped and faded first,
-                // so that part is too.
-                .ignoresSafeArea(edges: .horizontal)
-            VStack(alignment: .leading, spacing: 10) {
-                if let logo = session?.logo(item) {
-                    Artwork(url: logo, aspectRatio: nil, cornerRadius: 0, placeholder: "", contentMode: .fit)
-                        .frame(maxWidth: logoWidth, maxHeight: logoHeight, alignment: .leading)
-                } else {
-                    Text(item.name).font(.largeTitle.weight(.bold)).lineLimit(2)
-                }
-                Text(DetailHero<EmptyView>.facts(for: item))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                if let overview = item.overview {
-                    Text(overview).font(.subheadline).lineLimit(2).frame(maxWidth: 640, alignment: .leading)
-                }
-                HStack(spacing: 12) {
-                    if item.isPlayable {
-                        Button {
-                            player.play(.item(item))
-                        } label: {
-                            Label(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.platformGlassProminent)
-                        .focused($focusedButton, equals: .play)
-                    }
-                    Button {
-                        openDetails(item)
-                    } label: {
-                        Label("Details", systemImage: "info.circle")
-                    }
-                    .buttonStyle(.platformGlass)
-                    .focused($focusedButton, equals: .details)
-                }
-                .controlSize(.large)
-                if items.count > 1 {
-                    HStack(spacing: 6) {
-                        ForEach(items.indices, id: \.self) { position in
-                            Capsule().fill(position == index ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                                .frame(width: position == index ? 18 : 6, height: 6)
-                        }
-                    }
-                    .accessibilityHidden(true)
-                }
+                .padding(.horizontal, Metrics.edge)
+                .padding(.bottom, 6)
+                // Grown taller than the artwork by larger text, the words stay clear of the bars over it.
+                .padding(.top, topBarsHeight)
             }
-            .padding(.horizontal, Metrics.edge)
-            .padding(.bottom, 6)
+            if isStacked {
+                VStack(alignment: .leading, spacing: 10) { details(item) }
+                    .padding(.horizontal, Metrics.edge)
+                    .padding(.bottom, 6)
+            }
         }
         .animation(.easeInOut(duration: 0.6), value: index)
         #if os(iOS)
@@ -281,8 +253,8 @@ private struct HeroBanner: View {
                 .onChanged { _ in isInteracting = true }
                 .onEnded { value in
                     isInteracting = false
-                    if value.translation.width < -40 { index = (index + 1) % items.count }
-                    if value.translation.width > 40 { index = (index - 1 + items.count) % items.count }
+                    if value.translation.width < -40 { turn(by: 1) }
+                    if value.translation.width > 40 { turn(by: -1) }
                 }
         )
         #endif
@@ -292,11 +264,97 @@ private struct HeroBanner: View {
         .task(id: items.map(\.id)) {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(8))
-                if !isInteracting, focusedButton == nil, !Task.isCancelled { index = (index + 1) % max(1, items.count) }
+                if !isInteracting, focusedButton == nil, !holdsStill, !Task.isCancelled { turn(by: 1) }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("home.hero")
+    }
+
+    /// At the accessibility sizes, all but the title go under the picture rather than over it,
+    /// where they would run up past the fade into the page, onto the picture itself.
+    private var isStacked: Bool { dynamicTypeSize.isAccessibilitySize }
+
+    /// The title, as its logo when there is one.
+    @ViewBuilder private func heading(_ item: JellyfinItem) -> some View {
+        Group {
+            if let logo = session?.logo(item) {
+                Artwork(url: logo, aspectRatio: nil, cornerRadius: 0, placeholder: "", contentMode: .fit, label: item.name)
+                    .frame(maxWidth: logoWidth, maxHeight: logoHeight, alignment: .leading)
+            } else {
+                Text(item.name).font(.largeTitle.weight(.bold)).lineLimit(dynamicTypeSize.lineLimit(2))
+            }
+        }
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    /// The facts, the overview, the buttons and the dots.
+    @ViewBuilder private func details(_ item: JellyfinItem) -> some View {
+        Text(DetailHero<EmptyView>.facts(for: item))
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(DetailHero<EmptyView>.spokenFacts(for: item))
+        if let overview = item.overview {
+            Text(overview).font(.subheadline).lineLimit(dynamicTypeSize.lineLimit(2)).frame(maxWidth: 640, alignment: .leading)
+        }
+        AdaptiveStack(spacing: 12) {
+            if item.isPlayable {
+                Button {
+                    player.play(.item(item))
+                } label: {
+                    Label(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill")
+                }
+                .buttonStyle(.platformGlassProminent)
+                .focused($focusedButton, equals: .play)
+            }
+            Button {
+                openDetails(item)
+            } label: {
+                Label("Details", systemImage: "info.circle")
+            }
+            .buttonStyle(.platformGlass)
+            .focused($focusedButton, equals: .details)
+        }
+        .controlSize(.large)
+        if items.count > 1 {
+            HStack(spacing: 6) {
+                ForEach(items.indices, id: \.self) { position in
+                    Capsule().fill(position == index ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                        .frame(width: position == index ? 18 : 6, height: 6)
+                }
+            }
+            // A touch target's height around dots 6 points high, taken back out of the
+            // layout below so nothing around them moves.
+            .frame(height: 44)
+            .contentShape(.rect)
+            // Turns the titles for VoiceOver, with a swipe up or down, and for Voice
+            // Control and Switch Control, with its actions.
+            .accessibilityElement()
+            .accessibilityLabel("Featured Titles")
+            .accessibilityValue("\(index + 1) of \(items.count)")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: turn(by: 1)
+                case .decrement: turn(by: -1)
+                @unknown default: break
+                }
+            }
+            .accessibilityAction(named: "Next Title") { turn(by: 1) }
+            .accessibilityAction(named: "Previous Title") { turn(by: -1) }
+            .accessibilityIdentifier("home.heroPages")
+            .padding(.vertical, -19)
+        }
+    }
+
+    /// Reduce Motion asks for no motion that goes on by itself; VoiceOver and Switch Control move
+    /// through the banner one piece at a time, and a title turning would change it under them.
+    private var holdsStill: Bool {
+        reduceMotion || voiceOverEnabled || switchControlEnabled
+    }
+
+    private func turn(by step: Int) {
+        guard !items.isEmpty else { return }
+        index = (index + step + items.count) % items.count
     }
 
     private var height: CGFloat {

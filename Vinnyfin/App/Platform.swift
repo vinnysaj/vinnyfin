@@ -83,11 +83,31 @@ enum FinishedFiles {
 /// material instead, which its standard bordered styles already use.
 #if os(visionOS)
 typealias PlatformGlassButtonStyle = BorderedButtonStyle
-typealias PlatformGlassProminentButtonStyle = BorderedProminentButtonStyle
 #else
 typealias PlatformGlassButtonStyle = GlassButtonStyle
-typealias PlatformGlassProminentButtonStyle = GlassProminentButtonStyle
 #endif
+
+/// A screen's main action, filled with the accent color: on Liquid Glass, or on Vision Pro its
+/// own glass. White reads on the accent green at only 2.6 to 1, so with Increase Contrast the fill
+/// is a deeper green it reads on at 5.8. Apple TV's accent is white, with a dark title already.
+struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    /// The accent green's own high-contrast variant in light mode, which white reads on.
+    private static let increasedContrastFill = Color(red: 0.212, green: 0.447, blue: 0.2)
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button(configuration)
+            #if os(visionOS)
+            .buttonStyle(.borderedProminent)
+            #else
+            .buttonStyle(.glassProminent)
+            #endif
+            #if !os(tvOS)
+            .tint(contrast == .increased ? Self.increasedContrastFill : nil)
+            #endif
+    }
+}
 
 extension PrimitiveButtonStyle where Self == PlatformGlassButtonStyle {
     static var platformGlass: Self {
@@ -100,13 +120,7 @@ extension PrimitiveButtonStyle where Self == PlatformGlassButtonStyle {
 }
 
 extension PrimitiveButtonStyle where Self == PlatformGlassProminentButtonStyle {
-    static var platformGlassProminent: Self {
-        #if os(visionOS)
-        .borderedProminent
-        #else
-        .glassProminent
-        #endif
-    }
+    static var platformGlassProminent: Self { PlatformGlassProminentButtonStyle() }
 }
 
 extension View {

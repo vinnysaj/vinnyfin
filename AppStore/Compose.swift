@@ -42,7 +42,8 @@ struct Slot {
 }
 
 let slots = [
-    Slot(raw: "iPhone 6.9-inch", folder: "iPhone 6.9-inch", size: CGSize(width: 1320, height: 2868), cornerRadius: 0.14, set: "iphone"),
+    // The one iPhone size App Store Connect requires, "6.1" or 6.3"".
+    Slot(raw: "iPhone 6.3-inch", folder: "iPhone 6.3-inch", size: CGSize(width: 1206, height: 2622), cornerRadius: 0.14, set: "iphone"),
     Slot(raw: "iPad 13-inch", folder: "iPad 13-inch", size: CGSize(width: 2752, height: 2064), cornerRadius: 0.025, set: "ipad"),
     // One slot for both of iPhone Duo's displays, closed and open in turn.
     Slot(raw: "iPhone Duo outer", folder: "iPhone Duo", size: CGSize(width: 1398, height: 2034), cornerRadius: 0.1, set: "duo"),

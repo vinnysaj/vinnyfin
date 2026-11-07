@@ -206,7 +206,7 @@ ios_device() { # folder, device type, test
 }
 
 if wants iphone; then
-  ios_device "iPhone 6.9-inch" "iPhone 18 Pro Max" testIPhone
+  ios_device "iPhone 6.3-inch" "iPhone 18 Pro" testIPhone
 fi
 if wants ipad; then
   ios_device "iPad 13-inch" "iPad Pro 13-inch (M5)" testIPad

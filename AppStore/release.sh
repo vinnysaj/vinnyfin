@@ -3,7 +3,7 @@
 # iPhone and iPad share, macOS, tvOS and visionOS. One target with one bundle ID builds them all,
 # so every upload goes to the same app, to its platform's version there. Each platform's version
 # is still submitted for review in App Store Connect, which takes a submission per platform. The
-# archives and the upload logs stay out of the repo, in AppStore/Output.
+# archives stay out of the repo, in AppStore/Output.
 #
 # App Store Connect takes a build number once per version and platform, so CURRENT_PROJECT_VERSION
 # goes up before every upload after the first of a version.
@@ -74,17 +74,16 @@ stop() { # what failed
 }
 for platform in "${platforms[@]}"; do
   archive="$output/Archives/$platform.xcarchive"
-  log="$output/Uploads/$platform"
   say "Archiving vinnyfin $version ($build) for $platform"
   rm -rf "$archive"
   xcodebuild archive -project "$project" -scheme Vinnyfin -configuration Release -destination "generic/platform=$platform" \
     -archivePath "$archive" -allowProvisioningUpdates -quiet ||
     stop "Archiving for $platform failed."
   say "Uploading $platform"
-  rm -rf "$log"
-  xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" -exportPath "$log" \
+  # An upload exports nothing to the export path; Xcode prints where it keeps the upload's logs.
+  xcodebuild -exportArchive -archivePath "$archive" -exportOptionsPlist "$options" -exportPath "$output/Uploads/$platform" \
     -allowProvisioningUpdates -quiet ||
-    stop "Uploading $platform failed; what Xcode did is in $log."
+    stop "Uploading $platform failed; Xcode's logs are in the .xcdistributionlogs bundle it named above."
   uploaded+=("$platform")
 done
 

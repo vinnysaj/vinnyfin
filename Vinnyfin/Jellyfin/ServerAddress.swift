@@ -26,10 +26,9 @@ nonisolated struct ServerAddress: Equatable, Sendable {
         }
     }
 
-    private(set) var scheme = Scheme.http
+    private(set) var scheme = Scheme.https
     /// Whether the scheme was given, by picking it, typing it with the address or saving it, rather
-    /// than assumed. An address that gives neither a scheme nor a port may be on either scheme's
-    /// default port (see `fallback`).
+    /// than assumed. An address that doesn't give one may be on HTTP instead (see `fallback`).
     private(set) var isSchemeGiven = false
     var host = ""
     /// Empty means the scheme's default port.
@@ -37,9 +36,9 @@ nonisolated struct ServerAddress: Equatable, Sendable {
     /// Empty, or the base URL Jellyfin is configured with, e.g. "/jellyfin".
     var path = ""
 
-    /// An address on `scheme`, or without a scheme, on HTTP until it's given.
+    /// An address on `scheme`, or without a scheme, on HTTPS until it's given.
     init(scheme: Scheme? = nil, host: String = "", port: String = "", path: String = "") {
-        self.scheme = scheme ?? .http
+        self.scheme = scheme ?? .https
         isSchemeGiven = scheme != nil
         self.host = host
         self.port = port
@@ -47,11 +46,11 @@ nonisolated struct ServerAddress: Equatable, Sendable {
     }
 
     /// Splits a full address someone typed or pasted ("jf.example.com:8920/jellyfin",
-    /// "https://10.0.0.5/jf/"). Without a scheme, it's on HTTP until one is given.
+    /// "https://10.0.0.5/jf/"). Without a scheme, it's on HTTPS until one is given.
     init?(parsing text: String) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasScheme = text.contains("://")
-        if !hasScheme { text = "\(Scheme.http.rawValue)://" + text }
+        if !hasScheme { text = "\(Scheme.https.rawValue)://" + text }
         guard let components = URLComponents(string: text),
               let scheme = components.scheme.flatMap({ Scheme(rawValue: $0.lowercased()) }),
               let host = components.host, !host.isEmpty
@@ -113,12 +112,12 @@ nonisolated struct ServerAddress: Equatable, Sendable {
         return .success(url)
     }
 
-    /// The same server on the other scheme's default port, for an address that gives neither a
-    /// scheme nor a port: Jellyfin itself answers HTTP on 8096, and HTTPS is usually a reverse
-    /// proxy's on 443, so a host alone may be either.
+    /// The same server on HTTP, for an address that doesn't give a scheme: on the port it gives, or
+    /// on Jellyfin's own 8096 without one. HTTPS is usually a reverse proxy's on 443, and Jellyfin
+    /// itself answers HTTP on 8096, so a host alone may be on either, as may "nas.local:8096".
     var fallback: ServerAddress? {
-        guard !isSchemeGiven, port.isEmpty else { return nil }
-        return ServerAddress(scheme: scheme == .http ? .https : .http, host: host, path: path)
+        guard !isSchemeGiven else { return nil }
+        return ServerAddress(scheme: .http, host: host, port: port, path: path)
     }
 
     /// What `ask` gets from the server at this address, or when nothing answers there, at its

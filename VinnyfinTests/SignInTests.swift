@@ -222,14 +222,14 @@ struct SignInFlowTests {
         _ = flow.submitAccount()
         flow.address.host = "nas.local"
         let attempt = try SignIn.attempt(flow.connect())
-        // Nothing answered on HTTP, so the server answered at the fallback, which the fields keep.
+        // Nothing answered on HTTPS, so the server answered at the fallback, which the fields keep.
         let fallback = try #require(attempt.address.fallback)
-        #expect(flow.found(SignIn.server("https://nas.local"), at: fallback, for: attempt) == nil)
+        #expect(flow.found(SignIn.server("http://nas.local:8096"), at: fallback, for: attempt) == nil)
         #expect(flow.address == fallback)
         #expect(flow.fail(attempt, while: .signingIn, with: JellyfinError.invalidCredentials) == .password)
         #expect(flow.step == .account)
         #expect(flow.accountError == "Wrong username or password.")
-        #expect(flow.pickedServer == SignInFlow.PickedServer(address: fallback, url: URL(string: "https://nas.local")!, title: "Home"))
+        #expect(flow.pickedServer == SignInFlow.PickedServer(address: fallback, url: URL(string: "http://nas.local:8096")!, title: "Home"))
         // Signing in again goes to the server that answered.
         #expect(try SignIn.attempt(flow.submitAccount()).address == fallback)
     }

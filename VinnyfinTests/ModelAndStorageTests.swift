@@ -91,7 +91,8 @@ struct NamingTests {
 
 struct AddressTests {
     @Test func buildsServerURLsFromTheFormFields() throws {
-        #expect(try ServerAddress(host: "192.168.1.5").url.get().absoluteString == "http://192.168.1.5:8096")
+        #expect(try ServerAddress(host: "192.168.1.5").url.get().absoluteString == "https://192.168.1.5")
+        #expect(try ServerAddress(scheme: .http, host: "192.168.1.5").url.get().absoluteString == "http://192.168.1.5:8096")
         #expect(try ServerAddress(scheme: .https, host: "jf.example.com").url.get().absoluteString == "https://jf.example.com")
         #expect(try ServerAddress(scheme: .https, host: "jf.example.com", port: "8920", path: "jellyfin/").url.get().absoluteString == "https://jf.example.com:8920/jellyfin")
         #expect(try ServerAddress(scheme: .http, host: "nas.local", port: "80").url.get().absoluteString == "http://nas.local")
@@ -113,20 +114,23 @@ struct AddressTests {
         #expect(ServerAddress.looksLikeFullAddress("https://nas.local"))
     }
 
-    @Test func aHostAloneFallsBackToTheOtherSchemesDefaultPort() {
-        #expect(ServerAddress(host: "nas.local", path: "/jf").fallback == ServerAddress(scheme: .https, host: "nas.local", path: "/jf"))
+    @Test func anAddressWithoutASchemeFallsBackToHTTP() {
+        #expect(ServerAddress(host: "nas.local", path: "/jf").fallback == ServerAddress(scheme: .http, host: "nas.local", path: "/jf"))
         var typed = ServerAddress(host: "nas.local/jellyfin")
         typed.splitHost()
-        #expect(typed.fallback == ServerAddress(scheme: .https, host: "nas.local", path: "/jellyfin"))
-        // Nothing to fall back to once the address gives a port or a scheme, however it gives it.
-        #expect(ServerAddress(host: "nas.local", port: "8096").fallback == nil)
-        #expect(ServerAddress(scheme: .http, host: "nas.local").fallback == nil)
+        #expect(typed.fallback == ServerAddress(scheme: .http, host: "nas.local", path: "/jellyfin"))
+        // On the port the address gives, where Jellyfin's own HTTP is.
+        #expect(ServerAddress(host: "nas.local", port: "8096").fallback == ServerAddress(scheme: .http, host: "nas.local", port: "8096"))
+        #expect(ServerAddress(host: "nas.local").fallback?.fallback == nil)
+        // Nothing to fall back to once the address gives a scheme, however it gives it.
+        #expect(ServerAddress(scheme: .https, host: "nas.local").fallback == nil)
         var picked = ServerAddress(host: "nas.local")
-        picked.choose(.http)
+        picked.choose(.https)
         #expect(picked.fallback == nil)
-        var withScheme = ServerAddress(host: "http://nas.local")
+        var withScheme = ServerAddress(host: "https://nas.local")
         withScheme.splitHost()
         #expect(withScheme.fallback == nil)
+        #expect(ServerAddress(savedURL: URL(string: "http://nas.local:8096")!)?.fallback == nil)
         #expect(ServerAddress(savedURL: URL(string: "https://jf.example.com")!)?.fallback == nil)
     }
 
@@ -134,12 +138,20 @@ struct AddressTests {
         var asked: [String] = []
         let found = try await ServerAddress(host: "nas.local").firstAnswer { url in
             asked.append(url.absoluteString)
-            guard url.scheme == "https" else { throw URLError(.cannotConnectToHost) }
+            guard url.scheme == "http" else { throw URLError(.secureConnectionFailed) }
             return "Jellyfin"
         }
-        #expect(asked == ["http://nas.local:8096", "https://nas.local"])
-        #expect(found.address == ServerAddress(scheme: .https, host: "nas.local"))
+        #expect(asked == ["https://nas.local", "http://nas.local:8096"])
+        #expect(found.address == ServerAddress(scheme: .http, host: "nas.local"))
         #expect(found.answer == "Jellyfin")
+        asked = []
+        let typed = try await ServerAddress(host: "nas.local", port: "8096").firstAnswer { url in
+            asked.append(url.absoluteString)
+            guard url.scheme == "http" else { throw URLError(.secureConnectionFailed) }
+            return "Jellyfin"
+        }
+        #expect(asked == ["https://nas.local:8096", "http://nas.local:8096"])
+        #expect(typed.address == ServerAddress(scheme: .http, host: "nas.local", port: "8096"))
     }
 
     @Test func asksOnceWhereTheAddressAnswers() async throws {
@@ -148,7 +160,7 @@ struct AddressTests {
             asked.append(url.absoluteString)
             return url
         }
-        #expect(asked == ["http://nas.local:8096"])
+        #expect(asked == ["https://nas.local"])
         #expect(found.address == ServerAddress(host: "nas.local"))
     }
 
@@ -166,20 +178,20 @@ struct AddressTests {
     @Test func failsWithTheAddresssOwnErrorWhenNeitherAnswers() async {
         await #expect(throws: URLError(.cannotConnectToHost)) {
             try await ServerAddress(host: "nas.local").firstAnswer { url -> String in
-                throw url.scheme == "http" ? URLError(.cannotConnectToHost) : URLError(.timedOut)
+                throw url.scheme == "https" ? URLError(.cannotConnectToHost) : URLError(.timedOut)
             }
         }
         // The fallback answering as something other than Jellyfin doesn't count either.
         await #expect(throws: URLError(.cannotConnectToHost)) {
             try await ServerAddress(host: "nas.local").firstAnswer { url -> String in
-                guard url.scheme == "https" else { throw URLError(.cannotConnectToHost) }
+                guard url.scheme == "http" else { throw URLError(.cannotConnectToHost) }
                 throw JellyfinError.notJellyfin(url)
             }
         }
     }
 
-    @Test func triesNothingElseForAnAddressThatGivesItsPortOrScheme() async {
-        for address in [ServerAddress(host: "nas.local", port: "8096"), ServerAddress(scheme: .http, host: "nas.local")] {
+    @Test func triesNothingElseForAnAddressThatGivesItsScheme() async {
+        for address in [ServerAddress(scheme: .https, host: "nas.local"), ServerAddress(scheme: .http, host: "nas.local", port: "8096")] {
             var asked = 0
             await #expect(throws: URLError(.cannotConnectToHost)) {
                 try await address.firstAnswer { _ -> String in

@@ -110,18 +110,18 @@ struct ContinuedProgressTests {
 
     @Test func saysWhatsDownloadingAndHowMuchIsLeft() {
         let movie = job()
-        let one = ContinuedProgress.text(jobs: [movie], receivedBytes: [movie.id: 100_000_000], isNetworkReachable: true, waits: [:], isKeptRunning: false)
+        let one = ContinuedProgress.text(jobs: [movie], receivedBytes: [movie.id: 100_000_000], isNetworkReachable: true, waits: [:])
         #expect(one.title == "Downloading Big Test Movie (2024)")
         #expect(one.subtitle == "\(Int64(200_000_000).formatted(.byteCount(style: .file))) left")
         let episode = job(Samples.episode, at: -1)
-        let two = ContinuedProgress.text(jobs: [episode, movie], receivedBytes: [:], isNetworkReachable: true, waits: [:], isKeptRunning: false)
+        let two = ContinuedProgress.text(jobs: [episode, movie], receivedBytes: [:], isNetworkReachable: true, waits: [:])
         #expect(two.title == "Downloading Test Show S01E02 and 1 more")
         #expect(two.subtitle == "\(Int64(600_000_000).formatted(.byteCount(style: .file))) left")
-        #expect(ContinuedProgress.text(jobs: [movie], receivedBytes: [:], isNetworkReachable: false, waits: [:], isKeptRunning: false).subtitle == "Waiting for a network connection")
+        #expect(ContinuedProgress.text(jobs: [movie], receivedBytes: [:], isNetworkReachable: false, waits: [:]).subtitle == "Waiting for a network connection")
         var unsized = Samples.source
         unsized.size = nil
         let probing = DownloadJob(item: Samples.movie, source: unsized)
-        #expect(ContinuedProgress.text(jobs: [probing], receivedBytes: [:], isNetworkReachable: true, waits: [:], isKeptRunning: false).subtitle == "Starting")
+        #expect(ContinuedProgress.text(jobs: [probing], receivedBytes: [:], isNetworkReachable: true, waits: [:]).subtitle == "Starting")
     }
 
     /// Someone's tap doesn't start one for downloads the rules hold back, unless they chose
@@ -152,21 +152,9 @@ struct ContinuedProgressTests {
 
     @Test func saysWhatTheNextDownloadWaitsFor() {
         let movie = job()
-        let text = ContinuedProgress.text(jobs: [movie], receivedBytes: [:], isNetworkReachable: true, waits: [movie.id: .wifi], isKeptRunning: false)
+        let text = ContinuedProgress.text(jobs: [movie], receivedBytes: [:], isNetworkReachable: true, waits: [movie.id: .wifi])
         #expect(text.subtitle == "Waiting for Wi-Fi")
         #expect(ContinuedProgress.Ending.waiting(.wifi).text.subtitle == "They carry on over Wi-Fi")
-    }
-
-    /// While Keep Downloads Running plays, the Live Activity says the app is kept running.
-    @Test func saysWhenKeepDownloadsRunningKeepsTheAppRunning() {
-        let movie = job()
-        let kept = ContinuedProgress.text(jobs: [movie], receivedBytes: [movie.id: 100_000_000], isNetworkReachable: true, waits: [:],
-                                          isKeptRunning: true)
-        #expect(kept.title == "Downloading Big Test Movie (2024)")
-        #expect(kept.subtitle == "\(Int64(200_000_000).formatted(.byteCount(style: .file))) left · Kept running")
-        let waiting = ContinuedProgress.text(jobs: [movie], receivedBytes: [:], isNetworkReachable: true, waits: [movie.id: .power],
-                                             isKeptRunning: true)
-        #expect(waiting.subtitle == "\(DownloadWait.power.status) · Kept running")
     }
 }
 #endif
@@ -179,22 +167,15 @@ struct DownloadNoticeTests {
         refresh: UIBackgroundRefreshStatus = .available,
         lowPower: Bool = false,
         notKeptRunning: Bool = false,
-        keptRunning: Bool = false,
         dismissed: Set<DownloadNotice> = []
     ) -> [DownloadNotice] {
         DownloadNotice.current(hasActiveDownloads: active, systemCancellation: cancellation, backgroundRefreshStatus: refresh,
-                               isLowPowerModeEnabled: lowPower, couldNotKeepRunning: notKeptRunning, isKeptRunning: keptRunning,
-                               dismissed: dismissed)
+                               isLowPowerModeEnabled: lowPower, couldNotKeepRunning: notKeptRunning, dismissed: dismissed)
     }
 
-    /// While Keep Downloads Running plays, the app isn't suspended, so what suspension would hold
-    /// back isn't said; what the system did to transfers still is.
-    @Test func saysNothingAboutSuspensionWhileKeptRunning() {
+    @Test func tellsWhenTheSystemWouldntKeepTheAppRunning() {
         #expect(notices(notKeptRunning: true) == [.notKeptRunning])
-        #expect(notices(refresh: .denied, lowPower: true, notKeptRunning: true, keptRunning: true).isEmpty)
-        #expect(notices(refresh: .restricted, keptRunning: true).isEmpty)
-        #expect(notices(cancellation: .userForceQuitApplication, lowPower: true, keptRunning: true) == [.closedByUser])
-        #expect(notices(cancellation: .insufficientSystemResources, keptRunning: true) == [.stoppedBySystem])
+        #expect(notices(lowPower: true, notKeptRunning: true) == [.lowPowerMode, .notKeptRunning])
     }
 
     @Test func showsNothingWithoutActiveDownloads() {

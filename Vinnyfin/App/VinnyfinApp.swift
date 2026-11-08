@@ -88,6 +88,7 @@ extension View {
             .environment(app.player)
             .environment(app.socket)
             .environment(app.sharePlay)
+            .environment(app.sounds)
         #else
         environment(app.accounts)
             .environment(app.knownServers)
@@ -98,6 +99,7 @@ extension View {
             .environment(app.player)
             .environment(app.socket)
             .environment(app.sharePlay)
+            .environment(app.sounds)
             .environment(app.downloads)
             .environment(app.downloadNotifications)
             .environment(app.smartDownloads)
@@ -105,7 +107,6 @@ extension View {
             .environment(app.spotlight)
             #if os(iOS) || os(visionOS)
             .environment(app.backgroundDownloads)
-            .environment(app.keepAwake)
             .environment(app.diagnostics)
             #endif
             #if os(iOS) || os(macOS)
@@ -132,6 +133,7 @@ final class AppDelegate: NSObject {
     private lazy var cloudSync = CloudSync(store: .default, settings: settings, servers: knownServers, messages: messages)
     #if os(tvOS)
     private(set) lazy var player = PlayerCoordinator(accounts: accounts, settings: settings, history: history)
+    private(set) lazy var sounds = SoundPlayer(settings: settings, player: player)
     #else
     private(set) lazy var downloadNotifications = DownloadNotifications(settings: settings, links: links)
     private(set) lazy var downloads = DownloadManager(accounts: accounts, settings: settings, history: history,
@@ -141,11 +143,10 @@ final class AppDelegate: NSObject {
     private(set) lazy var player = PlayerCoordinator(accounts: accounts, settings: settings, history: history,
                                                      downloads: downloads, smartDownloads: smartDownloads, localLibrary: localLibrary)
     private(set) lazy var spotlight = SpotlightTitles(accounts: accounts, downloads: downloads)
+    private(set) lazy var sounds = SoundPlayer(settings: settings, player: player, downloads: downloads)
     #endif
     #if os(iOS) || os(visionOS)
-    private(set) lazy var keepAwake = KeepAwakeAudio(downloads: downloads, settings: settings, accounts: accounts)
-    private(set) lazy var backgroundDownloads = BackgroundDownloads(downloads: downloads, smartDownloads: smartDownloads,
-                                                                    keepAwake: keepAwake)
+    private(set) lazy var backgroundDownloads = BackgroundDownloads(downloads: downloads, smartDownloads: smartDownloads)
     let diagnostics = AppDiagnostics()
     #endif
     /// Jellyfin's remote control: other devices play to this one, and this one to them.
@@ -178,6 +179,8 @@ final class AppDelegate: NSObject {
         // From launch, so a session started on FaceTime before the app opened is joined.
         let sharePlay = sharePlay
         Task { await sharePlay.run() }
+        let sounds = sounds
+        Task { await sounds.run() }
         #if !os(tvOS)
         downloadNotifications.start()
         let settings = settings
@@ -203,8 +206,6 @@ final class AppDelegate: NSObject {
         backgroundDownloads.registerLaunchHandlers()
         let backgroundDownloads = backgroundDownloads
         Task { await backgroundDownloads.run() }
-        let keepAwake = keepAwake
-        Task { await keepAwake.run() }
         let diagnostics = diagnostics
         Task { await diagnostics.run() }
         #endif

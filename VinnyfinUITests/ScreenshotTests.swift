@@ -272,13 +272,12 @@ final class ScreenshotTests: XCTestCase {
     /// from Home. Both follow the person through iCloud, so a fresh install can start from what an
     /// earlier run chose.
     @MainActor
-    private func chooseDownloads(_ quality: String, transcoded: Bool, keepingThemRunning: Bool = false, in app: XCUIApplication) {
+    private func chooseDownloads(_ quality: String, transcoded: Bool, in app: XCUIApplication) {
         tap(tab("Home", in: app))
         tap(app.buttons["home.settings"])
         tap(scrolledTo(app.buttons["settings.downloadQuality"], in: app))
         tap(app.buttons[quality])
         turn(scrolledTo(app.switches["settings.transcodeDownloads"], in: app), on: transcoded)
-        if keepingThemRunning { turn(scrolledTo(app.switches["settings.keepDownloadsRunning"], in: app), on: true) }
         // On iPhone Duo's outer display the bar scrolls away with the form, and back as it scrolls up.
         let done = app.navigationBars.buttons["Done"]
         for _ in 0..<8 where !done.exists { app.swipeDown() }
@@ -296,7 +295,7 @@ final class ScreenshotTests: XCTestCase {
     }
 
     /// The Downloads tab once those downloads are done, and a season is on its way at a quality
-    /// the server makes for it, with Keep Downloads Running on.
+    /// the server makes for it.
     @MainActor
     private func snapDownloads(_ app: XCUIApplication, name: String) async throws {
         tap(tab("Downloads", in: app))
@@ -307,7 +306,7 @@ final class ScreenshotTests: XCTestCase {
         let downloaded = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'downloaded.'")).firstMatch
         let done = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !unfinished.exists && downloaded.exists }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [done], timeout: 120), .completed, "The downloads didn't finish")
-        chooseDownloads("720p", transcoded: true, keepingThemRunning: true, in: app)
+        chooseDownloads("720p", transcoded: true, in: app)
         // Port Ellery's page, still open from its screenshot.
         tap(tab("Shows", in: app))
         tap(app.descendants(matching: .any)["series.smartDownload"].firstMatch)
@@ -315,7 +314,7 @@ final class ScreenshotTests: XCTestCase {
         tap(app.buttons["batch.download"])
         tap(tab("Downloads", in: app))
         XCTAssertTrue(unfinished.waitForExistence(timeout: uiTimeout), "The season never started downloading")
-        try await snap(name, once: app.descendants(matching: .any)["keepAwake.status"])
+        try await snap(name, once: unfinished)
     }
     #endif
 

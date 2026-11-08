@@ -31,14 +31,10 @@ import UIKit
 /// - The app refresh wake, no more often than every `refreshInterval`, refreshes smart
 ///   downloads and then keeps the queue moving the same way.
 ///
-/// Beside all of these, the person can keep the app running with audio, Keep Downloads Running
-/// in Settings (`KeepAwakeAudio`); the Live Activity says so while it plays.
-///
 /// With Background App Refresh off (Low Power Mode turns it off), the system may not launch the
 /// app for any of these, or for finished transfers; `notices` tells the user that, when the
 /// system wouldn't keep the app running for downloads someone started, and why the system
-/// cancelled transfers. While Keep Downloads Running plays, the app isn't suspended, so only the
-/// last is told then.
+/// cancelled transfers.
 @Observable
 final class BackgroundDownloads {
     /// Listed under BGTaskSchedulerPermittedIdentifiers in Info.plist, as are the others.
@@ -66,8 +62,6 @@ final class BackgroundDownloads {
 
     @ObservationIgnored private let downloads: DownloadManager
     @ObservationIgnored private let smartDownloads: SmartDownloads
-    /// Whether the keep-alive plays too, for the Live Activity to say so on iPhone and iPad.
-    @ObservationIgnored private let keepAwake: KeepAwakeAudio
     @ObservationIgnored private var appObservations: [NotificationCenter.ObservationToken] = []
     #if os(iOS)
     /// The continued-processing task submitted, until it ends.
@@ -78,10 +72,9 @@ final class BackgroundDownloads {
     @ObservationIgnored private var shownText: (title: String, subtitle: String)?
     #endif
 
-    init(downloads: DownloadManager, smartDownloads: SmartDownloads, keepAwake: KeepAwakeAudio) {
+    init(downloads: DownloadManager, smartDownloads: SmartDownloads) {
         self.downloads = downloads
         self.smartDownloads = smartDownloads
-        self.keepAwake = keepAwake
     }
 
     // MARK: Launch
@@ -205,8 +198,7 @@ final class BackgroundDownloads {
 
     // MARK: Notices
 
-    /// What holds downloads back, for the Downloads screen: not what the app being suspended
-    /// would, while Keep Downloads Running keeps it running.
+    /// What holds downloads back, for the Downloads screen.
     func notices(hasActiveDownloads: Bool) -> [DownloadNotice] {
         DownloadNotice.current(
             hasActiveDownloads: hasActiveDownloads,
@@ -214,7 +206,6 @@ final class BackgroundDownloads {
             backgroundRefreshStatus: backgroundRefreshStatus,
             isLowPowerModeEnabled: isLowPowerModeEnabled,
             couldNotKeepRunning: couldNotKeepRunning,
-            isKeptRunning: keepAwake.isRunning,
             dismissed: dismissedNotices
         )
     }
@@ -261,9 +252,8 @@ final class BackgroundDownloads {
         let waits: [UUID: DownloadWait]
         /// What the server is doing for transcoded downloads.
         let notes: [UUID: String]
-        let isKeptRunning: Bool
 
-        @MainActor init(_ downloads: DownloadManager, keepAwake: KeepAwakeAudio) {
+        @MainActor init(_ downloads: DownloadManager) {
             jobs = downloads.jobs
             receivedBytes = downloads.receivedBytes
             userStartedJobIds = downloads.userStartedJobIds
@@ -272,19 +262,16 @@ final class BackgroundDownloads {
             isNetworkReachable = downloads.isNetworkReachable
             waits = downloads.waits
             notes = downloads.transcodes.notes(for: downloads.jobs)
-            isKeptRunning = keepAwake.isRunning
         }
 
         @MainActor var text: (title: String, subtitle: String) {
-            ContinuedProgress.text(jobs: jobs, receivedBytes: receivedBytes, isNetworkReachable: isNetworkReachable, waits: waits, notes: notes,
-                                   isKeptRunning: isKeptRunning)
+            ContinuedProgress.text(jobs: jobs, receivedBytes: receivedBytes, isNetworkReachable: isNetworkReachable, waits: waits, notes: notes)
         }
     }
 
     private func followDownloads() async {
         let downloads = downloads
-        let keepAwake = keepAwake
-        for await state in Observations({ DownloadsState(downloads, keepAwake: keepAwake) }) {
+        for await state in Observations({ DownloadsState(downloads) }) {
             update(state)
         }
     }
@@ -360,7 +347,7 @@ final class BackgroundDownloads {
         }
         continuedTask = task
         shownText = (task.title, task.subtitle)
-        update(DownloadsState(downloads, keepAwake: keepAwake))
+        update(DownloadsState(downloads))
     }
 
     /// The person stopped it from its Live Activity, or the system needed the resources back.

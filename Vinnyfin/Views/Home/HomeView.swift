@@ -15,6 +15,10 @@ struct HomeView: View {
     #if os(iOS) || os(visionOS)
     @State private var showingSettings = false
     #endif
+    #if !os(tvOS)
+    @Environment(SoundPlayer.self) private var sounds
+    @State private var showingSounds = false
+    #endif
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -43,8 +47,8 @@ struct HomeView: View {
             #if os(tvOS)
             .toolbarVisibility(feed.featured.isEmpty ? .automatic : .hidden, for: .navigationBar)
             #elseif os(iOS) || os(visionOS)
-            // Over the hero the bar keeps only Settings, floating on the artwork; on iPhone Duo
-            // it goes in the vertical bar with the rest of the bar's buttons.
+            // Over the hero the bar keeps only Sounds and Settings, floating on the artwork; on
+            // iPhone Duo they go in the vertical bar with the rest of the bar's buttons.
             .navigationBarTitleDisplayMode(feed.featured.isEmpty ? .automatic : .inline)
             .toolbar(removing: feed.featured.isEmpty ? nil : .title)
             .toolbarBackgroundVisibility(feed.featured.isEmpty ? .automatic : .hidden, for: .navigationBar)
@@ -52,9 +56,17 @@ struct HomeView: View {
             .scrollEdgeEffectHidden(!feed.featured.isEmpty, for: .top)
             #endif
             .toolbar {
+                ToolbarItem(placement: .barTrailing) { soundsButton }
                 ToolbarItem(placement: .barTrailing) { settingsButton }
             }
             .sheet(isPresented: $showingSettings) { SettingsView() }
+            #elseif os(macOS)
+            .toolbar {
+                ToolbarItem(placement: .barTrailing) { soundsButton }
+            }
+            #endif
+            #if !os(tvOS)
+            .sheet(isPresented: $showingSounds) { SoundsView() }
             #endif
             .itemDestinations()
             .refreshable { await load(reshuffling: true) }
@@ -64,6 +76,15 @@ struct HomeView: View {
             .onChange(of: player.endedPlayback) { Task { await load() } }
         }
     }
+
+    #if !os(tvOS)
+    /// Moves while a sound plays.
+    private var soundsButton: some View {
+        Button("Sounds", systemImage: "waveform") { showingSounds = true }
+            .symbolEffect(.variableColor.iterative, isActive: sounds.state == .playing && !sounds.isSteppedAside)
+            .accessibilityIdentifier("home.sounds")
+    }
+    #endif
 
     #if os(iOS) || os(visionOS)
     private var settingsButton: some View {

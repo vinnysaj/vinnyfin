@@ -117,18 +117,10 @@ nonisolated struct ContinuedProgress: Equatable, Sendable {
         isInFront && !isPausedForPlayback && DownloadJob.queue(jobs).contains { userStartedJobIds.contains($0) && waits[$0] == nil }
     }
 
-    /// The Live Activity's words while downloading: what's downloading and how much is left, what
-    /// the server is doing for a transcoded one (`notes`), and that Keep Downloads Running keeps
-    /// the app running too while it plays.
+    /// The Live Activity's words while downloading: what's downloading and how much is left, and
+    /// what the server is doing for a transcoded one (`notes`).
     @MainActor static func text(jobs: [DownloadJob], receivedBytes: [UUID: Int64], isNetworkReachable: Bool,
-                     waits: [UUID: DownloadWait], notes: [UUID: String] = [:], isKeptRunning: Bool) -> (title: String, subtitle: String) {
-        let text = downloadingText(jobs: jobs, receivedBytes: receivedBytes, isNetworkReachable: isNetworkReachable, waits: waits,
-                                   notes: notes)
-        return isKeptRunning ? (text.title, "\(text.subtitle) · Kept running") : text
-    }
-
-    @MainActor private static func downloadingText(jobs: [DownloadJob], receivedBytes: [UUID: Int64], isNetworkReachable: Bool,
-                                                   waits: [UUID: DownloadWait], notes: [UUID: String]) -> (title: String, subtitle: String) {
+                                waits: [UUID: DownloadWait], notes: [UUID: String] = [:]) -> (title: String, subtitle: String) {
         let queue = DownloadJob.queued(jobs)
         guard let first = queue.first(where: { waits[$0.id] == nil }) ?? queue.first else { return ("Downloading", "Finishing up") }
         let title = queue.count == 1 ? "Downloading \(first.shortName)" : "Downloading \(first.shortName) and \(queue.count - 1) more"
@@ -191,7 +183,7 @@ enum DownloadNotice: String, CaseIterable, Identifiable, Sendable {
         case .lowPowerMode:
             "It turns off Background App Refresh, so downloads can stop while vinnyfin is in the background. Keep vinnyfin open, or turn Low Power Mode off in Control Center or Settings › Battery."
         case .notKeptRunning:
-            "So downloads may wait while it's in the background, until the system lets it run. Keep vinnyfin open, or turn on Keep Downloads Running in vinnyfin's settings."
+            "So downloads may wait while it's in the background, until the system lets it run. Keep vinnyfin open to keep them going."
         }
     }
 
@@ -208,27 +200,16 @@ enum DownloadNotice: String, CaseIterable, Identifiable, Sendable {
     /// Offers to open the app's page in Settings, where the switch is.
     var opensSettings: Bool { self == .backgroundRefreshOff }
 
-    /// What it says can happen while the app is in the background, which Keep Downloads Running
-    /// keeps from happening while it plays (`KeepAwakeAudio`), rather than what has happened.
-    var isAboutSuspension: Bool {
-        switch self {
-        case .backgroundRefreshOff, .backgroundRefreshRestricted, .lowPowerMode, .notKeptRunning: true
-        case .closedByUser, .stoppedBySystem: false
-        }
-    }
-
     /// The notices to show, in this order, while there are active downloads. With Low Power
     /// Mode on, Background App Refresh reads as off and its switch can't be turned on, so only
     /// Low Power Mode is mentioned. `couldNotKeepRunning` says the system wouldn't keep the app
-    /// running for downloads someone started; while `isKeptRunning` (Keep Downloads Running
-    /// plays), none of what the app being suspended would hold back is mentioned.
+    /// running for downloads someone started.
     static func current(
         hasActiveDownloads: Bool,
         systemCancellation: URLError.BackgroundTaskCancelledReason?,
         backgroundRefreshStatus: UIBackgroundRefreshStatus,
         isLowPowerModeEnabled: Bool,
         couldNotKeepRunning: Bool = false,
-        isKeptRunning: Bool = false,
         dismissed: Set<DownloadNotice>
     ) -> [DownloadNotice] {
         guard hasActiveDownloads else { return [] }
@@ -252,7 +233,7 @@ enum DownloadNotice: String, CaseIterable, Identifiable, Sendable {
             }
         }
         if couldNotKeepRunning { notices.append(.notKeptRunning) }
-        return notices.filter { !dismissed.contains($0) && !(isKeptRunning && $0.isAboutSuspension) }
+        return notices.filter { !dismissed.contains($0) }
     }
 }
 #endif

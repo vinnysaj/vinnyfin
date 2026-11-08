@@ -65,13 +65,6 @@ final class AppSettings {
     var downloadOverCellular = false { didSet { store(downloadOverCellular, Keys.downloadOverCellular) } }
     /// Downloads wait while the device isn't plugged in.
     var downloadOnlyWhileCharging = false { didSet { store(downloadOnlyWhileCharging, Keys.downloadOnlyWhileCharging) } }
-    /// Plays audio in the background while downloads go on, so the system keeps the app
-    /// running (`KeepAwakeAudio`), on iPhone, iPad and Vision Pro.
-    var keepDownloadsRunning = false { didSet { store(keepDownloadsRunning, Keys.keepDownloadsRunning) } }
-    /// The web address of an audio file for Keep Downloads Running to loop; empty for silence.
-    var keepDownloadsRunningSound = "" { didSet { store(keepDownloadsRunningSound, Keys.keepDownloadsRunningSound) } }
-    /// Keep Downloads Running carries on playing once downloads finish, until the person stops it.
-    var keepPlayingAfterDownloads = false { didSet { store(keepPlayingAfterDownloads, Keys.keepPlayingAfterDownloads) } }
     /// Gigabytes downloads may take up in all, one of `storageLimitChoices`; 0 for no limit.
     var downloadStorageLimit = 0 { didSet { store(downloadStorageLimit, Keys.downloadStorageLimit) } }
     /// Notifies when downloads are ready to watch offline, and when one needs attention.
@@ -87,6 +80,8 @@ final class AppSettings {
     var subtitleScale = 1.0 { didSet { store(subtitleScale, Keys.subtitleScale) } }
     /// Switches the TV's frame rate and dynamic range to the video's (Apple TV).
     var matchContent = true { didSet { store(matchContent, Keys.matchContent) } }
+    /// The sound Sounds plays (`SoundPlayer`), the one picked last.
+    var sound = Sound.brownNoise { didSet { store(sound.rawValue, Keys.sound) } }
 
     private let defaults: UserDefaults
     @ObservationIgnored private let cloud: (any CloudKeyValues)?
@@ -106,9 +101,6 @@ final class AppSettings {
         static let smartDownloadCount = "settings.smartDownloadCount"
         static let downloadOverCellular = "settings.downloadOverCellular"
         static let downloadOnlyWhileCharging = "settings.downloadOnlyWhileCharging"
-        static let keepDownloadsRunning = "settings.keepDownloadsRunning"
-        static let keepDownloadsRunningSound = "settings.keepDownloadsRunningSound"
-        static let keepPlayingAfterDownloads = "settings.keepPlayingAfterDownloads"
         static let downloadStorageLimit = "settings.downloadStorageLimit"
         static let downloadNotifications = "settings.downloadNotifications"
         static let autoplayNextEpisode = "settings.autoplayNextEpisode"
@@ -119,6 +111,7 @@ final class AppSettings {
         static let subtitleMode = "settings.subtitleMode"
         static let subtitleScale = "settings.subtitleScale"
         static let matchContent = "settings.matchContent"
+        static let sound = "settings.sound"
     }
 
     init(defaults: UserDefaults = .standard, cloud: (any CloudKeyValues)? = nil) {
@@ -141,9 +134,6 @@ final class AppSettings {
         smartDownloadCount = defaults.object(forKey: Keys.smartDownloadCount) as? Int ?? smartDownloadCount
         downloadOverCellular = defaults.object(forKey: Keys.downloadOverCellular) as? Bool ?? downloadOverCellular
         downloadOnlyWhileCharging = defaults.object(forKey: Keys.downloadOnlyWhileCharging) as? Bool ?? downloadOnlyWhileCharging
-        keepDownloadsRunning = defaults.object(forKey: Keys.keepDownloadsRunning) as? Bool ?? keepDownloadsRunning
-        keepDownloadsRunningSound = defaults.string(forKey: Keys.keepDownloadsRunningSound) ?? keepDownloadsRunningSound
-        keepPlayingAfterDownloads = defaults.object(forKey: Keys.keepPlayingAfterDownloads) as? Bool ?? keepPlayingAfterDownloads
         downloadStorageLimit = defaults.object(forKey: Keys.downloadStorageLimit) as? Int ?? downloadStorageLimit
         downloadNotifications = defaults.object(forKey: Keys.downloadNotifications) as? Bool ?? downloadNotifications
         autoplayNextEpisode = defaults.object(forKey: Keys.autoplayNextEpisode) as? Bool ?? autoplayNextEpisode
@@ -153,6 +143,7 @@ final class AppSettings {
         subtitleMode = defaults.string(forKey: Keys.subtitleMode).flatMap(SubtitleMode.init) ?? subtitleMode
         subtitleScale = defaults.object(forKey: Keys.subtitleScale) as? Double ?? subtitleScale
         matchContent = defaults.object(forKey: Keys.matchContent) as? Bool ?? matchContent
+        sound = defaults.string(forKey: Keys.sound).flatMap(Sound.init) ?? sound
     }
 
     private func store(_ value: Any, _ key: String) {
@@ -166,14 +157,13 @@ final class AppSettings {
     /// The settings that stay on the device they're chosen on, as what suits one device doesn't
     /// suit another: the streaming quality suits its screen and its connection; the episodes smart
     /// downloads keep and the space downloads may take suit its storage, as a Mac's isn't an
-    /// iPhone's; cellular data, charging and keeping downloads running in the background suit how
-    /// it's carried and powered; and matching the frame rate and dynamic range suits the TV it's
-    /// plugged into. The download quality, whether downloads may be transcoded to it, the sound
-    /// that keeps downloads running and their notifications are the person's taste, and follow
-    /// them.
+    /// iPhone's; cellular data and charging suit how it's carried and powered; and matching the
+    /// frame rate and dynamic range suits the TV it's plugged into. The download quality, whether
+    /// downloads may be transcoded to it, their notifications and the sound Sounds plays are the
+    /// person's taste, and follow them.
     nonisolated static let deviceOnlyKeys: Set<String> = [
         Keys.streamingQuality, Keys.smartDownloadCount, Keys.downloadStorageLimit, Keys.downloadOverCellular,
-        Keys.downloadOnlyWhileCharging, Keys.keepDownloadsRunning, Keys.keepPlayingAfterDownloads, Keys.matchContent,
+        Keys.downloadOnlyWhileCharging, Keys.matchContent,
     ]
 
     /// Whether the setting under `key` follows the person to their other devices.

@@ -61,11 +61,11 @@ import OSLog
 /// haven't started and no longer fit them come out to be planned again; those under way finish,
 /// unless they can't use the network the device is on while the rules now let their file use it.
 ///
-/// Whenever the process runs, in front or kept running in the background (`BackgroundDownloads`,
-/// `KeepAwakeAudio`), finished chunks go into place as they arrive, files are published, and
-/// `trackProgress` replaces stalled transfers, by what their tasks say they've received
-/// (`TransferActivity`) and what the session says of them. Whatever a transfer the app
-/// cancelled delivers anyway, having finished first, is kept, unless its job started over.
+/// Whenever the process runs, in front or kept running in the background (`BackgroundDownloads`),
+/// finished chunks go into place as they arrive, files are published, and `trackProgress`
+/// replaces stalled transfers, by what their tasks say they've received (`TransferActivity`) and
+/// what the session says of them. Whatever a transfer the app cancelled delivers anyway, having
+/// finished first, is kept, unless its job started over.
 /// Pausing cuts the transfers that can keep their bytes in resume data, and lets those that
 /// can't finish once they've more behind than ahead (`DownloadJob.finishesWhenPaused`); a
 /// playback holds them all but those that can't and are a moment from done, as it needs the
@@ -143,9 +143,6 @@ final class DownloadManager {
     /// by themselves. Only those start a continued-processing task on iPhone and iPad
     /// (`BackgroundDownloads`). Kept until `forgetUserStartedJobs()`.
     private(set) var userStartedJobIds: Set<UUID> = []
-    /// Moves each time someone starts downloads, as `userStartedJobIds` records, even ones they
-    /// had started before, so `KeepAwakeAudio` can start with them.
-    private(set) var userStartCount = 0
     /// Why the system last cancelled transfers by itself, to tell the user until dismissed.
     var systemCancellation: URLError.BackgroundTaskCancelledReason?
     /// The watched downloads last deleted to make room, to say so. Kept on disk, so a deletion
@@ -517,7 +514,6 @@ final class DownloadManager {
 
     private func noteStartedByUser(_ ids: some Sequence<UUID>) {
         userStartedJobIds.formUnion(ids)
-        userStartCount += 1
     }
 
     // MARK: Commands

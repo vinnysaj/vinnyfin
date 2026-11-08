@@ -274,7 +274,7 @@ struct RootView: View {
 
 struct MainTabs: View {
     enum Destination: Hashable {
-        case home, movies, shows, downloads, settings, search
+        case home, movies, shows, downloads, sounds, settings, search
     }
 
     /// A title a link asked to open, shown on Home as the page after it.
@@ -322,6 +322,9 @@ struct MainTabs: View {
                 }
             }
             #if os(tvOS)
+            Tab("Sounds", systemImage: "waveform", value: .sounds) {
+                SoundsView()
+            }
             Tab("Settings", systemImage: "gear", value: .settings) {
                 SettingsView()
             }

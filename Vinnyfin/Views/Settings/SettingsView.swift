@@ -12,9 +12,6 @@ struct SettingsView: View {
     @Environment(SpotlightTitles.self) private var spotlight
     @Environment(\.openURL) private var openURL
     #endif
-    #if os(iOS) || os(visionOS)
-    @Environment(KeepAwakeAudio.self) private var keepAwake
-    #endif
     @State private var confirmingSignOut = false
 
     var body: some View {
@@ -95,9 +92,6 @@ struct SettingsView: View {
                     #endif
                 }
                 whenToDownload
-                #if os(iOS) || os(visionOS)
-                keepRunning
-                #endif
                 storage
                 notifications
                 spotlightSection
@@ -174,35 +168,6 @@ struct SettingsView: View {
             Text("Downloads also wait while Low Data Mode is on. vinnyfin starts waiting downloads when the system next lets it, so they can begin a while after you plug in. If you unplug while vinnyfin is in the background, the download it's on can carry on until it's done; the rest wait. Download Now on a waiting download starts it anyway.")
         }
     }
-
-    #if os(iOS) || os(visionOS)
-    @ViewBuilder private var keepRunning: some View {
-        @Bindable var settings = settings
-        Section {
-            Toggle("Keep Downloads Running", isOn: $settings.keepDownloadsRunning)
-                .accessibilityIdentifier("settings.keepDownloadsRunning")
-                .onChange(of: settings.keepDownloadsRunning) { _, isOn in
-                    if isOn { keepAwake.switchedOn() }
-                }
-            if settings.keepDownloadsRunning {
-                LabeledContent("Sound") {
-                    TextField("Sound", text: $settings.keepDownloadsRunningSound, prompt: Text("Optional Web Address"))
-                        .multilineTextAlignment(.trailing)
-                        .keyboardType(.URL)
-                        .textContentType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .accessibilityIdentifier("settings.keepDownloadsRunningSound")
-                }
-                KeepAwakeSoundStatus()
-                Toggle("Keep Playing After Downloads Finish", isOn: $settings.keepPlayingAfterDownloads)
-                    .accessibilityIdentifier("settings.keepPlayingAfterDownloads")
-            }
-        } footer: {
-            Text("Plays audio in the background so \(UIDevice.current.systemName) keeps vinnyfin running until downloads finish. It uses more battery. Sound is the web address of an audio file to play on a loop, such as white noise.")
-        }
-    }
-    #endif
 
     @ViewBuilder private var storage: some View {
         @Bindable var settings = settings
@@ -292,36 +257,6 @@ extension AccountStore {
         downloads.removeUnfinished()
         await downloads.transcodes.finishCleanups()
         await signOut()
-    }
-}
-#endif
-
-#if os(iOS) || os(visionOS)
-/// How Keep Downloads Running's sound is getting on: fetching, ready, or why it can't be used.
-private struct KeepAwakeSoundStatus: View {
-    @Environment(KeepAwakeAudio.self) private var keepAwake
-
-    var body: some View {
-        switch keepAwake.sound {
-        case .silence:
-            EmptyView()
-        case .fetching:
-            HStack(spacing: 8) {
-                ProgressView()
-                Text("Fetching the sound…")
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-        case .ready:
-            Label("The sound is ready", systemImage: "checkmark.circle")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        case .failed(let failure):
-            Label("\(failure.message) Downloads keep running in silence until it's fixed.", systemImage: "exclamationmark.triangle")
-                .font(.footnote)
-                .foregroundStyle(.red)
-                .accessibilityIdentifier("settings.keepDownloadsRunningSound.problem")
-        }
     }
 }
 #endif

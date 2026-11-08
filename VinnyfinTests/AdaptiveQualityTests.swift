@@ -239,8 +239,8 @@ struct StepDownTests {
         #expect(stepDown(from: .direct(remux), throughput: 25_000_000, sources: [hevc4K, remux], allowTranscoding: false) == nil)
     }
 
-    @Test func goesByNamesForGelatoStreamsNotYetOpened() {
-        let streams = [version("a", "[RD+] 4K HDR DV"), version("b", "1080p WEB-DL"), version("c", "720p")]
+    @Test func goesByNamesForRemoteStreamsNotYetOpened() {
+        let streams = [version("a", "[Remote] 4K HDR DV"), version("b", "1080p WEB-DL"), version("c", "720p")]
         #expect(stepDown(from: .direct(streams[0]), throughput: nil, sources: streams) == .direct(streams[1]))
         #expect(stepDown(from: .direct(streams[1]), throughput: 9_000_000, sources: streams) == .direct(streams[2]))
     }

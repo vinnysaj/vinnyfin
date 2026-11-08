@@ -86,15 +86,15 @@ struct VersionPlayedLastTests {
     }
 
     @Test func keepsTheServersOrderBehindTheItemsOwnVersion() {
-        // Gelato's streams: the server moved stream "c", partway through, ahead of the movie's own "a".
+        // Remote streams: the server moved stream "c", partway through, ahead of the movie's own "a".
         let streams = [
             version("c", "1080p WEB", height: 1080), version("a", "4K REMUX", height: 2160),
             version("b", "1080p BluRay", height: 1080), version("d", "720p", height: 720),
         ]
-        var gelato = JellyfinItem(id: "a", name: "Streamed", type: "Movie")
-        gelato.mediaSources = streams
-        #expect(gelato.versionPlayedLast?.id == "c")
-        #expect(gelato.withOwnVersionFirst(positionFrom: alternate).mediaSources?.map(\.id) == ["a", "c", "b", "d"])
+        var streamed = JellyfinItem(id: "a", name: "Streamed", type: "Movie")
+        streamed.mediaSources = streams
+        #expect(streamed.versionPlayedLast?.id == "c")
+        #expect(streamed.withOwnVersionFirst(positionFrom: alternate).mediaSources?.map(\.id) == ["a", "c", "b", "d"])
     }
 
     private func version(_ id: String, _ name: String, height: Int) -> MediaSource {

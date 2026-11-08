@@ -48,7 +48,7 @@ struct VersionChooserTests {
     @Test func readsTheClassFromWideFramesAndNames() {
         #expect(VersionTraits(version("scope", width: 1920, height: 800)).resolutionClass == 1080)
         #expect(VersionTraits(version("cropped", width: 3840, height: 1606)).resolutionClass == 2160)
-        #expect(VersionTraits(version("gelato", "[RD+] 4K HDR DV")).resolutionClass == 2160)
+        #expect(VersionTraits(version("remote", "[Remote] 4K HDR DV")).resolutionClass == 2160)
         #expect(VersionTraits(version("named", "Movie.1080p.WEB")).resolutionClass == 1080)
         #expect(VersionTraits(version("none", "Director's Cut")).resolutionClass == nil)
     }

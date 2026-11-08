@@ -15,7 +15,7 @@ import OSLog
 /// the app is suspended or after the system has terminated it; the system relaunches the app in
 /// the background to hand over finished transfers. Files are fetched in byte-range chunks that
 /// are written into a sparse partial file as they arrive, so a dropped connection costs at most
-/// one chunk, whatever the server sends. (Gelato's streams come through Jellyfin without ETag or
+/// one chunk, whatever the server sends. (Remote streams come through Jellyfin without ETag or
 /// Last-Modified, which the system needs for its own resume data.)
 ///
 /// Files download one at a time, in the order of the list, which people can rearrange (Download
@@ -74,7 +74,7 @@ import OSLog
 /// makes the system cancel every transfer and leave the app closed until it's opened again; the
 /// reason comes with the cancellations then, and is kept in `systemCancellation` to tell the
 /// user. Which downloads someone started, rather than smart downloads by themselves, is in
-/// `userStartedJobIds`, and each time someone starts some moves `userStartCount`.
+/// `userStartedJobIds`.
 ///
 /// Every transfer's purpose is in its `taskDescription` (`TransferTag`), so the queue rebuilds
 /// itself from the session after a relaunch. What was handed to the session is kept on disk as
@@ -1432,7 +1432,7 @@ final class DownloadManager {
     }
 
     /// The daemon retries a dropped transfer by itself, without telling the app. Where the server
-    /// gives no validators to resume with (Gelato's streams), the retry starts the range over, and
+    /// gives no validators to resume with (remote streams), the retry starts the range over, and
     /// a link that drops more often than a chunk takes would never finish one. So a byte count
     /// going backwards counts as a dropped connection: the job's chunks shrink, and a transfer now
     /// far bigger than a chunk is replaced by smaller ones.

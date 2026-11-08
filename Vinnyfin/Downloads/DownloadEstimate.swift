@@ -8,7 +8,7 @@ nonisolated struct DownloadEstimate: Equatable, Sendable {
     var count = 0
     /// The listed sizes and the transcodes' estimates added up.
     var bytes: Int64 = 0
-    /// Versions without a believable listed size, such as Gelato's streams, whose size is known
+    /// Versions without a believable listed size, such as remote streams, whose size is known
     /// only once the server answers for the file.
     var unknownCount = 0
     /// Transcodes, whose size is known only once they're made.

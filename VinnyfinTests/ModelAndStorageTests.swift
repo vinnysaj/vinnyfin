@@ -49,7 +49,7 @@ struct JellyfinDecodingTests {
     }
 
     @Test func decodesARemoteStreamWithoutTrustingItsSize() throws {
-        // A .strm source behaves like a Gelato stream: an http path and the pointer file's size.
+        // A .strm source is a remote stream: an http path and the pointer file's size.
         let movie = try JSONDecoder().decode(JellyfinItem.self, from: Samples.fixture("movie-remote-strm"))
         let source = try #require(movie.mediaSources?.first)
         #expect(source.protocol == "Http")
@@ -219,8 +219,8 @@ struct AddressTests {
         func source(_ id: String, _ name: String) -> MediaSource {
             MediaSource(id: id, name: name)
         }
-        let picked = source("a", "[RD+] 2160p HDR10 REMUX GroupX")
-        let candidates = [source("1", "[RD+] 1080p WEB-DL GroupY"), source("2", "[RD+] 2160p HDR10 REMUX GroupX"), source("3", "720p")]
+        let picked = source("a", "[Remote] 2160p HDR10 REMUX GroupX")
+        let candidates = [source("1", "[Remote] 1080p WEB-DL GroupY"), source("2", "[Remote] 2160p HDR10 REMUX GroupX"), source("3", "720p")]
         #expect(picked.closestMatch(in: candidates)?.id == "2")
         #expect(source("z", "zzz").closestMatch(in: candidates) == nil)
     }

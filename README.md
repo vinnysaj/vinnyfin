@@ -8,7 +8,7 @@ It is yet another Jellyfin player. But I think mine is really good! It doesn't t
 
 The main advantage here is downloading content for offline playback. The original idea of this project was literally just a Jellyfin sync/downloader, but then I thought "why not? lets make this into a player I can share with my friends and family too" and here we are! It has a lot of cool QOL features like smart downloads that auto delete episodes of shows you've watched as you watch them, and downloads newer episodes as your position in the show advances.
 
-This also works with gelato/aiostreams, which is a common setup and is super awesome because it pretty much eliminates the need for transcoding, making downloads incredibly fast. If you kill the app, the downloads resume gracefully the moment you reopen it.
+If you kill the app, the downloads resume gracefully the moment you reopen it.
 
 # Files
 
@@ -28,7 +28,7 @@ The app only talks to the Jellyfin server you sign in to. There's no analytics, 
 
 # Not affiliated
 
-vinnyfin isn't made by or affiliated with the Jellyfin project, Gelato, Dolby or DTS. Jellyfin is a trademark of its owners; Dolby, Dolby Vision, Dolby Atmos and DTS are trademarks of their owners.
+vinnyfin isn't made by or affiliated with the Jellyfin project, Dolby or DTS. Jellyfin is a trademark of its owners; Dolby, Dolby Vision, Dolby Atmos and DTS are trademarks of their owners.
 
 # License
 

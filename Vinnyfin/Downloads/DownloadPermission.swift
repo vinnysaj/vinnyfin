@@ -5,9 +5,9 @@ import Foundation
 /// its user policy (`GET /Users/Me`).
 ///
 /// The server checks only some of it itself: Allow Media Downloading guards its own download
-/// endpoint, which vinnyfin doesn't use (Gelato replaces it), and nothing guards a transcode
-/// fetched piece by piece; transcoding video without the permission silently copies the
-/// picture at full size instead. So vinnyfin holds to all of it:
+/// endpoint, which vinnyfin doesn't use (remote-stream plugins replace it), and nothing guards a
+/// transcode fetched piece by piece; transcoding video without the permission silently copies
+/// the picture at full size instead. So vinnyfin holds to all of it:
 ///
 /// - Allow Media Downloading (`EnableContentDownloading`): every download, original or transcoded.
 /// - Allow video playback that requires transcoding (`EnableVideoPlaybackTranscoding`): a

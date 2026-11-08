@@ -102,6 +102,10 @@ struct SettingsView: View {
                     Text("vinnyfin only talks to your Jellyfin server, and to your iCloud, which keeps your servers and most of these settings the same on all your devices. No analytics, no tracking, no accounts.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    Text("vinnyfin isn't made by or affiliated with the Jellyfin project. Jellyfin is a trademark of its owners; Dolby, Dolby Atmos, Dolby Vision and DTS are trademarks of their owners.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings.notAffiliated")
                 }
             }
             .formStyle(.grouped)

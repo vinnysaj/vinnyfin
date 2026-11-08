@@ -1080,7 +1080,7 @@ final class PlayerModel: Identifiable {
     }
 
     /// Gives the title the position the server keeps for the version playing, when that isn't the
-    /// title's own (after a step down, for a version picked, for one of Gelato's other streams),
+    /// title's own (after a step down, for a version picked, for another remote stream),
     /// so lists, Smart Downloads and other clients see where the title got to. Playback goes on
     /// as it is when the server doesn't take it.
     private func giveTitleThePosition(of playback: ResolvedPlayback) async {

@@ -200,7 +200,7 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
 /// show only the item the versions belong to, whose own version the server lists first; it
 /// keeps a position for each version, marks them all watched when one is finished, and lists
 /// the version partway through and played last ahead of the item's own. Resume and Next Up
-/// name the version itself. Gelato's streams are versions too, and it orders them the same way.
+/// name the version itself. A plugin's remote streams are versions too, ordered the same way.
 /// The app gives the item the position of a version it plays (`UserDataUpdate.init(positionOf:)`),
 /// which makes the item the one played last; another client's playback leaves it on the version.
 nonisolated extension JellyfinItem {
@@ -302,7 +302,7 @@ nonisolated struct TrickplayInfo: Codable, Hashable, Sendable {
 }
 
 /// The parts of Jellyfin's `MediaSourceInfo` this app reads: one version of an item.
-/// Behind Gelato, every stream the addon found is one of these.
+/// Each of a plugin's remote streams is one of these too.
 nonisolated struct MediaSource: Codable, Identifiable, Hashable, Sendable {
     let id: String
     var name: String?

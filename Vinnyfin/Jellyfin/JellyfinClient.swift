@@ -213,8 +213,8 @@ nonisolated struct JellyfinClient: Sendable {
     }
 
     /// The item with its versions, its own first, and the position of the version played last.
-    /// Behind Gelato this is also the call that makes the server look up the item's streams, so
-    /// it can take a few seconds.
+    /// With a plugin that finds remote streams for items, this is also the call that makes the
+    /// server look them up, so it can take a few seconds.
     func item(id: String, userId: String) async throws -> JellyfinItem {
         try await withOwnVersionFirst(get("Items/\(id)", query: ["userId": userId, "fields": Self.detailFields]), userId: userId)
     }
@@ -477,8 +477,9 @@ nonisolated struct JellyfinClient: Sendable {
     }
 
     /// The source's original bytes, untouched. Jellyfin serves a local file with byte ranges
-    /// itself and passes a remote stream's (Gelato's) Range header through to the upstream.
-    /// `/Items/{id}/Download` is not used: Gelato replaces it with a response that ignores Range.
+    /// itself and passes a remote stream's Range header through to the upstream.
+    /// `/Items/{id}/Download` is not used: remote-stream plugins replace it with a response that
+    /// ignores Range.
     func streamURL(itemId: String, mediaSourceId: String) -> URL {
         var query = ["static": "true", "mediaSourceId": mediaSourceId]
         if let token { query["ApiKey"] = token }

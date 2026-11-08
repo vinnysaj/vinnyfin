@@ -56,7 +56,7 @@ nonisolated enum VideoQuality: String, CaseIterable, Codable, Sendable, Identifi
 nonisolated struct VersionTraits: Equatable, Sendable {
     /// The picture's class in lines: 2160, 1080, 720 and so on. Nil when nothing says.
     let resolutionClass: Int?
-    /// Bits per second, as the server measured the file. Nil when it hasn't, as for a Gelato
+    /// Bits per second, as the server measured the file. Nil when it hasn't, as for a remote
     /// stream before it is first opened.
     let bitrate: Int?
 
@@ -77,7 +77,7 @@ nonisolated struct VersionTraits: Equatable, Sendable {
     }
 
     /// From the video stream's size, treating a wide 1920x800 as 1080p; failing that, from
-    /// the version's name ("4K HDR", "1080p WEB-DL"), which is all a Gelato stream has
+    /// the version's name ("4K HDR", "1080p WEB-DL"), which is all a remote stream has
     /// before it is first opened.
     static func resolutionClass(of source: MediaSource) -> Int? {
         if let video = source.videoStream, let width = video.width, let height = video.height, width > 0, height > 0 {
@@ -126,8 +126,8 @@ nonisolated enum PlaybackPlan: Equatable, Sendable {
 nonisolated enum VersionChooser {
     /// The version to play or download at `quality`: the best one that fits, in the order of
     /// `sources`, which is the item's own version first and the rest in the server's order, as
-    /// `JellyfinClient.item` lists them (Gelato ranks streams best first). When none fits, the
-    /// smallest one that doesn't, which `planStreaming` then has the server scale down.
+    /// `JellyfinClient.item` lists them (remote-stream plugins rank theirs best first). When none
+    /// fits, the smallest one that doesn't, which `planStreaming` then has the server scale down.
     static func choose(from sources: [MediaSource], quality: VideoQuality) -> MediaSource? {
         guard let cap = quality.maxHeight else { return sources.first }
         let known = sources.compactMap { source in VersionTraits(source).resolutionClass.map { (source, $0) } }

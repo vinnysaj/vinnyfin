@@ -78,14 +78,22 @@ actor SoundOutput {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: outputRate > 0 ? outputRate : 48_000, channels: 2) else {
             throw SoundOutputError.noFormat
         }
-        let source = Self.source(for: sound, format: format)
-        engine.attach(source)
-        try engine.connectNode(source, to: engine.mainMixerNode, format: format)
+        try Self.attach(Self.source(for: sound, format: format), to: engine, format: format)
         engine.prepare()
         self.engine = engine
         playing = sound
         try engine.start()
         Self.log.info("Playing \(sound.rawValue, privacy: .public) at \(format.sampleRate) Hz")
+    }
+
+    /// Puts `source` in `engine`, playing into its main mixer.
+    nonisolated static func attach(_ source: AVAudioSourceNode, to engine: AVAudioEngine, format: AVAudioFormat) throws {
+        engine.attach(source)
+        if #available(tvOS 27, *) {
+            try engine.connectNode(source, to: engine.mainMixerNode, format: format)
+        } else {
+            engine.connect(source, to: engine.mainMixerNode, format: format)
+        }
     }
 
     /// The node that makes the sound as it plays. Made outside the actor: its block runs on the

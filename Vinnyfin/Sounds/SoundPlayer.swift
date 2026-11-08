@@ -306,15 +306,6 @@ final class SoundPlayer {
         ]
         #else
         let session = AVAudioSession.sharedInstance()
-        sessionMessages = [
-            center.addObserver(of: session, for: .didBecomeInactive) { [weak self] message in
-                guard case .systemInterruption = message.deactivationResult else { return }
-                self?.interrupted()
-            },
-            center.addObserver(of: session, for: .resumptionRecommendation) { [weak self] message in
-                self?.interruptionEnded(shouldResume: message.recommendation == .shouldResume)
-            },
-        ]
         sessionObservations = [
             center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] notification in
                 let reason = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
@@ -329,6 +320,34 @@ final class SoundPlayer {
                 MainActor.assumeIsolated { self?.outputChanged() }
             },
         ]
+        if #available(tvOS 27, *) {
+            sessionMessages = [
+                center.addObserver(of: session, for: .didBecomeInactive) { [weak self] message in
+                    guard case .systemInterruption = message.deactivationResult else { return }
+                    self?.interrupted()
+                },
+                center.addObserver(of: session, for: .resumptionRecommendation) { [weak self] message in
+                    self?.interruptionEnded(shouldResume: message.recommendation == .shouldResume)
+                },
+            ]
+        } else {
+            // tvOS 26 tells of an interruption's start and end in the one notification.
+            sessionObservations.append(
+                center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] notification in
+                    let info = notification.userInfo
+                    let type = (info?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap { AVAudioSession.InterruptionType(rawValue: $0) }
+                    let options = AVAudioSession.InterruptionOptions(rawValue: info?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+                    MainActor.assumeIsolated {
+                        switch type {
+                        case .began: self?.interrupted()
+                        case .ended: self?.interruptionEnded(shouldResume: options.contains(.shouldResume))
+                        case nil: break
+                        @unknown default: break
+                        }
+                    }
+                }
+            )
+        }
         #endif
     }
 

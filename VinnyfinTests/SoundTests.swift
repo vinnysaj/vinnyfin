@@ -98,9 +98,7 @@ nonisolated struct SoundOutputTests {
         let engine = AVAudioEngine()
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_096)
-        let source = SoundOutput.source(for: .rain, format: format)
-        engine.attach(source)
-        try engine.connectNode(source, to: engine.mainMixerNode, format: format)
+        try SoundOutput.attach(SoundOutput.source(for: .rain, format: format), to: engine, format: format)
         try engine.start()
         defer { engine.stop() }
         let buffer = try #require(AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 4_096))

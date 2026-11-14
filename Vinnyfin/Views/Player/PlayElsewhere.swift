@@ -32,6 +32,7 @@ struct PlayElsewhereButton: View {
             .buttonStyle(.platformGlass)
             .controlSize(.large)
             .labelStyle(.iconOnly)
+            .help(PlayElsewhereSheet.title)
             .accessibilityIdentifier("playElsewhere")
             .sheet(isPresented: $isShowing) {
                 PlayElsewhereSheet(subject: subject) {}

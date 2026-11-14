@@ -137,15 +137,19 @@ struct RemoteScreen: View {
         HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 16 : 36) {
             Button("Back 10 Seconds", systemImage: "gobackward.10") { remote.skip(by: -RemoteCommand.skipInterval) }
                 .font(.title)
+                .help("Back 10 Seconds")
             Button(remote.isPaused ? "Play" : "Pause", systemImage: remote.isPaused ? "play.fill" : "pause.fill") { remote.togglePause() }
                 .font(.system(size: playPauseSize))
                 .contentTransition(.symbolEffect(.replace))
+                .help(remote.isPaused ? "Play" : "Pause")
                 .accessibilityIdentifier("remote.playPause")
             Button("Forward 10 Seconds", systemImage: "goforward.10") { remote.skip(by: RemoteCommand.skipInterval) }
                 .font(.title)
+                .help("Forward 10 Seconds")
             if remote.item?.isEpisode == true, !remote.isLastEpisode {
                 Button("Next Episode", systemImage: "forward.end.fill") { remote.nextEpisode() }
                     .font(.title2)
+                    .help("Next Episode")
                     .accessibilityIdentifier("remote.next")
             }
         }
@@ -237,6 +241,7 @@ struct RemoteMiniPlayer: View {
                 .accessibilityIdentifier("remote.mini")
                 Button(remote.isPaused ? "Play" : "Pause", systemImage: remote.isPaused ? "play.fill" : "pause.fill") { remote.togglePause() }
                     .labelStyle(.iconOnly)
+                    .help(remote.isPaused ? "Play" : "Pause")
                     .buttonStyle(.plain)
                     .font(.title3)
                     .disabled(remote.isStarting)

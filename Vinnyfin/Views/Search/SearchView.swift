@@ -23,7 +23,8 @@ struct SearchView: View {
     @State private var results = SearchResults()
     /// What a search that found nothing was likely meant to be.
     @State private var suggestion: String?
-    @State private var path = NavigationPath()
+    /// The pages open on top of the search: titles, people, genres, and lists in full.
+    @Binding var path: NavigationPath
     @State private var isSearching = false
     @State private var searchError: String?
     /// Try Again's presses, each of which searches again for the same text.

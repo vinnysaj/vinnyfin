@@ -96,10 +96,11 @@ enum DisplayOutput {
 }
 
 extension AppSettings {
-    /// What streams on this device are held to: the streaming quality, what an Apple TV's output
-    /// makes use of, and with Adaptive Quality, the bitrate the connection was learned to carry.
+    /// What streams on this device are held to: the streaming quality for the network it's on, what
+    /// an Apple TV's output makes use of, and with Adaptive Quality, the bitrate the connection was
+    /// learned to carry.
     var streamingLimit: StreamingLimit {
-        StreamingLimit(quality: streamingQuality, displayHeight: DisplayOutput.streamingHeight,
+        StreamingLimit(quality: streamingQuality(on: .current), displayHeight: DisplayOutput.streamingHeight,
                        bitrate: adaptiveQuality ? learnedQuality.limit : nil)
     }
 }

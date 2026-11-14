@@ -162,6 +162,7 @@ struct TrackPanel: View {
                 #if !os(tvOS)
                 Button("Close", systemImage: "xmark", action: onClose)
                     .labelStyle(.iconOnly)
+                    .help("Close")
                     .buttonStyle(.platformGlass)
                     .buttonBorderShape(.circle)
                 #endif

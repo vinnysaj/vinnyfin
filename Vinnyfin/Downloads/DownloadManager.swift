@@ -148,6 +148,9 @@ final class DownloadManager {
     /// The watched downloads last deleted to make room, to say so. Kept on disk, so a deletion
     /// in a background wake is still told after a kill.
     private(set) var lastFreed: FreedSpace?
+    /// The watched episodes Delete Watched Episodes deleted lately, by `DownloadJob.showKey`, to
+    /// say so. Kept on disk, as smart downloads mostly delete them in background wakes.
+    private(set) var watchedRemovals: [String: WatchedRemoval] = [:]
     /// Moves when saved artwork changes, so views showing it look again.
     private(set) var artworkRevision = 0
     /// A local problem (storage, the saved queue) to show until dismissed.
@@ -342,6 +345,11 @@ final class DownloadManager {
             lastFreed = try storage.loadFreed()
         } catch {
             problem = "Couldn't read which downloads were deleted to make room: \(error.localizedDescription)"
+        }
+        do {
+            watchedRemovals = try storage.loadWatchedRemovals()
+        } catch {
+            problem = "Couldn't read which watched episodes were deleted: \(error.localizedDescription)"
         }
 
         delegate = TransferDelegate(stagingDirectory: storage.staging)
@@ -955,7 +963,8 @@ final class DownloadManager {
 
     /// Deletes the downloaded episodes watched since they were queued, here or, as far as the
     /// server last said, anywhere: what Delete Watched Episodes asks. Never while a player is
-    /// open, since the episode in it could be one of them.
+    /// open, since the episode in it could be one of them. Notes what it deleted, for Downloads
+    /// to say.
     func deleteWatchedEpisodes() {
         guard players.isEmpty else { return }
         let watched = watchedDownloads().filter(\.isEpisode)
@@ -967,6 +976,12 @@ final class DownloadManager {
         removeUnusedArtwork()
         save()
         pump()
+        watchedRemovals = WatchedRemoval.adding(watched, to: watchedRemovals, at: .now)
+        do {
+            try storage.saveWatchedRemovals(watchedRemovals)
+        } catch {
+            problem = "Couldn't note which watched episodes were deleted: \(error.localizedDescription)"
+        }
     }
 
     /// Drops the unfinished downloads of these shows' episodes watched since they were queued,

@@ -62,16 +62,35 @@ nonisolated enum UpNext {
         return episode.parentIndexNumber == season && episode.indexNumber == number + 1
     }
 
+    /// How many episodes on from one the player looks through for the one to go on to, past
+    /// specials and episodes not out yet.
+    static let neighbourReach = 6
+
     /// The first episode to watch after `previous`, from the show's episodes in order from it on:
     /// not watched, not a special, aired and with something to play.
     static func firstToWatch(after previous: JellyfinItem, in following: [JellyfinItem], now: Date) -> JellyfinItem? {
-        let after = following.firstIndex { $0.id == previous.id }.map { following[($0 + 1)...] } ?? following[...]
-        return after.first { $0.parentIndexNumber != 0 && !$0.isPlayed && isAvailable($0, now: now) }
+        episodes(after: previous.id, in: following).first { !$0.isPlayed && canGoOn(to: $0, now: now) }
+    }
+
+    /// The episode the player goes on to after `episodeId`, watched or not, from the show's
+    /// episodes in order from it on: the Next button's, and the up-next card's.
+    static func episode(after episodeId: String, in following: [JellyfinItem], now: Date) -> JellyfinItem? {
+        episodes(after: episodeId, in: following).first { canGoOn(to: $0, now: now) }
+    }
+
+    /// Whether the player can go on to `episode` from the one beside it: not a special, aired and
+    /// with something to play.
+    static func canGoOn(to episode: JellyfinItem, now: Date) -> Bool {
+        episode.parentIndexNumber != 0 && isAvailable(episode, now: now)
     }
 
     /// Aired, and with something to play.
     static func isAvailable(_ episode: JellyfinItem, now: Date) -> Bool {
         !episode.isNotYetAvailable(now: now)
+    }
+
+    private static func episodes(after episodeId: String, in following: [JellyfinItem]) -> ArraySlice<JellyfinItem> {
+        following.firstIndex { $0.id == episodeId }.map { following[($0 + 1)...] } ?? following[...]
     }
 
     /// The shows being watched, from what's partway through, the episodes finished last and the

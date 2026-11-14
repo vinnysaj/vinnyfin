@@ -3,10 +3,13 @@ import AVFoundation
 import Combine
 import Foundation
 import MediaPlayer
+import Nuke
 import Observation
 import OSLog
 #if canImport(UIKit)
 import UIKit
+#else
+import AppKit
 #endif
 
 /// The playhead, ten times a second. Kept apart from `PlayerModel` so only the views that show
@@ -25,19 +28,101 @@ final class EngineLease {
     var holder: UUID?
 }
 
+/// The one load a player has under way: resolving a title, asking the server for a new stream,
+/// and starting it in the engine. Starting a load cancels the one before and numbers the new
+/// one. Its work checks its number after each wait and stops when another load has started
+/// since: a cancelled request doesn't always end at once, and what a replaced load did after it
+/// came back would undo the newer one.
+final class LoadSequence {
+    private(set) var generation = 0
+    private var task: Task<Void, Never>?
+
+    func isCurrent(_ generation: Int) -> Bool {
+        generation == self.generation
+    }
+
+    /// Runs `work` as the load under way, given its generation, until it ends or another load
+    /// replaces it. Cancelling the caller cancels it too.
+    func start(_ work: @escaping (_ generation: Int) async -> Void) async {
+        generation += 1
+        let generation = generation
+        task?.cancel()
+        let task = Task { await work(generation) }
+        self.task = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+    }
+
+    /// Stops the load under way, if there is one, for good.
+    func cancel() {
+        generation += 1
+        task?.cancel()
+        task = nil
+    }
+}
+
+/// The countdown to the next episode as an episode ends, and what it was started for. When it
+/// runs out it plays the next episode only if nothing has loaded since, the episode that ended is
+/// still the one on screen, and the next episode is still the one it counted down to: a Play
+/// Again, a move back on the timeline or another episode picked during it plays instead.
+struct UpNextCountdown {
+    let generation: Int
+    let endedEpisodeId: String?
+    let nextEpisodeId: String
+
+    func isDue(loads: LoadSequence, onScreen episodeId: String?, next nextId: String?, hasEnded: Bool) -> Bool {
+        hasEnded && loads.isCurrent(generation) && episodeId == endedEpisodeId && nextId == nextEpisodeId
+    }
+}
+
+/// A word about the playback over the picture for a few seconds, such as a move to a lower
+/// quality, and what it's about.
+struct PlaybackNotice: Equatable {
+    enum Kind {
+        /// The connection, and the quality it carries.
+        case connection
+        /// Something another device asked for.
+        case remoteRequest
+        /// Anything else, such as extras that didn't load.
+        case info
+    }
+
+    let text: String
+    let kind: Kind
+}
+
+/// A title's picture for the system's Now Playing: decoded once and handed to MediaPlayer, which
+/// asks for it from threads of its own, and as JPEG for AVKit's info pane and AirPlay receivers.
+struct NowPlayingArtwork {
+    let itemId: String
+    let artwork: MPMediaItemArtwork
+    let jpeg: Data?
+
+    init(itemId: String, image: PlatformImage) {
+        self.itemId = itemId
+        artwork = Self.artwork(of: DecodedImage(image: image))
+        #if canImport(UIKit)
+        jpeg = image.jpegData(compressionQuality: 0.8)
+        #else
+        jpeg = image.tiffRepresentation.flatMap { NSBitmapImageRep(data: $0) }?.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+        #endif
+    }
+
+    /// Made where nothing is isolated, so MediaPlayer can call it from any thread.
+    nonisolated private static func artwork(of picture: DecodedImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: picture.image.size) { _ in picture.image }
+    }
+
+    /// An image decoded already and never changed, which any thread can read.
+    private nonisolated struct DecodedImage: @unchecked Sendable {
+        let image: PlatformImage
+    }
+}
+
 /// One audio or subtitle choice in the player's menus.
 struct TrackOption: Identifiable, Equatable {
     let id: Int
     let title: String
     let detail: String?
-}
-
-/// The audio and subtitles chosen in a playback, described so that another version of the
-/// title, whose tracks are numbered differently, can choose the same.
-struct TrackSelection {
-    var audio: TrackChooser.Candidate?
-    /// Nil when subtitles are off.
-    var subtitle: TrackChooser.Candidate?
 }
 
 /// A playback on screen: what it is, how it's going, and the commands for it. Drives the shared
@@ -71,6 +156,9 @@ final class PlayerModel: Identifiable {
     }
     private(set) var title: String
     private(set) var subtitle: String?
+    /// The playback on screen: the stream playing, or once it has ended or failed, that one still,
+    /// whose title, chapters, previews and versions the controls go on showing. A new title clears
+    /// it as it starts loading.
     private(set) var current: ResolvedPlayback?
     private(set) var duration: Double = 0
     private(set) var videoFormat = VideoFormat.sdr
@@ -87,7 +175,7 @@ final class PlayerModel: Identifiable {
     /// Seconds left before the next episode starts by itself; nil when it isn't counting down.
     private(set) var upNextCountdown: Int?
     /// A word about the playback, such as a move to a lower quality, shown for a few seconds.
-    private(set) var notice: String?
+    private(set) var notice: PlaybackNotice?
     var upNextDismissed = false
     let clock = PlaybackClock()
     /// The position the viewer is moving the timeline to, before it's committed.
@@ -110,8 +198,28 @@ final class PlayerModel: Identifiable {
 
     @ObservationIgnored private var request: PlaybackRequest
     @ObservationIgnored private var subscriptions = Set<AnyCancellable>()
+    @ObservationIgnored private let loads = LoadSequence()
+    /// `current` is playing, or getting ready to, as a session the server has been told of: from
+    /// `begin` until `finishSession`.
+    @ObservationIgnored private var sessionIsOpen = false
+    /// The viewer paused the playback while it started, or a stream of the title replaces one
+    /// paused: it starts paused, and stays so through its first picture until played.
+    @ObservationIgnored private var startsPaused = false
     @ObservationIgnored private var reportTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
+    /// The next episode with its versions, fetched as the up-next card comes up so it starts
+    /// sooner, and the warming of its stream.
+    @ObservationIgnored private var preparedNext: JellyfinItem?
+    @ObservationIgnored private var nextPreparation: Task<Void, Never>?
+    /// Waiting to see whether a seek lands before the player shows it's waiting for one.
+    @ObservationIgnored private var seekWait: Task<Void, Never>?
+    /// The picture of what plays, for the system's Now Playing, by the item it's of.
+    @ObservationIgnored private var nowPlayingArtwork: NowPlayingArtwork?
+    @ObservationIgnored private var artworkTask: Task<Void, Never>?
+    /// Where the picture is besides the app's own view, where the subtitle overlay can't follow.
+    @ObservationIgnored private var pictureOutside: Set<PictureOutside> = []
+    /// The system draws the subtitles, into the picture outside the app, and the overlay none.
+    @ObservationIgnored private var systemDrawsSubtitles = false
     @ObservationIgnored private var commandTargets: [(MPRemoteCommand, Any)] = []
     @ObservationIgnored private var appliedSubtitlePreference = false
     /// The engine's load returned, so its track lists are complete.
@@ -131,6 +239,8 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private var extrasRequestedFor: ExtrasKey?
     /// The audio and subtitles chosen in the version this one stands in for.
     @ObservationIgnored private var carriedTracks: TrackSelection?
+    /// The audio and subtitles of the version playing, as last seen on.
+    @ObservationIgnored private var playingTracks: TrackSelection?
     @ObservationIgnored private var connectionWatch = ConnectionWatch()
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
@@ -169,6 +279,9 @@ final class PlayerModel: Identifiable {
     var trickplay: TrickplayTiles? { current?.trickplay }
     var chapters: [ChapterMark] { current?.chapters ?? [] }
 
+    /// The playback whose session is open, which the server hears about; nil once it ended or failed.
+    private var session: ResolvedPlayback? { sessionIsOpen ? current : nil }
+
     /// The intro, recap, preview or credits being played, which the player offers to skip.
     func skippableSegment(at time: Double) -> MediaSegment? {
         guard settings.showSkipButtons else { return nil }
@@ -189,80 +302,133 @@ final class PlayerModel: Identifiable {
         await load(request)
     }
 
-    /// Plays another episode, such as the next one, in place of this one.
+    /// Plays another episode, such as the next one, in place of this one. Asked again for the
+    /// episode already starting, as a second press of Next is, it lets that one start.
     func play(_ episode: JellyfinItem) async {
-        countdownTask?.cancel()
-        upNextCountdown = nil
+        if requestedItemId == episode.id, status == .preparing || status == .loading { return }
         await switchTo(episode)
     }
 
     private func switchTo(_ episode: JellyfinItem) async {
         finishSession(reachedEnd: status == .ended)
-        await load(.item(episode))
+        startsPaused = false
+        var next = PlaybackRequest.item(episode)
+        if preparedNext?.id == episode.id { next.loadedItem = preparedNext }
+        // Holds the last picture until the episode's first, where the engine can.
+        engine.prepareForItemReplacement()
+        await load(next)
     }
 
+    /// Tries the title again after a failure: from where it had got to, with the audio and
+    /// subtitles it had, when it got that far.
     func retry() async {
-        await load(request)
+        startsPaused = false
+        await load(request.retrying(from: current != nil ? clock.time : nil), carrying: tracksToCarry())
     }
 
     /// Rebuilds the picture after the system took the video pipeline away in the background.
     func restoreAfterBackground() async {
-        guard current != nil, engine.needsForegroundVideoRestore else { return }
+        guard session != nil, engine.needsForegroundVideoRestore else { return }
         do {
             try await engine.reloadAtCurrentPosition()
         } catch is CancellationError {
             return
         } catch {
-            fail(error)
+            fail(error, engine: engine.errorInfo)
         }
     }
 
     /// Plays the same version again through the server's transcoder, for a file this device
-    /// can't play directly: at the size the streaming limit allows, or 1080p without one.
+    /// can't play directly: at the size the streaming limit allows, or 1080p without one, from
+    /// where it got to and with the audio and subtitles it had.
     func retryTranscoded() async {
-        guard let current, let item = current.item, let source = current.mediaSource, !current.isTranscode else { return }
-        let position = clock.time > 0 ? clock.time : current.startPosition
-        finishSession(reachedEnd: false)
-        status = .loading
-        do {
-            let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
-            let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
-                                                        audioIndex: nil, subtitleIndex: nil, start: position)
-            await begin(resolved)
-        } catch {
-            fail(error)
+        guard let playing = current, let item = playing.item, let source = playing.mediaSource, !playing.isTranscode else { return }
+        let position = clock.time > 0 ? clock.time : playing.startPosition
+        let audioIndex: Int?
+        let subtitleIndex: Int?
+        if let tracks = tracksToCarry() {
+            (audioIndex, subtitleIndex) = tracks.streamIndexes(in: source, settings: settings)
+        } else {
+            audioIndex = PlaybackResolver.preferredAudioIndex(in: source, language: settings.audioLanguage)
+            subtitleIndex = PlaybackResolver.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
+        }
+        let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
+        await startLoad { [self] generation in
+            finishSession(reachedEnd: false)
+            startsPaused = false
+            status = .loading
+            do {
+                let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
+                                                            audioIndex: audioIndex, subtitleIndex: subtitleIndex, start: position)
+                guard loads.isCurrent(generation) else { return }
+                await begin(resolved, generation: generation)
+            } catch {
+                guard loads.isCurrent(generation), !error.isCancellation else { return }
+                fail(error)
+            }
         }
     }
 
-    private func load(_ request: PlaybackRequest) async {
+    /// Starts `request` in place of whatever plays or loads. `tracks` are the audio and subtitles
+    /// a playback of the same title had, which this one keeps.
+    private func load(_ request: PlaybackRequest, carrying tracks: TrackSelection? = nil) async {
+        let isNewTitle = !request.playsSameTitle(as: self.request) || current == nil
+        if isNewTitle {
+            // Nothing of the title on screen carries over to another.
+            if sessionIsOpen { finishSession(reachedEnd: false) }
+            current = nil
+            isLoaded = false
+            carriedTracks = nil
+            playingTracks = nil
+            title = request.title
+            subtitle = nil
+        }
+        // The engine plays what's ending until the new stream replaces it; none of it is this load's.
+        subscriptions.removeAll()
+        seekWait?.cancel()
+        nextPreparation?.cancel()
+        nextPreparation = nil
+        preparedNext = nil
         self.request = request
         askedStreams = request.startingPoint
-        status = .preparing
-        title = request.title
-        subtitle = nil
+        status = startsPaused ? .paused : .preparing
         nextEpisode = nil
         segments = []
         upNextDismissed = false
-        upNextCountdown = nil
         extrasRequestedFor = nil
         scrubbing.finish()
-        do {
-            let resolved = try await resolver.resolve(request)
-            // A download's own copy, until the server's arrive.
-            segments = resolved.segments
-            await begin(resolved)
-        } catch is CancellationError {
-            return
-        } catch {
-            fail(error)
+        await startLoad { [self] generation in
+            do {
+                let resolved = try await resolver.resolve(request, carrying: tracks)
+                guard loads.isCurrent(generation) else { return }
+                // A download's own copy, until the server's arrive.
+                segments = resolved.segments
+                await begin(resolved, carrying: tracks, generation: generation)
+            } catch {
+                guard loads.isCurrent(generation), !error.isCancellation else { return }
+                fail(error)
+            }
         }
     }
 
+    /// Runs `work` as the one load under way (`LoadSequence`), in place of the one before and of
+    /// any countdown to the next episode.
+    private func startLoad(_ work: @escaping (_ generation: Int) async -> Void) async {
+        countdownTask?.cancel()
+        countdownTask = nil
+        upNextCountdown = nil
+        await loads.start(work)
+    }
+
     /// Starts a stream of the title `load` resolved: the version it chose, or one standing in
-    /// for it, which keeps the audio and subtitles `tracks` describe.
-    private func begin(_ resolved: ResolvedPlayback, carrying tracks: TrackSelection? = nil) async {
+    /// for it, which keeps the audio and subtitles `tracks` describe. Stops at the first wait
+    /// after which `generation` is no longer the load under way.
+    private func begin(_ resolved: ResolvedPlayback, carrying tracks: TrackSelection? = nil, generation: Int) async {
         guard !isClosed else { return }
+        // The session this one replaces ends first, so the server hears it stopped.
+        if sessionIsOpen { finishSession(reachedEnd: false) }
         current = resolved
+        sessionIsOpen = true
         title = resolved.title
         subtitle = resolved.subtitle
         duration = resolved.duration ?? 0
@@ -277,6 +443,7 @@ final class PlayerModel: Identifiable {
         clock.sourceTime = resolved.startPosition ?? 0
         clock.buffered = 0
         carriedTracks = tracks
+        playingTracks = nil
         // A version standing in for another keeps that one's tracks, whatever the request asked.
         if tracks != nil { askedStreams = nil }
         appliedSubtitlePreference = false
@@ -285,21 +452,28 @@ final class PlayerModel: Identifiable {
         startedReporting = false
         lastReportedPaused = nil
         watchTask?.cancel()
-        status = .loading
+        status = startsPaused ? .paused : .loading
+        updateSubtitleRendering()
         observeEngine()
 
         var options = LoadOptions()
         options.externalSubtitles = resolved.externalSubtitles
         options.matchContentEnabled = settings.matchContent
-        options.autoplay = sharing?.startsByItself(resolved.item?.id) ?? true
+        let beganPaused = startsPaused
+        options.autoplay = !beganPaused && (sharing?.startsByItself(resolved.item?.id) ?? true)
+        #if os(iOS) || os(macOS)
+        // The text subtitles also as the system's own, for Picture in Picture and AirPlay, where
+        // the overlay isn't drawn (`pictureLeavesApp`).
+        options.prepareNativeSubtitles = true
+        #endif
         var audioStreamIndex: Int32?
         if let asked = askedStreams?.audioStreamIndex, !resolved.isTranscode {
             // An audio stream's index in the file is the server's.
             audioStreamIndex = Int32(asked)
-        } else if let audio = tracks?.audio, !resolved.isTranscode {
+        } else if let tracks, let audio = tracks.audio, !resolved.isTranscode {
             // By the server's list of the version's streams when it has one, else by language.
             let streams = resolved.mediaSource?.audioStreams.compactMap(TrackChooser.Candidate.init) ?? []
-            audioStreamIndex = TrackChooser.same(as: audio, in: streams).map(Int32.init)
+            audioStreamIndex = (tracks.exactAudioIndex(in: resolved.mediaSource) ?? TrackChooser.same(as: audio, in: streams)).map(Int32.init)
             options.preferredAudioLanguages = [audio.language, settings.audioLanguage].compactMap { $0 }.filter { !$0.isEmpty }
         } else if !resolved.isTranscode, let described = describedAudio(in: resolved.mediaSource) {
             // Audio Descriptions asks for the description, which the engine ranks below the main mix.
@@ -315,21 +489,31 @@ final class PlayerModel: Identifiable {
         do {
             try await engine.load(url: resolved.url, startPosition: resolved.startPosition, options: options,
                                   audioSourceStreamIndex: audioStreamIndex)
-        } catch is CancellationError {
-            return
         } catch {
-            fail(error)
+            guard loads.isCurrent(generation), !isClosed, !(error is CancellationError) else { return }
+            fail(error, engine: engine.errorInfo)
             return
         }
-        guard !isClosed else { return }
+        guard loads.isCurrent(generation), !isClosed else { return }
         isLoaded = true
+        // A pause or a play while it loaded, which the load's own start would otherwise undo or miss.
+        if startsPaused, engine.state != .paused {
+            engine.pause()
+        } else if beganPaused, !startsPaused {
+            engine.play()
+        }
+        // The chapters marked in the file, for a playback the server gives none for.
+        if current?.chapters.isEmpty == true, !engine.mediaChapters.isEmpty {
+            current?.chapters = PlaybackResolver.chapters(from: engine.mediaChapters)
+        }
         // A speed picked for one episode carries on to the next.
         if rate != 1 { engine.setRate(rate) }
         applyAudioDescriptionPreference()
         applySubtitlePreference(engine.subtitleTracks)
+        notePlayingTracks()
         registerRemoteCommands()
         // A playback that waits to start, as one watched together can, is paused from the outset.
-        Self.keepScreenAwake(engine.state != .paused)
+        Self.keepScreenAwake(!startsPaused && engine.state != .paused)
         startReporting()
         if resolved.isStream { watchConnection() }
         let extras = ExtrasKey(title: resolved.historyKey, version: resolved.mediaSource?.versionItemId)
@@ -354,14 +538,13 @@ final class PlayerModel: Identifiable {
 
     /// What playback doesn't wait for: the skippable segments of the version playing, its
     /// chapters when it isn't the item's own version, and once for the title, the next episode.
-    /// A download falls back on its saved segments and on the next episode downloaded. What the
-    /// server can't give is logged, and for a stream, where the skip buttons, chapters or next
-    /// episode would be missed, the player says so once for the title.
+    /// A download falls back on its saved segments and on the next episode downloaded. Why the
+    /// server couldn't give one is logged, and for a stream, where the skip buttons, chapters or
+    /// next episode would be missed, the player says which once for the title.
     private func loadExtras(for resolved: ResolvedPlayback, includingNextEpisode: Bool) async {
         guard let item = resolved.item else { return }
         let version = resolved.mediaSource?.versionItemId ?? item.id
         var missing: [String] = []
-        var lastError: (any Error)?
         var foundNext = false
         var nextFailed = false
         if let client = accounts.client, let account = accounts.account {
@@ -374,13 +557,14 @@ final class PlayerModel: Identifiable {
                 return
             } catch {
                 Self.log.notice("Couldn't load the segments to skip: \(error.localizedDescription, privacy: .public)")
-                if resolved.segments.isEmpty { missing.append("the buttons to skip intros and credits") }
-                lastError = error
+                if resolved.segments.isEmpty { missing.append("the skip buttons") }
             }
             if resolved.isStream, let source = resolved.mediaSource, version != item.id {
                 do {
                     let detail = try await client.item(id: version, userId: account.userId)
-                    if isPlaying(resolved) { current?.chapters = PlaybackResolver.chapters(of: detail, playing: source, client: client) }
+                    let chapters = PlaybackResolver.chapters(of: detail, playing: source, client: client)
+                    // Those marked in the file stand when the server has none.
+                    if isPlaying(resolved), !chapters.isEmpty { current?.chapters = chapters }
                 } catch JellyfinError.http(let status, _) where status == 404 {
                     // A version that isn't an item of its own has no chapters.
                 } catch is CancellationError {
@@ -388,7 +572,6 @@ final class PlayerModel: Identifiable {
                 } catch {
                     Self.log.notice("Couldn't load the version's chapters: \(error.localizedDescription, privacy: .public)")
                     missing.append("the chapters")
-                    lastError = error
                 }
             }
             if includingNextEpisode, item.isEpisode, let seriesId = item.seriesId {
@@ -401,7 +584,6 @@ final class PlayerModel: Identifiable {
                 } catch {
                     Self.log.notice("Couldn't find the next episode: \(error.localizedDescription, privacy: .public)")
                     nextFailed = true
-                    lastError = error
                 }
             }
         }
@@ -410,15 +592,21 @@ final class PlayerModel: Identifiable {
             nextEpisode = downloadedEpisode(item)
             if nextEpisode == nil, nextFailed { missing.append("the next episode") }
         }
-        if resolved.isStream, !missing.isEmpty, let lastError {
-            show("Couldn't load \(missing.formatted(.list(type: .and))): \(lastError.localizedDescription)", for: 6)
+        if resolved.isStream, !missing.isEmpty {
+            show("Couldn't load \(missing.formatted(.list(type: .and))).", .info, for: 6)
         }
     }
 
-    private func fail(_ error: any Error) {
-        Self.log.error("Playback failed: \(String(describing: error), privacy: .public)")
-        status = .failed(error.localizedDescription)
-        Self.keepScreenAwake(false)
+    /// Ends the playback in a failure, told in a plain sentence (`PlaybackFailureMessage`) while
+    /// what went wrong goes to the log. The server hears the session stop, and its transcode is
+    /// stopped. `engine` is the engine's account of a failure of its own.
+    private func fail(_ error: any Error, engine info: PlaybackErrorInfo? = nil) {
+        Self.log.error("""
+            Playback failed: \(String(describing: error), privacy: .public)\
+            \(info.map { " (\($0.kind.rawValue), \($0.underlyingDomain ?? "-") \($0.underlyingCode ?? 0))" } ?? "", privacy: .public)
+            """)
+        status = .failed(PlaybackFailureMessage.text(for: error, engine: info))
+        finishSession(reachedEnd: false)
     }
 
     // MARK: Engine state
@@ -448,19 +636,25 @@ final class PlayerModel: Identifiable {
                     : nil
             }
             .store(in: &subscriptions)
-        engine.$subtitleCues.dropFirst().receive(on: RunLoop.main).sink { [weak self] cues in self?.cues = cues }
-            .store(in: &subscriptions)
+        engine.$subtitleCues.dropFirst().receive(on: RunLoop.main).sink { [weak self] cues in
+            guard let self else { return }
+            self.cues = self.systemDrawsSubtitles ? [] : cues
+        }
+        .store(in: &subscriptions)
         engine.$audioTracks.combineLatest(engine.$activeAudioTrackIndex).dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] tracks, active in self?.audioTracksChanged(tracks, active: active) }
             .store(in: &subscriptions)
         engine.$subtitleTracks.combineLatest(engine.$activeSubtitleTrackIndex).dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] tracks, active in self?.subtitleTracksChanged(tracks, active: active) }
             .store(in: &subscriptions)
-        // The engine sets its clock to zero as it loads, before seeking to the start position;
-        // until the load is done the timeline keeps the start position `begin` gave it.
+        // The engine sets its clock to zero as it loads, before seeking to the start position, and
+        // can run it for seconds before the first frame is up, as when a start far from a keyframe
+        // is decoded in software. Until the picture shows, the timeline keeps the start position
+        // `begin` gave it.
         engine.clock.$currentTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
-            guard let self, self.isLoaded else { return }
+            guard let self, self.isLoaded, self.isPresenting else { return }
             self.clock.time = time
+            self.prepareNextEpisodeIfDue(at: time)
         }
         .store(in: &subscriptions)
         engine.clock.$sourceTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
@@ -470,6 +664,18 @@ final class PlayerModel: Identifiable {
         .store(in: &subscriptions)
         engine.clock.$bufferedPosition.dropFirst().receive(on: RunLoop.main).sink { [weak self] position in self?.clock.buffered = position }
             .store(in: &subscriptions)
+        #if os(iOS) || os(macOS)
+        // AirPlay, or a screen plugged in, shows the picture where the overlay can't go.
+        engine.$currentAVPlayer
+            .map { player in
+                player.map { $0.publisher(for: \.isExternalPlaybackActive).eraseToAnyPublisher() } ?? Just(false).eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] external in self?.pictureLeavesApp(external, to: .externalPlayback) }
+            .store(in: &subscriptions)
+        #endif
     }
 
     private func engineStateChanged(_ state: PlaybackState) {
@@ -479,16 +685,25 @@ final class PlayerModel: Identifiable {
             guard status != .ended else { return }
             status = .ended
             Self.keepScreenAwake(false)
-            Task { await reachedEnd() }
+            reachedEnd()
         case .error(let message):
-            status = .failed(message)
-            Self.keepScreenAwake(false)
+            // Classified by the engine just before it published the failure.
+            let info = engine.errorInfo
+            Self.log.error("""
+                The engine failed (\(info?.kind.rawValue ?? "unclassified", privacy: .public), \
+                \(info?.underlyingDomain ?? "-", privacy: .public) \(info?.underlyingCode ?? 0)): \(message, privacy: .public)
+                """)
+            status = .failed(info.map { PlaybackFailureMessage.text(for: $0) } ?? PlaybackFailureMessage.unknown)
+            finishSession(reachedEnd: false)
         case .paused:
             if status != .ended { status = .paused }
             reportPauseChange(paused: true)
             // Paused, the screen dims and the screensaver comes on after the system's idle time.
             Self.keepScreenAwake(false)
         case .playing:
+            // A start the engine has taken back since, as `begin` does a load's paused while it ran.
+            guard engine.state != .paused else { return }
+            startsPaused = false
             status = isPresenting ? .playing : .loading
             reportPauseChange(paused: false)
             Self.keepScreenAwake(true)
@@ -501,8 +716,21 @@ final class PlayerModel: Identifiable {
         // A seek's wait is a start of its own, whoever asked for it: the system's remote commands
         // seek the engine directly.
         if phase == .seeking { connectionWatch.restart() }
+        if phase != .seeking {
+            seekWait?.cancel()
+            seekWait = nil
+        }
         switch phase {
-        case .rebuffering, .stalled, .seeking:
+        case .seeking:
+            // A seek that lands at once shows as the moving playhead; one that hasn't after a
+            // moment as waiting, so a run of skips doesn't flash the spinner.
+            guard status == .playing, seekWait == nil else { return }
+            seekWait = Task { [weak self] in
+                try? await Task.sleep(for: Self.seekPatience)
+                guard let self, !Task.isCancelled, self.engine.playbackPhase == .seeking, self.status == .playing else { return }
+                self.status = .buffering
+            }
+        case .rebuffering, .stalled:
             if status == .playing { status = .buffering }
         case .playing:
             if isPresenting, status == .buffering || status == .loading { status = .playing }
@@ -510,6 +738,9 @@ final class PlayerModel: Identifiable {
             break
         }
     }
+
+    /// How long a seek can take before the player shows it's waiting for it.
+    private static let seekPatience = Duration.milliseconds(400)
 
     /// A picture that comes up after the engine started playing turns loading into playing.
     private func startupChanged(_ progress: StartupProgress?) {
@@ -532,6 +763,7 @@ final class PlayerModel: Identifiable {
         let previous = selectedAudio
         selectedAudio = active
         if isLoaded, previous != active { reportProgressNow() }
+        notePlayingTracks()
     }
 
     private func subtitleTracksChanged(_ tracks: [TrackInfo], active: Int?) {
@@ -558,6 +790,15 @@ final class PlayerModel: Identifiable {
             applySubtitlePreference(tracks)
             if previous != active { reportProgressNow() }
         }
+        notePlayingTracks()
+    }
+
+    /// Keeps the audio and subtitles of a version playing as they change, for another stream of
+    /// the title to keep (`tracksToCarry`) after this one ended or failed, by when the engine may
+    /// have let go of them. One it has let go of, with no track on, changes nothing.
+    private func notePlayingTracks() {
+        guard isLoaded, !isTranscoding, engine.activeAudioTrackIndex != nil || engine.activeSubtitleTrackIndex != nil else { return }
+        playingTracks = currentTrackSelection()
     }
 
     /// Turns on the subtitle track the subtitle setting asks for, once per playback, after the
@@ -572,7 +813,8 @@ final class PlayerModel: Identifiable {
             choice = asked < 0 ? nil : streamMap.trackId(forStream: asked) ?? preferredSubtitle(from: candidates)
             askedStreams = nil
         } else if let carried = carriedTracks, let subtitle = carried.subtitle {
-            choice = TrackChooser.same(as: subtitle, in: candidates) ?? preferredSubtitle(from: candidates)
+            choice = carried.exactSubtitleIndex(in: current?.mediaSource).flatMap(streamMap.trackId(forStream:))
+                ?? TrackChooser.same(as: subtitle, in: candidates) ?? preferredSubtitle(from: candidates)
         } else if carriedTracks != nil {
             choice = nil
         } else {
@@ -624,11 +866,16 @@ final class PlayerModel: Identifiable {
     func togglePlayPause() {
         switch status {
         case .ended:
-            // The group starts over together; a stream that ended plays again from a new load.
+            // The group starts over together.
             if sharing?.share(.seek(0)) == true { return }
-            Task { await load(PlaybackRequest(source: request.source, title: request.title, startFromBeginning: true)) }
+            Task { await replay(from: 0) }
         case .failed:
             return
+        case .preparing, .loading:
+            // A playback on its way to playing: the press pauses what's coming.
+            pause()
+        case .paused where startsPaused:
+            play()
         default:
             if sharing?.share(.rate(isPlaying ? 0 : rate)) == true { return }
             engine.togglePlayPause()
@@ -638,29 +885,76 @@ final class PlayerModel: Identifiable {
     func play() {
         guard status != .ended else { return }
         if sharing?.share(.rate(rate)) == true { return }
-        engine.play()
+        playHere()
     }
 
     func pause() {
         if sharing?.share(.rate(0)) == true { return }
+        pauseHere()
+    }
+
+    /// Pauses, or while the playback starts, has it start paused (`startsPaused`).
+    private func pauseHere() {
+        guard status == .preparing || status == .loading else {
+            engine.pause()
+            return
+        }
+        startsPaused = true
+        status = .paused
+        // The stream starting, or the one it replaces; a load under way starts its stream as it
+        // returns, which `begin` pauses.
         engine.pause()
+    }
+
+    /// Plays, or lets a playback paused while it started start playing.
+    private func playHere() {
+        if startsPaused {
+            startsPaused = false
+            guard sessionIsOpen, isLoaded else {
+                // The engine has another stream, or none, until the load under way returns and
+                // `begin` plays this one.
+                status = sessionIsOpen ? .loading : .preparing
+                return
+            }
+        }
+        engine.play()
     }
 
     func seek(to seconds: Double) {
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
         clock.time = target
         if sharing?.share(.seek(target)) == true { return }
+        guard status != .ended else {
+            Task { await replay(from: target) }
+            return
+        }
         connectionWatch.restart()
         nowPlayingChanged()
+        // The end of an intro or of the credits, exactly: the software AV1 path otherwise lands
+        // on a keyframe up to ten seconds before it.
+        let exact = segments.contains { abs($0.end - seconds) < 0.001 }
         Task {
-            await engine.seek(to: target)
+            await engine.seek(to: target, exact: exact)
             reportProgressNow()
         }
     }
 
     func skip(by seconds: Double) {
+        // After the end there's nothing ahead to skip to.
+        if status == .ended, seconds > 0 { return }
         scrubbing.noteSkip(seconds)
         seek(to: clock.time + seconds)
+    }
+
+    /// Plays the title that ended again from `position`, with the audio and subtitles it had: the
+    /// engine's ended session can be neither moved nor resumed (`.ended` is terminal), so the
+    /// title loads again. Nothing plays from the very end.
+    private func replay(from position: Double) async {
+        guard duration <= 0 || position < duration - 1 else { return }
+        let tracks = tracksToCarry()
+        clock.time = position
+        startsPaused = false
+        await load(request.replaying(from: position, title: title), carrying: tracks)
     }
 
     // The timeline moved without seeking yet, as the Apple TV remote scrubs: a position is chosen,
@@ -695,10 +989,13 @@ final class PlayerModel: Identifiable {
         nowPlayingChanged()
     }
 
+    // A transcode's choices are the menus' until its new stream starts, so a second choice made
+    // meanwhile keeps the first.
+
     func chooseAudio(_ id: Int) {
-        if let transcode = current?.transcode {
+        if isTranscoding {
             selectedAudio = id
-            Task { await reloadTranscode(audioIndex: id, subtitleIndex: transcode.subtitleIndex) }
+            Task { await reloadTranscode(audioIndex: id, subtitleIndex: selectedSubtitle) }
         } else {
             engine.selectAudioTrack(index: id)
         }
@@ -706,9 +1003,9 @@ final class PlayerModel: Identifiable {
 
     /// Nil turns subtitles off.
     func chooseSubtitle(_ id: Int?) {
-        if let transcode = current?.transcode {
+        if isTranscoding {
             selectedSubtitle = id
-            Task { await reloadTranscode(audioIndex: transcode.audioIndex, subtitleIndex: id) }
+            Task { await reloadTranscode(audioIndex: selectedAudio, subtitleIndex: id) }
         } else if let id {
             engine.selectSubtitleTrack(index: id)
         } else {
@@ -742,8 +1039,37 @@ final class PlayerModel: Identifiable {
             }
         } catch {
             guard !error.isCancellation else { return }
-            show("Couldn't find the episode before this one: \(error.localizedDescription)", for: 6)
+            Self.log.notice("Couldn't find the episode before \(item.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            show("Couldn't find the previous episode.", .info, for: 6)
         }
+    }
+
+    // MARK: Picture outside the app
+
+    /// Where the picture can be shown outside the app's own view.
+    enum PictureOutside: Hashable {
+        case pictureInPicture
+        /// AirPlay, or a screen plugged in.
+        case externalPlayback
+    }
+
+    /// The picture went to, or came back from, `place` outside the app's view, where the subtitle
+    /// overlay isn't drawn. Meanwhile the system draws the subtitles, from the engine's own
+    /// renditions of them, and the overlay draws none.
+    func pictureLeavesApp(_ leaves: Bool, to place: PictureOutside = .pictureInPicture) {
+        if leaves { pictureOutside.insert(place) } else { pictureOutside.remove(place) }
+        updateSubtitleRendering()
+    }
+
+    /// Hands the subtitles to the system while the picture is outside the app, and takes them
+    /// back. Not a transcode's: AVPlayer draws those itself wherever the picture is, and handing
+    /// them over, with no renditions of the engine's own to show, would turn them off.
+    private func updateSubtitleRendering() {
+        let systemDraws = !pictureOutside.isEmpty && current?.isTranscode == false
+        guard systemDraws != systemDrawsSubtitles else { return }
+        systemDrawsSubtitles = systemDraws
+        engine.setNativeSubtitleRendering(systemDraws)
+        cues = systemDraws ? [] : engine.subtitleCues
     }
 
     // MARK: Streams by the server's numbers
@@ -769,7 +1095,8 @@ final class PlayerModel: Identifiable {
         } else if let track = streamMap.trackId(forStream: index) {
             chooseAudio(track)
         } else {
-            show("This version has no audio track \(index), which another device asked for.", for: 4)
+            Self.log.notice("Another device asked for audio stream \(index), which this version hasn't got")
+            show("The audio asked for isn't in this version.", .remoteRequest, for: 4)
         }
     }
 
@@ -784,7 +1111,8 @@ final class PlayerModel: Identifiable {
         } else if let track = streamMap.trackId(forStream: index) {
             chooseSubtitle(track)
         } else {
-            show("These subtitles, which another device asked for, didn't load here.", for: 4)
+            Self.log.notice("Another device asked for subtitle stream \(index), which didn't load here")
+            show("The subtitles asked for aren't in this version.", .remoteRequest, for: 4)
         }
     }
 
@@ -798,24 +1126,31 @@ final class PlayerModel: Identifiable {
     var requestedItemId: String? {
         if case .item(let id, _) = request.source { id } else { nil }
     }
+
+    /// Where another device the playback moves to starts: where it got to, or the beginning
+    /// once it has ended.
+    var handOverPosition: Double {
+        status == .ended ? 0 : clock.time
+    }
+
     /// Plays at `rate`, or pauses at 0, as the group watching together asks.
     func applyRate(_ newRate: Float) {
         guard newRate != 0 else {
-            engine.pause()
+            pauseHere()
             return
         }
         if rate != newRate {
             rate = newRate
             engine.setRate(newRate)
         }
-        engine.play()
+        playHere()
         nowPlayingChanged()
     }
 
     /// Moves to `seconds` exactly, as the group asks. A stream that ended plays again from there.
     func applySeek(to seconds: Double) async {
         if status == .ended {
-            await load(PlaybackRequest(source: request.source, title: request.title, startingPoint: .init(position: seconds)))
+            await replay(from: seconds)
             return
         }
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
@@ -827,18 +1162,31 @@ final class PlayerModel: Identifiable {
     }
 
     /// A transcode carries its audio and subtitles in the stream, so changing them asks the
-    /// server for a new one at the same spot and quality.
+    /// server for a new one at the same spot and quality. The stream playing goes on until the new
+    /// one starts, holding its picture there; when the server can't give one, it goes on as it is.
     private func reloadTranscode(audioIndex: Int?, subtitleIndex: Int?) async {
-        guard let current, let item = current.item, let source = current.mediaSource, let transcode = current.transcode else { return }
-        let position = clock.time
-        finishSession(reachedEnd: false)
-        status = .loading
-        do {
-            let resolved = try await resolver.transcode(item: item, source: source, quality: transcode.quality,
-                                                        audioIndex: audioIndex, subtitleIndex: subtitleIndex, start: position)
-            await begin(resolved)
-        } catch {
-            fail(error)
+        guard let playing = session, let item = playing.item, let source = playing.mediaSource,
+              let transcode = playing.transcode else { return }
+        await startLoad { [self] generation in
+            var resolved: ResolvedPlayback
+            do {
+                resolved = try await resolver.transcode(item: item, source: source, quality: transcode.quality,
+                                                        audioIndex: audioIndex, subtitleIndex: subtitleIndex, start: clock.time)
+            } catch {
+                guard loads.isCurrent(generation), !error.isCancellation else { return }
+                Self.log.error("Couldn't change the transcode's tracks: \(String(describing: error), privacy: .public)")
+                selectedAudio = transcode.audioIndex ?? source.defaultAudioStreamIndex ?? audioOptions.first?.id
+                selectedSubtitle = transcode.subtitleIndex
+                show("Couldn't change the audio or subtitles.", .connection, for: 6)
+                return
+            }
+            guard loads.isCurrent(generation), !isClosed, session?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
+            // Where the stream playing got to while the new one was being asked for, and paused
+            // if it was.
+            resolved.startPosition = engine.clock.currentTime
+            if engine.state == .paused { startsPaused = true }
+            engine.prepareForItemReplacement()
+            await begin(resolved, generation: generation)
         }
     }
 
@@ -911,7 +1259,7 @@ final class PlayerModel: Identifiable {
     /// Moves to a cheaper version of the title, or to a transcode, from the same spot and with
     /// the same audio and subtitles.
     private func stepDown(because reason: ConnectionWatch.Reason) async {
-        guard let playing = current, let item = playing.item, let plan = playing.plan else { return }
+        guard let playing = session, let item = playing.item, let plan = playing.plan else { return }
         let bitrate = engine.diagnostics.liveTelemetry?.averageBitrateMbps.map { Int($0 * 1_000_000) }
         let throughput = connectionWatch.throughput.map { Int($0) }
         guard let target = VersionChooser.planStepDown(from: plan, bitrate: bitrate, throughput: throughput,
@@ -927,54 +1275,72 @@ final class PlayerModel: Identifiable {
             \(bitrate ?? 0) b/s): moving to \(kind, privacy: .public) at \(quality, privacy: .public)
             """)
         let tracks = currentTrackSelection()
-        var resolved: ResolvedPlayback
-        do {
-            switch target {
-            case .direct(let source):
-                resolved = try resolver.direct(item: item, source: source, start: nil)
-            case .transcode(let source, let quality):
-                resolved = try await resolver.transcode(
-                    item: item, source: source, quality: quality,
-                    audioIndex: tracks.audio.flatMap { TrackChooser.same(as: $0, in: source.audioStreams.compactMap(TrackChooser.Candidate.init)) },
-                    subtitleIndex: tracks.subtitle.flatMap { TrackChooser.same(as: $0, in: source.subtitleStreams.compactMap(TrackChooser.Candidate.init)) },
-                    start: engine.clock.currentTime)
+        await startLoad { [self] generation in
+            var resolved: ResolvedPlayback
+            do {
+                switch target {
+                case .direct(let source):
+                    resolved = try resolver.direct(item: item, source: source, start: nil)
+                case .transcode(let source, let quality):
+                    let streams = tracks.streamIndexes(in: source, settings: settings)
+                    resolved = try await resolver.transcode(item: item, source: source, quality: quality, audioIndex: streams.audio,
+                                                            subtitleIndex: streams.subtitle, start: engine.clock.currentTime)
+                }
+            } catch {
+                guard loads.isCurrent(generation), !error.isCancellation else { return }
+                // The stream playing goes on as it is, and stays for this playback.
+                Self.log.error("Couldn't switch: \(String(describing: error), privacy: .public)")
+                show("Couldn't switch to \(quality).", .connection, for: 8)
+                return
             }
-        } catch {
-            // The stream playing goes on as it is, and stays for this playback.
-            Self.log.error("Couldn't switch: \(String(describing: error), privacy: .public)")
-            show("Couldn't switch to \(quality): \(error.localizedDescription)", for: 8)
-            return
+            guard loads.isCurrent(generation), !isClosed, session?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
+            // Where the old stream got to while the new one was being asked for, and paused if it was.
+            resolved.startPosition = engine.clock.currentTime
+            if engine.state == .paused { startsPaused = true }
+            // Holds the picture until the new stream's first frame, where the engine can.
+            engine.prepareForItemReplacement()
+            finishSession(reachedEnd: false)
+            await begin(resolved, carrying: tracks, generation: generation)
+            if loads.isCurrent(generation), isLoaded { show("Switched to \(quality) to keep playing", .connection, for: 4) }
         }
-        guard !isClosed, current?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
-        // Where the old stream got to while the new one was being asked for.
-        resolved.startPosition = engine.clock.currentTime
-        // Holds the picture until the new stream's first frame, where the engine can.
-        engine.prepareForItemReplacement()
-        finishSession(reachedEnd: false)
-        await begin(resolved, carrying: tracks)
-        if isLoaded { show("Switched to \(quality) to keep playing", for: 4) }
     }
 
-    /// The audio and subtitles playing, described so another version can find its own.
+    /// The audio and subtitles playing, described so another version can find its own: the
+    /// menus' choices for a transcode, whose stream may not have caught up with them yet.
     private func currentTrackSelection() -> TrackSelection {
-        if let transcode = current?.transcode, let source = current?.mediaSource {
-            let audioIndex = transcode.audioIndex ?? source.defaultAudioStreamIndex
+        let streams = current?.mediaSource.map { source in
+            TrackSelection.ServerStreams(mediaSourceId: source.id, audio: audioStreamIndex,
+                                         subtitle: subtitleStreamIndex.flatMap { $0 < 0 ? nil : $0 })
+        }
+        if let source = current?.mediaSource, isTranscoding {
+            let audioIndex = selectedAudio ?? source.defaultAudioStreamIndex
             return TrackSelection(
                 audio: (source.audioStreams.first { $0.index == audioIndex } ?? source.audioStreams.first).flatMap(TrackChooser.Candidate.init),
-                subtitle: transcode.subtitleIndex.flatMap { index in source.subtitleStreams.first { $0.index == index } }
-                    .flatMap(TrackChooser.Candidate.init)
+                subtitle: selectedSubtitle.flatMap { index in source.subtitleStreams.first { $0.index == index } }
+                    .flatMap(TrackChooser.Candidate.init),
+                streams: streams
             )
         }
         return TrackSelection(
             audio: engine.audioTracks.first { $0.id == engine.activeAudioTrackIndex }.map(TrackChooser.Candidate.init),
-            subtitle: engine.subtitleTracks.first { $0.id == engine.activeSubtitleTrackIndex }.map(TrackChooser.Candidate.init)
+            subtitle: engine.subtitleTracks.first { $0.id == engine.activeSubtitleTrackIndex }.map(TrackChooser.Candidate.init),
+            streams: streams
         )
+    }
+
+    /// The audio and subtitles another stream of the title on screen keeps: those playing once
+    /// it loaded (a transcode's as the menus have them), else those it was itself carrying. Nil
+    /// before any were chosen, which leaves them to the request and the language settings.
+    private func tracksToCarry() -> TrackSelection? {
+        guard current != nil else { return nil }
+        guard isLoaded else { return carriedTracks }
+        return isTranscoding ? currentTrackSelection() : playingTracks ?? currentTrackSelection()
     }
 
     /// Shows `text` over the picture for `seconds` of playback, so a stream slow to start keeps
     /// saying why the picture went.
-    private func show(_ text: String, for seconds: Double) {
-        notice = text
+    private func show(_ text: String, _ kind: PlaybackNotice.Kind, for seconds: Double) {
+        notice = PlaybackNotice(text: text, kind: kind)
         noticeTask?.cancel()
         noticeTask = Task {
             for await status in Observations({ self.status }) where ![.preparing, .loading, .buffering, .paused].contains(status) {
@@ -988,9 +1354,13 @@ final class PlayerModel: Identifiable {
 
     // MARK: Ending
 
-    private func reachedEnd() async {
+    /// Gives the title its end and, with autoplay, counts down to the next episode
+    /// (`UpNextCountdown`).
+    private func reachedEnd() {
         finishSession(reachedEnd: true)
-        guard nextEpisode != nil, settings.autoplayNextEpisode, !upNextDismissed else { return }
+        prepareNextEpisodeIfDue(at: clock.time)
+        guard let next = nextEpisode, settings.autoplayNextEpisode, !upNextDismissed else { return }
+        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: current?.item?.id, nextEpisodeId: next.id)
         countdownTask?.cancel()
         countdownTask = Task {
             for remaining in stride(from: 5, through: 1, by: -1) {
@@ -999,7 +1369,38 @@ final class PlayerModel: Identifiable {
                 if Task.isCancelled { return }
             }
             upNextCountdown = nil
-            if let next = nextEpisode { await switchTo(next) }
+            guard let next = nextEpisode,
+                  countdown.isDue(loads: loads, onScreen: current?.item?.id, next: next.id, hasEnded: status == .ended)
+            else { return }
+            // Out of reach before the switch: its load cancels any countdown (`startLoad`), and
+            // cancelling this one would cancel the load started from it.
+            countdownTask = nil
+            await switchTo(next)
+        }
+    }
+
+    /// Fetches the next episode with its versions, and warms its stream, once the up-next card
+    /// is up, so it starts sooner when it's played.
+    private func prepareNextEpisodeIfDue(at time: Double) {
+        guard nextPreparation == nil, let next = nextEpisode, showsUpNext(at: time),
+              let client = accounts.client, let account = accounts.account else { return }
+        nextPreparation = Task { [weak self] in
+            let item: JellyfinItem
+            do {
+                item = try await client.item(id: next.id, userId: account.userId)
+            } catch {
+                if !error.isCancellation {
+                    Self.log.notice("Couldn't load the next episode ahead: \(error.localizedDescription, privacy: .public)")
+                }
+                return
+            }
+            guard let self, !Task.isCancelled, self.nextEpisode?.id == item.id else { return }
+            self.preparedNext = item
+            guard let address = self.resolver.addressToWarm(for: item) else { return }
+            let warmed = await AetherEngine.prewarm(url: address)
+            if let declined = warmed.declined {
+                Self.log.notice("Didn't warm the next episode: \(declined, privacy: .public)")
+            }
         }
     }
 
@@ -1008,10 +1409,16 @@ final class PlayerModel: Identifiable {
         guard !isClosed else { return }
         countdownTask?.cancel()
         noticeTask?.cancel()
+        nextPreparation?.cancel()
+        artworkTask?.cancel()
+        seekWait?.cancel()
+        loads.cancel()
         scrubbing.finish()
         finishSession(reachedEnd: status == .ended)
         isClosed = true
         subscriptions.removeAll()
+        // Warmed for a next episode that won't play now.
+        AetherEngine.discardPrewarmedSources()
         if lease.holder == id {
             lease.holder = nil
             engine.stop()
@@ -1019,10 +1426,11 @@ final class PlayerModel: Identifiable {
         onClose?()
     }
 
-    /// Lets go of the session's resources and tells the server where playback stopped. The
-    /// telling doesn't hold up what plays next, as on a slow connection it can take seconds; the
-    /// next session's start waits for it instead, so the server hears them in order. Safe to
-    /// call twice.
+    /// Lets go of the session's resources and tells the server where playback stopped, and stops
+    /// its transcode. The telling doesn't hold up what plays next, as on a slow connection it can
+    /// take seconds; the next session's start waits for it instead, so the server hears them in
+    /// order. A session that never got as far as telling the server it started has nothing to
+    /// stop there. `current` stays, for the controls. Safe to call twice.
     private func finishSession(reachedEnd: Bool) {
         // The stop waits for the periodic report in flight, and the title's position it gives, so
         // nothing lands after the stop that finished the title and marked it watched.
@@ -1031,17 +1439,23 @@ final class PlayerModel: Identifiable {
         reportTask = nil
         watchTask?.cancel()
         watchTask = nil
+        seekWait?.cancel()
+        seekWait = nil
         unregisterRemoteCommands()
         Self.keepScreenAwake(false)
-        guard let current else { return }
-        self.current = nil
+        guard let current = session else { return }
+        sessionIsOpen = false
         nowPlayingChanged()
         current.scopedURL?.stopAccessingSecurityScopedResource()
         let position = reachedEnd ? (duration > 0 ? duration : clock.time) : clock.time
         let previousReport = stopReport
+        let wasReported = progress != nil
         // Immediate: the report reads this session's length and pause before the next one starts.
         stopReport = Task.immediate {
-            if await self.report(.stopped, for: current, position: position, after: [previousReport, progress]) {
+            if !wasReported {
+                // Still in order behind the stop before.
+                await previousReport?.value
+            } else if await self.report(.stopped, for: current, position: position, after: [previousReport, progress]) {
                 await self.giveTitleThePosition(of: current)
             }
             guard current.isTranscode, let reporting = current.reporting, let client = self.accounts.client else { return }
@@ -1059,7 +1473,7 @@ final class PlayerModel: Identifiable {
 
     private func startReporting() {
         reportTask?.cancel()
-        guard let current else { return }
+        guard let current = session else { return }
         if let reporting = current.reporting {
             playedTitleIds.insert(reporting.itemId)
             if let seriesId = current.item?.seriesId { playedTitleIds.insert(seriesId) }
@@ -1089,7 +1503,7 @@ final class PlayerModel: Identifiable {
     /// Tells the server at once, for a remote following this playback: after a pause, a seek or
     /// a change of track.
     private func reportProgressNow() {
-        guard let current, startedReporting else { return }
+        guard let current = session, startedReporting else { return }
         Task { await report(.progress, for: current, position: clock.time) }
     }
 
@@ -1167,20 +1581,76 @@ final class PlayerModel: Identifiable {
         #endif
     }
 
+    /// What's playing, for the system's Now Playing card and remotes, and for AVKit's info pane and
+    /// AirPlay receivers: the title, an episode's show and number, its description, and its
+    /// picture once that's loaded.
     private func setNowPlaying(_ playback: ResolvedPlayback) {
         var info: [String: Any] = [MPMediaItemPropertyTitle: playback.title]
-        if let subtitle = playback.subtitle { info[MPMediaItemPropertyArtist] = subtitle }
+        if let item = playback.item, item.isEpisode {
+            if let show = item.seriesName { info[MPMediaItemPropertyArtist] = show }
+            if let number = Self.nowPlayingEpisodeNumber(item) { info[MPMediaItemPropertyAlbumTitle] = number }
+        } else if let subtitle = playback.subtitle {
+            info[MPMediaItemPropertyArtist] = subtitle
+        }
+        let artwork = playback.item.flatMap { item in nowPlayingArtwork?.itemId == item.id ? nowPlayingArtwork : nil }
+        if let artwork { info[MPMediaItemPropertyArtwork] = artwork.artwork }
         #if os(iOS) || os(tvOS)
         engine.setVideoNowPlayingInfo(info)
         #else
         nowPlayingIdentity = info
         publishNowPlaying()
         #endif
-        let titleItem = AVMutableMetadataItem()
-        titleItem.identifier = .commonIdentifierTitle
-        titleItem.value = playback.title as NSString
-        titleItem.extendedLanguageTag = "und"
-        engine.setExternalMetadata([titleItem])
+        var metadata = [Self.metadataItem(.commonIdentifierTitle, playback.title as NSString)]
+        if let overview = playback.item?.overview, !overview.isEmpty {
+            metadata.append(Self.metadataItem(.commonIdentifierDescription, overview as NSString))
+        }
+        if let jpeg = artwork?.jpeg {
+            let picture = Self.metadataItem(.commonIdentifierArtwork, jpeg as NSData)
+            picture.dataType = kCMMetadataBaseDataType_JPEG as String
+            metadata.append(picture)
+        }
+        engine.setExternalMetadata(metadata)
+        if artwork == nil, let item = playback.item { loadNowPlayingArtwork(of: item) }
+    }
+
+    /// Loads the episode's still, or the title's backdrop, and puts it on Now Playing while the
+    /// title is still on screen.
+    private func loadNowPlayingArtwork(of item: JellyfinItem) {
+        guard let address = accounts.session?.landscape(item, width: Self.nowPlayingArtworkWidth) else { return }
+        artworkTask?.cancel()
+        artworkTask = Task { [weak self] in
+            let image: PlatformImage
+            do {
+                image = try await ImagePipeline.shared.image(for: address)
+            } catch {
+                if !error.isCancellation {
+                    Self.log.notice("Couldn't load the Now Playing picture: \(error.localizedDescription, privacy: .public)")
+                }
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.nowPlayingArtwork = NowPlayingArtwork(itemId: item.id, image: image)
+            if let current = self.current, current.item?.id == item.id { self.setNowPlaying(current) }
+        }
+    }
+
+    private static let nowPlayingArtworkWidth = 1280
+
+    /// An episode's number for Now Playing's album line: "S1, E2", "S1, E2–3".
+    static func nowPlayingEpisodeNumber(_ item: JellyfinItem) -> String? {
+        guard let number = item.indexNumber else { return nil }
+        var episode = "E\(number)"
+        if let end = item.indexNumberEnd, end > number { episode += "–\(end)" }
+        guard let season = item.parentIndexNumber else { return episode }
+        return "S\(season), \(episode)"
+    }
+
+    private static func metadataItem(_ identifier: AVMetadataIdentifier, _ value: any NSCopying & NSObjectProtocol) -> AVMutableMetadataItem {
+        let item = AVMutableMetadataItem()
+        item.identifier = identifier
+        item.value = value
+        item.extendedLanguageTag = "und"
+        return item
     }
 
     #if !(os(iOS) || os(tvOS))
@@ -1190,7 +1660,7 @@ final class PlayerModel: Identifiable {
     /// republished whenever either changes.
     private func publishNowPlaying() {
         let center = MPNowPlayingInfoCenter.default()
-        guard current != nil else {
+        guard session != nil else {
             center.nowPlayingInfo = nil
             center.playbackState = .stopped
             return

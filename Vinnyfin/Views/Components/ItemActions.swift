@@ -1,12 +1,14 @@
 import SwiftUI
 
-/// The long-press menu for a title: play, watched, favourite and, off Apple TV, download.
+/// The long-press menu for a title: play, its show for an episode, watched, favourite and, off
+/// Apple TV, download.
 struct ItemContextMenu: View {
     let item: JellyfinItem
     /// Gets the item with its new watch state, to update the list it came from.
     var onChange: (JellyfinItem) -> Void = { _ in }
 
     @Environment(\.session) private var session
+    @Environment(\.openTitle) private var openTitle
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
@@ -26,8 +28,14 @@ struct ItemContextMenu: View {
                 }
             }
         }
+        if item.isEpisode, let seriesId = item.seriesId, let openTitle {
+            Button("Go to Show", systemImage: "tv") {
+                openTitle(JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series"))
+            }
+        }
+        // As the title's page has it.
         Button(item.isPlayed ? "Mark as Unwatched" : "Mark as Watched",
-               systemImage: item.isPlayed ? "eye.slash" : "eye") {
+               systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle") {
             Task { await setPlayed(!item.isPlayed) }
         }
         Button(item.isFavorite ? "Remove from Favorites" : "Add to Favorites",

@@ -22,7 +22,8 @@ final class PagedItems {
     @ObservationIgnored private let client: JellyfinClient
     @ObservationIgnored private let userId: String
     @ObservationIgnored private var window: PageWindow?
-    @ObservationIgnored private var lastShown = 0
+    /// The position that last came on screen.
+    @ObservationIgnored private(set) var lastShown = 0
     /// Pages that failed, left alone until `retry()` so scrolling doesn't keep asking for them.
     @ObservationIgnored private var failed: Set<Int> = []
     @ObservationIgnored private var isCancelled = false
@@ -54,13 +55,28 @@ final class PagedItems {
 
     /// The first page, which says how long the list is; sorted by name, the index then loads
     /// behind it. What goes wrong is kept in `problem`; cancelled, the list stays empty.
-    func load() async {
+    ///
+    /// A list loaded to take the place of `previous`, the same list scrolled to `position`, has
+    /// the pages around that position too by the time it's done, so it can go on screen where
+    /// the other was without its titles there turning back into placeholders. It keeps the
+    /// other's index while the list is as long as it was.
+    func load(around position: Int = 0, replacing previous: PagedItems? = nil) async {
         do {
             let page = try await client.page(of: source, userId: userId, startIndex: 0, limit: Self.pageSize)
-            window = PageWindow(pageSize: Self.pageSize, count: page.totalRecordCount)
+            let window = PageWindow(pageSize: Self.pageSize, count: page.totalRecordCount)
+            self.window = window
             pages = [0: page.items]
-            count = page.totalRecordCount
             problem = nil
+            lastShown = position
+            if window.page(containing: position) > 0 {
+                await withTaskGroup(of: Void.self) { group in
+                    for around in window.pagesToLoad(around: position) where around != 0 {
+                        group.addTask { await self.loadPage(around) }
+                    }
+                }
+            }
+            count = page.totalRecordCount
+            if let previous, previous.count == count, let index = previous.index { self.index = index }
             loadIndex()
         } catch {
             if !error.isCancellation { problem = error.localizedDescription }

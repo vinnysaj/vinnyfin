@@ -215,7 +215,7 @@ struct PlayerView: View {
             inPictureArea { statusOverlay }
             if let notice = model.notice {
                 inPictureArea {
-                    PlayerNotice(text: notice, controlsBottom: clearsControls ? topBarBottom : nil)
+                    PlayerNotice(notice: notice, controlsBottom: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? topBarBottom : nil)
                 }
                 .motionTransition(.move(edge: .top).combined(with: .opacity), reduceMotion: reduceMotion)
             }
@@ -396,7 +396,7 @@ struct PlayerView: View {
                 #endif
             }
             #if os(iOS) || os(macOS)
-            pictureInPicture.attach(to: model.engine)
+            pictureInPicture.attach(to: model)
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
@@ -407,7 +407,7 @@ struct PlayerView: View {
             if model.isPlaying { showControls() }
         }
         .onChange(of: model.notice) { _, notice in
-            if let notice { announce(notice) }
+            if let notice { announce(notice.text) }
         }
         // Turned on mid-playback, they'd need the controls to stay.
         .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
@@ -1018,16 +1018,16 @@ private struct ClickTarget: ViewModifier {
 #endif
 
 /// A brief word over the picture, such as a move to a lower quality, below the controls' top
-/// bar while they show.
+/// bar while they show, with a symbol for what it's about.
 private struct PlayerNotice: View {
-    let text: String
+    let notice: PlaybackNotice
     /// The bottom of the controls' top bar in global coordinates while they show.
     var controlsBottom: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
             let clearBelow = controlsBottom.map { max(0, $0 - geometry.frame(in: .global).minY) } ?? 0
-            Label(text, systemImage: "wifi.exclamationmark")
+            Label(notice.text, systemImage: symbol)
                 .font(.callout.weight(.semibold))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 16)
@@ -1040,6 +1040,14 @@ private struct PlayerNotice: View {
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("player.notice")
+    }
+
+    private var symbol: String {
+        switch notice.kind {
+        case .connection: "wifi.exclamationmark"
+        case .remoteRequest: "iphone.radiowaves.left.and.right"
+        case .info: "info.circle"
+        }
     }
 }
 
@@ -1189,19 +1197,23 @@ private struct UpNextPill: View {
 
 #if os(iOS) || os(macOS)
 /// Picture in Picture for whichever layer the engine draws into: AVPlayer's on the native path,
-/// the sample-buffer layer on the software path.
+/// the sample-buffer layer on the software path. The playback hands its subtitles to the system
+/// while the window is up, where the overlay isn't drawn.
 @Observable
 final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
     private(set) var isPossible = false
     private(set) var isActive = false
     @ObservationIgnored private var controller: AVPictureInPictureController?
+    @ObservationIgnored private weak var model: PlayerModel?
     @ObservationIgnored private weak var engine: AetherEngine?
     @ObservationIgnored private var attachedLayer: AnyObject?
     @ObservationIgnored private var possibleObservation: NSKeyValueObservation?
 
-    /// Builds the controller for the layer the engine is drawing into now.
-    func attach(to engine: AetherEngine) {
+    /// Builds the controller for the layer the playback's engine is drawing into now.
+    func attach(to model: PlayerModel) {
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        self.model = model
+        let engine = model.engine
         self.engine = engine
         let controller: AVPictureInPictureController?
         if let layer = engine.nativePlayerLayer {
@@ -1234,6 +1246,7 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AV
     nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
         Task { @MainActor in
             self.engine?.pictureInPictureActive = true
+            self.model?.pictureLeavesApp(true)
             self.isActive = true
         }
     }
@@ -1241,6 +1254,7 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AV
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
         Task { @MainActor in
             self.engine?.pictureInPictureActive = false
+            self.model?.pictureLeavesApp(false)
             self.isActive = false
         }
     }

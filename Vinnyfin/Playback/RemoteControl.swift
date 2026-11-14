@@ -153,7 +153,7 @@ final class RemoteControl {
     /// the same streams. The caller stops it here once this returns.
     func handOver(_ model: PlayerModel, to target: PlayTarget) async throws {
         guard let client = accounts.client, let item = model.item else { throw RemoteError.nothingToSend }
-        let start = model.clock.time
+        let start = model.handOverPosition
         try await client.play(itemId: item.id, onSession: target.id, start: start,
                               mediaSourceId: model.current?.mediaSource?.id, audioStreamIndex: model.audioStreamIndex,
                               subtitleStreamIndex: model.subtitleStreamIndex)

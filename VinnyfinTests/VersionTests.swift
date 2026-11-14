@@ -60,14 +60,14 @@ struct VersionPlayedLastTests {
     @Test func aStepDownDoesntChangeWhatTheNextPlaybackStartsWith() throws {
         let shown = movie.withOwnVersionFirst(positionFrom: alternate)
         let sources = try #require(shown.mediaSources)
-        let first = try #require(VersionChooser.planStreaming(sources: sources, preferred: nil, quality: .original, allowTranscoding: true))
+        let first = try #require(VersionChooser.planStreaming(sources: sources, preferred: nil, limit: StreamingLimit(quality: .original), allowTranscoding: true))
         #expect(first == .direct(sources[0]))
         // A link of 2 Mb/s carries the 1080p version (0.95 Mb/s) but not the 4K one (3.6 Mb/s).
         let stepped = VersionChooser.planStepDown(from: first, bitrate: nil, throughput: 2_000_000, sources: sources, allowTranscoding: true)
         #expect(stepped?.source.id == alternateId)
         // The server then lists the 1080p version first, which `movie` is.
         let next = movie.withOwnVersionFirst(positionFrom: alternate)
-        #expect(VersionChooser.planStreaming(sources: next.mediaSources ?? [], preferred: nil, quality: .original,
+        #expect(VersionChooser.planStreaming(sources: next.mediaSources ?? [], preferred: nil, limit: StreamingLimit(quality: .original),
                                              allowTranscoding: true) == first)
         #expect(next.resumeSeconds == 210)
     }

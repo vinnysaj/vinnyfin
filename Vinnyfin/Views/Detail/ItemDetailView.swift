@@ -92,7 +92,7 @@ struct ItemDetailView: View {
     private var shown: JellyfinItem { loaded ?? page }
     private var sources: [MediaSource] { loaded?.mediaSources ?? [] }
     private var playbackSource: MediaSource? {
-        sources.first { $0.id == pickedSourceId } ?? VersionChooser.choose(from: sources, quality: settings.streamingQuality)
+        sources.first { $0.id == pickedSourceId } ?? VersionChooser.choose(from: sources, limit: settings.streamingLimit)
     }
 
     var body: some View {

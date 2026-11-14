@@ -218,14 +218,14 @@ final class PlayerModel: Identifiable {
     }
 
     /// Plays the same version again through the server's transcoder, for a file this device
-    /// can't play directly.
+    /// can't play directly: at the size the streaming limit allows, or 1080p without one.
     func retryTranscoded() async {
         guard let current, let item = current.item, let source = current.mediaSource, !current.isTranscode else { return }
         let position = clock.time > 0 ? clock.time : current.startPosition
         finishSession(reachedEnd: false)
         status = .loading
         do {
-            let quality = settings.streamingQuality == .original ? VideoQuality.fullHD : settings.streamingQuality
+            let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
             let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
                                                         audioIndex: nil, subtitleIndex: nil, start: position)
             await begin(resolved)
@@ -498,6 +498,9 @@ final class PlayerModel: Identifiable {
     }
 
     private func phaseChanged(_ phase: PlaybackPhase) {
+        // A seek's wait is a start of its own, whoever asked for it: the system's remote commands
+        // seek the engine directly.
+        if phase == .seeking { connectionWatch.restart() }
         switch phase {
         case .rebuffering, .stalled, .seeking:
             if status == .playing { status = .buffering }
@@ -840,9 +843,11 @@ final class PlayerModel: Identifiable {
 
     /// Samples the playback once a second for `ConnectionWatch`, and moves to a cheaper stream of
     /// the title when it says the connection can't keep up. The watch starts over with each
-    /// stream, and nothing moves back up: the next playback starts at the streaming quality again.
+    /// stream, and nothing moves back up: the next playback starts at the streaming limit again,
+    /// which is lower once enough of these teach this device a bitrate to stay under.
     private func watchConnection() {
         connectionWatch = ConnectionWatch(isTranscode: current?.isTranscode ?? false)
+        ExpensiveNetwork.follow()
         watchTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -851,13 +856,30 @@ final class PlayerModel: Identifiable {
                     self.connectionWatch.restart()
                     continue
                 }
-                if let reason = self.connectionWatch.observe(self.connectionSample()) {
+                let sample = self.connectionSample()
+                if let reason = self.connectionWatch.observe(sample) {
+                    self.learn(from: reason, sample: sample)
                     // In a task of its own: starting the new stream cancels this one.
                     Task { await self.stepDown(because: reason) }
                     return
                 }
             }
         }
+    }
+
+    /// Counts a stream the connection couldn't carry toward the bitrate this device learns to
+    /// stay under, when the connection is what couldn't carry it.
+    private func learn(from reason: ConnectionWatch.Reason, sample: ConnectionWatch.Sample) {
+        guard let playing = current, let item = playing.item, let plan = playing.plan,
+              let incident = QualityLearning.Incident(reason, playing: plan, of: item, sample: sample,
+                                                      throughput: connectionWatch.throughput,
+                                                      isExpensiveNetwork: ExpensiveNetwork.isActive)
+        else { return }
+        guard let limit = settings.learnedQuality.record(incident) else { return }
+        Self.log.notice("""
+            Streams kept rebuffering on separate days, the last at \(incident.bitrate) b/s and \
+            \(incident.resolution ?? 0) lines: this device now stays under \(limit) b/s
+            """)
     }
 
     private func connectionSample() -> ConnectionWatch.Sample {

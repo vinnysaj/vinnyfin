@@ -158,7 +158,7 @@ struct HandoffTests {
 
 struct SettingsSyncTests {
     @Test func settingsThatSuitOneDeviceStayOnIt() {
-        for key in ["settings.streamingQuality", "settings.smartDownloadCount", "settings.downloadStorageLimit",
+        for key in ["settings.streamingQuality", "settings.learnedQuality", "settings.smartDownloadCount", "settings.downloadStorageLimit",
                     "settings.downloadOverCellular", "settings.downloadOnlyWhileCharging", "settings.matchContent"] {
             #expect(!AppSettings.syncs(key), "\(key)")
         }

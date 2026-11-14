@@ -262,7 +262,7 @@ struct PlaybackResolver {
         let preferred = mediaSourceId.flatMap { id in sources.first { $0.id == id } }
         guard let plan = VersionChooser.planStreaming(
             sources: sources, preferred: preferred,
-            quality: settings.streamingQuality, allowTranscoding: settings.allowTranscoding
+            limit: settings.streamingLimit, allowTranscoding: settings.allowTranscoding
         ) else { throw PlaybackError.noVersions }
 
         // Where the version played last got to, whichever version plays now.

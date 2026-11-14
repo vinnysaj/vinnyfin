@@ -144,6 +144,33 @@ final class SignInUITests: XCTestCase {
     }
     #endif
 
+    #if os(iOS)
+    /// Signing in with a password asks whether to save it in iCloud, over the library once the
+    /// sign-in screen has gone, and Not Now leaves the app signed in. The password is the demo
+    /// account's, on the demo server.
+    @MainActor
+    func testAsksWhetherToSaveThePasswordSignedInWith() async throws {
+        let info = try XCTUnwrap(URL(string: "https://jftest.vinnysaj.net/System/Info/Public"))
+        let answered = (try? await URLSession.shared.data(from: info)) != nil
+        try XCTSkipUnless(answered, "The demo server doesn't answer")
+        let app = XCUIApplication()
+        app.launch()
+        if tabs(app).waitForExistence(timeout: 5) { signOut(app) }
+        tap(app.buttons["welcome.connect"])
+        let username = app.textFields["login.username"]
+        XCTAssertTrue(username.waitForExistence(timeout: uiTimeout), "The sign-in form never opened")
+        username.tap()
+        username.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + "apple\n")
+        type("apple\n", into: app.secureTextFields["login.password"])
+
+        let alert = app.alerts["Save Password to iCloud?"]
+        XCTAssertTrue(alert.waitForExistence(timeout: uiTimeout), "Signing in with a password didn't ask whether to save it")
+        alert.buttons["Not Now"].tap()
+        XCTAssertTrue(tabs(app).waitForExistence(timeout: uiTimeout), "Signing in never finished")
+        XCTAssertFalse(alert.exists, "The question stayed after it was answered")
+    }
+    #endif
+
     @MainActor
     private func signIn(_ app: XCUIApplication) {
         #if os(visionOS)

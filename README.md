@@ -24,7 +24,7 @@ Aiming to support all major apple platforms. iOS, iPadOS, tvOS, visionOS
 
 # Privacy
 
-The app only talks to the Jellyfin server you sign in to. There's no analytics, no tracking, no accounts and no servers of my own. Your Jellyfin access token is kept in the Keychain on your device, and signing out removes it. The password you sign in with is kept in your iCloud Keychain, and your servers and most settings in your iCloud, so your other devices sign in and match without asking. Watch progress for files on your device stays on your device.
+The app only talks to the Jellyfin server you sign in to. There's no analytics, no tracking, no accounts and no servers of my own. Your Jellyfin access token is kept in the Keychain on your device, and signing out removes it. Your servers and most settings are kept in your iCloud so your other devices match, and the password you sign in with too if you choose to save it there, so they sign in without asking. Watch progress for files on your device stays on your device.
 
 # Not affiliated
 

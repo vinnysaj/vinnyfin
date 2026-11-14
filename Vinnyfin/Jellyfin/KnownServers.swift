@@ -2,8 +2,8 @@ import Foundation
 import Observation
 
 /// One person on one Jellyfin server: where the server is and who they are on it, without a
-/// token or a password. The password they last signed in with, if any, is in iCloud Keychain under
-/// the sign-in's `id` (`Keychain.syncedPassword`).
+/// token or a password. A password they chose to save is in iCloud beside it
+/// (`KnownServers.password`).
 nonisolated struct ServerSignIn: Codable, Hashable, Identifiable, Sendable {
     var serverId: String
     var serverName: String?
@@ -35,20 +35,35 @@ nonisolated struct ServerSignIn: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+/// A password just signed in with, which the person is asked whether to save in iCloud.
+nonisolated struct PasswordOffer: Equatable, Sendable {
+    var signIn: ServerSignIn
+    var password: String
+}
+
 /// The servers the person has signed in to on any of their devices, kept in iCloud so the sign-in
 /// screen of a new device can offer them. Each server is a key of its own, holding everyone who
 /// signed in to it, so the latest change on any device wins for that server alone. This device's
 /// own sign-in is always among them.
+///
+/// The passwords the person chose to save are kept in iCloud too, so their other devices sign in
+/// without asking: a key per server, holding the password of each person on it. They're in the
+/// key-value store rather than iCloud Keychain, which doesn't reach Apple TV.
 @Observable
 final class KnownServers {
     private(set) var signIns: [ServerSignIn] = []
     /// Why a server couldn't be read from iCloud or saved to it, to show until dismissed.
     var problem: String?
+    /// The password to ask about saving, after a sign-in with one that isn't saved.
+    var passwordOffer: PasswordOffer?
 
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let cloud: (any CloudKeyValues)?
 
     nonisolated static let keyPrefix = "server."
+    /// Followed by the server's id alone: iCloud takes keys of up to 64 bytes, and a server's id
+    /// and a user's together are longer.
+    nonisolated static let passwordKeyPrefix = "password."
 
     init(accounts: AccountStore, cloud: (any CloudKeyValues)?) {
         self.accounts = accounts
@@ -84,13 +99,53 @@ final class KnownServers {
 
     /// Forgets the sign-in on every device, with its password.
     func forget(_ signIn: ServerSignIn) {
-        do {
-            try Keychain.deleteSyncedPassword(for: signIn.id)
-        } catch {
-            problem = error.localizedDescription
-        }
+        if password(for: signIn) != nil { setPassword(nil, for: signIn) }
         save(signIns.filter { $0.serverId == signIn.serverId && $0.userId != signIn.userId }, for: signIn.serverId)
     }
+
+    // MARK: Passwords
+
+    /// The password the person chose to save for the sign-in, on any of their devices; nil when
+    /// there's none.
+    func password(for signIn: ServerSignIn) -> String? {
+        passwords(on: signIn.serverId)[signIn.userId]
+    }
+
+    /// Takes the password `account` just signed in with. A saved one is kept up to date, as when
+    /// it changed on the server; with none saved, the person is asked whether to save it. An
+    /// empty password is nothing to save.
+    func signedIn(as account: AccountStore.Account, with password: String) {
+        guard cloud != nil, !password.isEmpty else { return }
+        let signIn = ServerSignIn(account)
+        guard let saved = self.password(for: signIn) else {
+            passwordOffer = PasswordOffer(signIn: signIn, password: password)
+            return
+        }
+        if saved != password { setPassword(password, for: signIn) }
+    }
+
+    /// Saves the offered password in iCloud, as the person chose.
+    func save(_ offer: PasswordOffer) {
+        setPassword(offer.password, for: offer.signIn)
+    }
+
+    private func setPassword(_ password: String?, for signIn: ServerSignIn) {
+        var passwords = passwords(on: signIn.serverId)
+        passwords[signIn.userId] = password
+        let key = Self.passwordKeyPrefix + signIn.serverId
+        if passwords.isEmpty {
+            cloud?.removeObject(forKey: key)
+        } else {
+            cloud?.set(passwords, forKey: key)
+        }
+    }
+
+    /// The saved passwords on a server, by user id.
+    private func passwords(on serverId: String) -> [String: String] {
+        cloud?.object(forKey: Self.passwordKeyPrefix + serverId) as? [String: String] ?? [:]
+    }
+
+    // MARK: Saving
 
     private func save(_ server: [ServerSignIn], for serverId: String) {
         let key = Self.keyPrefix + serverId

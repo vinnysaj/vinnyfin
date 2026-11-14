@@ -11,9 +11,9 @@ protocol CloudKeyValues: AnyObject {
 
 extension NSUbiquitousKeyValueStore: CloudKeyValues {}
 
-/// Keeps the settings and the servers signed in to the same on all the person's devices,
-/// through iCloud's key-value store. Every setting and every server is a key of its own, and
-/// iCloud keeps the latest change to each key, from whichever device made it. On a shared Apple
+/// Keeps the settings, the servers signed in to and the passwords saved for them the same on
+/// all the person's devices, through iCloud's key-value store. Every setting and every server is
+/// a key of its own, and iCloud keeps the latest change to each key, from whichever device made it. On a shared Apple
 /// TV each person has their own iCloud, and so their own settings and servers.
 final class CloudSync {
     private let store: NSUbiquitousKeyValueStore
@@ -37,6 +37,11 @@ final class CloudSync {
         }
         settings.reconcileWithCloud()
         servers.reload()
+        do {
+            try Keychain.deleteSyncedPasswords()
+        } catch {
+            Self.log.error("Couldn't delete the passwords in iCloud Keychain: \(error.localizedDescription, privacy: .public)")
+        }
         let changes = NotificationCenter.default.notifications(named: NSUbiquitousKeyValueStore.didChangeExternallyNotification)
         for await notification in changes where notification.object as AnyObject? === store {
             guard let change = CloudChange(userInfo: notification.userInfo) else { continue }

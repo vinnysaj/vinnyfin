@@ -341,17 +341,3 @@ struct SignInFlowTests {
         #expect(flow.accountError == nil)
     }
 }
-
-/// The password saved in iCloud Keychain, in the real Keychain of the signed app the tests run in.
-struct SyncedPasswordTests {
-    @Test func savesReplacesAndDeletesThePassword() throws {
-        let signIn = "SyncedPasswordTests-\(UUID().uuidString)/user"
-        defer { try? Keychain.deleteSyncedPassword(for: signIn) }
-        #expect(try Keychain.syncedPassword(for: signIn) == nil)
-        try Keychain.setSyncedPassword("first", for: signIn)
-        try Keychain.setSyncedPassword("second", for: signIn)
-        #expect(try Keychain.syncedPassword(for: signIn) == "second")
-        try Keychain.deleteSyncedPassword(for: signIn)
-        #expect(try Keychain.syncedPassword(for: signIn) == nil)
-    }
-}

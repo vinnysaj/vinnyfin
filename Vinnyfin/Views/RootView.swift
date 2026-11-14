@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AccountStore.self) private var accounts
+    @Environment(KnownServers.self) private var knownServers
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppMessages.self) private var messages
     @Environment(WatchHistory.self) private var history
@@ -83,6 +84,15 @@ struct RootView: View {
             Button("OK") { messages.current = nil }
         } message: {
             Text(messages.current ?? "")
+        }
+        .alert("Save Password to iCloud?", isPresented: Binding(get: { knownServers.passwordOffer != nil },
+                                                                 set: { if !$0 { knownServers.passwordOffer = nil } }),
+               presenting: knownServers.passwordOffer) { offer in
+            Button("Save Password") { knownServers.save(offer) }
+                .accessibilityIdentifier("savePassword.save")
+            Button("Not Now", role: .cancel) {}
+        } message: { _ in
+            Text("vinnyfin will sign you in automatically on your other devices that use it with your iCloud.")
         }
         .alert("Can't Play", isPresented: Binding(get: { player.problem != nil }, set: { if !$0 { player.problem = nil } })) {
             Button("OK") { player.problem = nil }

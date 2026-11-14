@@ -111,9 +111,8 @@ nonisolated struct SignInFlow: Sendable {
         return nil
     }
 
-    /// Picks a server someone signed in to, with their username. With the password they last
-    /// signed in with there, saved in iCloud Keychain on any of their devices, it signs in;
-    /// without one, the password is next.
+    /// Picks a server someone signed in to, with their username. With the password they saved in
+    /// iCloud on any of their devices, it signs in; without one, the password is next.
     mutating func choose(_ signIn: ServerSignIn, password: String?) -> Next? {
         guard let address = ServerAddress(savedURL: signIn.address) else {
             accountError = "\(signIn.address.absoluteString) isn't a server address vinnyfin can use."

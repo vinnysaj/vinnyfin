@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 @testable import vinnyfin
 #if !os(tvOS)
@@ -290,16 +291,90 @@ struct KnownServerTests {
         #expect(cloud.values.isEmpty)
     }
 
+    @Test func asksBeforeSavingAPasswordAndSavesNothingUntilThePersonSaysSo() {
+        let cloud = MemoryCloud()
+        let servers = store(cloud)
+        servers.signedIn(as: Continuity.homeAccount, with: "secret")
+        #expect(servers.passwordOffer == PasswordOffer(signIn: Continuity.home, password: "secret"))
+        #expect(servers.password(for: Continuity.home) == nil)
+        #expect(cloud.values["password.home"] == nil)
+
+        servers.save(PasswordOffer(signIn: Continuity.home, password: "secret"))
+        #expect(servers.password(for: Continuity.home) == "secret")
+        #expect(cloud.values["password.home"] as? [String: String] == ["u1": "secret"])
+    }
+
+    @Test func aSavedPasswordIsKeptUpToDateWithoutAskingAgain() {
+        let cloud = MemoryCloud()
+        let servers = store(cloud)
+        servers.save(PasswordOffer(signIn: Continuity.home, password: "old"))
+        let writes = cloud.writes
+
+        servers.signedIn(as: Continuity.homeAccount, with: "old")
+        #expect(servers.passwordOffer == nil)
+        #expect(cloud.writes == writes)
+
+        servers.signedIn(as: Continuity.homeAccount, with: "new")
+        #expect(servers.passwordOffer == nil)
+        #expect(servers.password(for: Continuity.home) == "new")
+    }
+
+    @Test func anEmptyPasswordIsNothingToSave() {
+        let cloud = MemoryCloud()
+        let servers = store(cloud)
+        servers.signedIn(as: Continuity.homeAccount, with: "")
+        #expect(servers.passwordOffer == nil)
+        #expect(cloud.writes.isEmpty)
+    }
+
+    @Test func eachPersonOnAServerHasTheirOwnSavedPassword() {
+        let cloud = MemoryCloud()
+        let servers = store(cloud)
+        var sam = Continuity.home
+        sam.userId = "u2"
+        sam.userName = "Sam"
+        servers.save(PasswordOffer(signIn: Continuity.home, password: "alex's"))
+        servers.save(PasswordOffer(signIn: sam, password: "sam's"))
+        #expect(servers.password(for: Continuity.home) == "alex's")
+        #expect(servers.password(for: sam) == "sam's")
+
+        servers.forget(sam)
+        #expect(servers.password(for: sam) == nil)
+        #expect(servers.password(for: Continuity.home) == "alex's")
+    }
+
+    @Test func forgettingSomeoneDeletesTheirSavedPassword() {
+        let cloud = MemoryCloud()
+        let servers = store(cloud)
+        servers.remember(Continuity.homeAccount)
+        servers.save(PasswordOffer(signIn: Continuity.home, password: "secret"))
+        servers.forget(Continuity.home)
+        #expect(servers.password(for: Continuity.home) == nil)
+        #expect(cloud.values.isEmpty)
+    }
+
+    @Test func aSavedPasswordsKeyFitsWhatICloudTakes() {
+        let jellyfinId = String(repeating: "a", count: 32)
+        #expect((KnownServers.passwordKeyPrefix + jellyfinId).utf8.count <= 64)
+    }
+
     /// In the real Keychain of the signed app the tests run in.
-    @Test func forgettingSomeoneDeletesTheirSavedPassword() throws {
-        var signIn = Continuity.home
-        signIn.serverId = "KnownServerTests-\(UUID().uuidString)"
-        try Keychain.setSyncedPassword("secret", for: signIn.id)
-        defer { try? Keychain.deleteSyncedPassword(for: signIn.id) }
-        let servers = store(MemoryCloud())
-        servers.forget(signIn)
-        #expect(try Keychain.syncedPassword(for: signIn.id) == nil)
-        #expect(servers.problem == nil)
+    @Test func deletesThePasswordsKeptInICloudKeychain() throws {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "net.vinnysaj.vinnyfin.password",
+            kSecAttrAccount as String: "KnownServerTests-\(UUID().uuidString)/user",
+            kSecAttrSynchronizable as String: true,
+        ]
+        #if os(macOS)
+        query[kSecUseDataProtectionKeychain as String] = true
+        #endif
+        var item = query
+        item[kSecValueData as String] = Data("secret".utf8)
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        #expect(SecItemAdd(item as CFDictionary, nil) == errSecSuccess)
+        try Keychain.deleteSyncedPasswords()
+        #expect(SecItemCopyMatching(query as CFDictionary, nil) == errSecItemNotFound)
     }
 
     @Test func readsWhatOtherDevicesSavedAndSaysWhatItCant() throws {

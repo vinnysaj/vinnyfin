@@ -72,9 +72,11 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AV
         }
     }
 
-    /// The button's state, and its action: starting the window, or bringing the player back from it.
-    var button: PictureInPictureButton {
-        PictureInPictureButton(isPossible: isPossible, isActive: isActive) { [weak self] in self?.toggle() }
+    /// The button's state, and its action: starting the window, or bringing the player back from
+    /// it. Nil on a device without Picture in Picture, where a button could never be used.
+    var button: PictureInPictureButton? {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else { return nil }
+        return PictureInPictureButton(isPossible: isPossible, isActive: isActive) { [weak self] in self?.toggle() }
     }
 
     func toggle() {

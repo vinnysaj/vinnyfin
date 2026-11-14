@@ -69,6 +69,8 @@ struct EpisodeStrip<Accessory: View>: View {
         .scrollIndicators(.hidden)
         .scrollTargetBehavior(.viewAligned)
         .contentMargins(.horizontal, Self.inset, for: .scrollContent)
+        // As tall as its cards: a scroll view takes all the height it's offered.
+        .fixedSize(horizontal: false, vertical: true)
         #if os(tvOS)
         .scrollClipDisabled()
         .focusSection()
@@ -142,7 +144,8 @@ struct EpisodeStrip<Accessory: View>: View {
             Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(dynamicTypeSize.lineLimit(1))
-            if let runtime = episode.runtimeText {
+            // Compact, the strip keeps clear of the transport above it.
+            if !isCompact, let runtime = episode.runtimeText {
                 Text(runtime).font(.caption).foregroundStyle(.secondary)
             }
         }

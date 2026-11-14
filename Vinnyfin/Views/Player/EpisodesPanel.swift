@@ -57,8 +57,8 @@ struct EpisodesPanel: View {
                      onInteraction: onInteraction, onPlay: onClose) {
             buttons
         }
-        .padding(.top, form == .sheet ? 20 : 14)
-        .padding(.bottom, form == .sheet ? 0 : 14)
+        .padding(.top, form == .sheet ? 20 : form == .rail ? 10 : 14)
+        .padding(.bottom, form == .sheet ? 0 : form == .rail ? 10 : 14)
         .modifier(DrawerGlass(isDrawer: form != .sheet))
         .accessibilityElement(children: .contain)
         .accessibilityAction(.escape, onClose)
@@ -92,6 +92,8 @@ struct EpisodesPanel: View {
         .font(.body)
         .buttonStyle(.platformGlass)
         .buttonBorderShape(.circle)
+        // The rail stays a third of a short screen.
+        .controlSize(form == .rail ? .small : .regular)
     }
 
     /// Plays another episode, and gets out of its way.

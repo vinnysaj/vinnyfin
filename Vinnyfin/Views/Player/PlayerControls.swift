@@ -624,10 +624,15 @@ private struct FormatBadge: View {
     var body: some View {
         if let action, !model.qualityOptions.isEmpty || text != nil {
             Button(action: action) {
-                Text(text ?? PlayerPanel.quality.title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                    .frame(minHeight: 22)
+                // Whole, never cut short: where the bar has no room for all of it, the picture
+                // size alone, and then the panel's symbol.
+                ViewThatFits(in: .horizontal) {
+                    if let text { Text(text).fixedSize() }
+                    if let size = model.qualityLabel, size != text { Text(size).fixedSize() }
+                    Image(systemName: PlayerPanel.quality.symbol)
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(minHeight: 22)
             }
             .buttonStyle(.platformGlass)
             .buttonBorderShape(.capsule)

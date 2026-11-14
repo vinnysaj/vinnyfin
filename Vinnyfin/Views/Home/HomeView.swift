@@ -80,8 +80,7 @@ struct HomeView: View {
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
             .overlay { if feed.hasNoTitles { noTitles } }
-            // The page color the hero artwork fades into.
-            .background(Color.pageBackground.ignoresSafeArea())
+            .pageBackground()
             .screenTitle("Home")
             .onAppear { isOnScreen = true }
             .onDisappear { isOnScreen = false }

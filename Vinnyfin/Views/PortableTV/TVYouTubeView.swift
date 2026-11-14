@@ -28,7 +28,6 @@ struct TVYouTubeView: View {
                 .onChange(of: geometry.size.width, initial: true) { _, width in youTube.fit(width: width) }
         }
         .onAppear { youTube.show() }
-        .onDisappear { youTube.pauseVideos() }
     }
 }
 

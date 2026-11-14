@@ -70,11 +70,16 @@ final class YouTubeTV {
         if let url = components.url { webView.load(URLRequest(url: url)) }
     }
 
-    /// Pauses what plays, as YouTube goes out of sight.
-    func pauseVideos() {
-        guard webView.url != nil else { return }
-        webView.evaluateJavaScript("document.querySelectorAll('video').forEach(video => video.pause())") { _, error in
-            if let error { Self.log.notice("Couldn't pause YouTube: \(error.localizedDescription, privacy: .public)") }
+    /// YouTube is what the TV shows. Out of sight the page plays nothing: what plays pauses, and
+    /// WebKit refuses whatever the page starts until it shows again. Pausing what plays alone
+    /// isn't enough: YouTube plays on unseen by itself, a paused video again or the preview under
+    /// where the pointer was, and on through the videos after it.
+    @ObservationIgnored var isOnScreen = false {
+        didSet {
+            guard isOnScreen != oldValue else { return }
+            // Paused before it's suspended: lifting a suspension plays again what it stopped.
+            if !isOnScreen { webView.pauseAllMediaPlayback(completionHandler: nil) }
+            webView.setAllMediaPlaybackSuspended(!isOnScreen, completionHandler: nil)
         }
     }
 
@@ -93,6 +98,8 @@ final class YouTubeTV {
 
     /// Sets the volume of the page it runs in, and again as each video starts: with the volume of
     /// YouTube's players, which they'd otherwise set a video back to, and of a video without one.
+    /// It leaves alone whether a player is muted, as YouTube keeps its previews: unmuting every
+    /// player as any video starts gave sound to previews, seen or not.
     private static func volumeScript(_ volume: Float) -> String {
         """
         (() => {
@@ -102,12 +109,7 @@ final class YouTubeTV {
                 document.querySelectorAll('.html5-video-player').forEach(player => {
                     if (typeof player.setVolume !== 'function') return
                     players += 1
-                    if (volume > 0) {
-                        player.unMute?.()
-                        player.setVolume(Math.round(volume * 100))
-                    } else {
-                        player.mute?.()
-                    }
+                    player.setVolume(Math.round(volume * 100))
                 })
                 if (!players) document.querySelectorAll('video').forEach(video => { video.volume = volume })
             }

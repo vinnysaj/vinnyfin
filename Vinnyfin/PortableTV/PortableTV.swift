@@ -13,12 +13,19 @@ import OSLog
 @Observable
 final class PortableTV {
     /// Its window is open.
-    private(set) var isOn = false
+    private(set) var isOn = false {
+        didSet { updateYouTubeOnScreen() }
+    }
     private(set) var space = TVSpace.library {
-        didSet { if isOn, space != oldValue { socket.capabilities = .portableTV(showing: space) } }
+        didSet {
+            if isOn, space != oldValue { socket.capabilities = .portableTV(showing: space) }
+            updateYouTubeOnScreen()
+        }
     }
     /// The playback on the TV, over the library or YouTube.
-    private(set) var playing: PlayerModel?
+    private(set) var playing: PlayerModel? {
+        didSet { updateYouTubeOnScreen() }
+    }
     /// Counts the presses that show the player's controls, which it shows on each.
     private(set) var controlsRequests = 0
     let browser: TVBrowser
@@ -60,7 +67,6 @@ final class PortableTV {
         socket.capabilities = ClientCapabilities()
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
-        youTube.pauseVideos()
         volume.letGo()
         await stopPlaying()
     }
@@ -125,8 +131,12 @@ final class PortableTV {
 
     /// Switches between the library and YouTube, each where it was left.
     func show(_ space: TVSpace) {
-        if space != .youTube { youTube.pauseVideos() }
         self.space = space
+    }
+
+    /// YouTube plays only while the TV is on and shows it with nothing playing over it.
+    private func updateYouTubeOnScreen() {
+        youTube.isOnScreen = isOn && space == .youTube && playing == nil
     }
 
     /// Select plays and pauses, left and right skip back and ahead, up and down bring the
@@ -165,7 +175,6 @@ final class PortableTV {
         let previous = playing
         playing = nil
         if let previous, player.presented === previous { player.presented = nil }
-        youTube.pauseVideos()
         if let model = player.makeModel(for: request) {
             player.presented = model
             playing = model

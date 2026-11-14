@@ -1,4 +1,5 @@
 import AetherEngine
+import AVFoundation
 import Foundation
 import Testing
 @testable import vinnyfin
@@ -364,6 +365,529 @@ struct TrackNamingTests {
         #expect(PlayerModel.codecName("truehd", profile: nil) == "Dolby TrueHD")
         #expect(PlayerModel.codecName("pcm_s24le", profile: nil) == "PCM")
         #expect(PlayerModel.codecName("hdmv_pgs_subtitle", profile: nil) == "PGS")
+    }
+}
+
+/// What the player says when a playback fails: plain sentences, never the engine's or the
+/// system's own wording.
+struct PlaybackFailureMessageTests {
+    private func engine(_ kind: PlaybackErrorKind, code: Int? = nil, domain: String? = nil) -> String {
+        PlaybackFailureMessage.text(for: PlaybackErrorInfo(kind: kind, message: "Invalid data found when processing input",
+                                                           underlyingDomain: domain, underlyingCode: code))
+    }
+
+    @Test func saysWhatEachKindOfEngineFailureMeans() {
+        #expect(engine(.sourceRefused, code: 401) == "The server no longer accepts this sign-in. Sign in again to play this.")
+        #expect(engine(.sourceRefused, code: 403).hasPrefix("This account isn't allowed to play this."))
+        #expect(engine(.sourceRefused, code: 404).hasPrefix("The server couldn't find this video."))
+        #expect(engine(.sourceRefused, code: 502) == "The server ran into a problem playing this.")
+        #expect(engine(.sourceRefused, code: 410) == "The server turned down the request to play this.")
+        #expect(engine(.sourceRateLimited, code: 429).hasPrefix("The server is too busy to play this right now."))
+        #expect(engine(.sourceCertificateRejected, code: -1202).hasPrefix("The server's certificate isn't trusted"))
+        #expect(engine(.storageExhausted) == "This device is full. Free up some space, then try again.")
+        #expect(engine(.vodSourceFailed) == "The connection to the server was lost.")
+        #expect(engine(.liveSourceUnavailable) == "The connection to the server was lost.")
+        #expect(engine(.sourceOpenFailed) == "This video couldn't be opened. The file may be damaged.")
+        #expect(engine(.dolbyVisionRequiresHardware) == "This device can't play this Dolby Vision video.")
+        for kind in [PlaybackErrorKind.nativeItemFailed, .masterPlaylistRejected, .noPlayableTrackWithinBudget,
+                     .softwarePipelineFailed, .hlsFormatUnsupported, .audioBridgeProducedNoOutput] {
+            #expect(engine(kind) == "This device couldn't play this video.", "\(kind.rawValue)")
+        }
+        #expect(engine(PlaybackErrorKind(rawValue: "somethingNew")) == PlaybackFailureMessage.unknown)
+    }
+
+    @Test func aConnectionFailureUnderneathReadsAsTheConnections() {
+        #expect(engine(.nativeItemFailed, code: URLError.notConnectedToInternet.rawValue, domain: NSURLErrorDomain)
+            .hasPrefix("This device is offline."))
+        #expect(engine(.sourceOpenFailed, code: URLError.cannotConnectToHost.rawValue, domain: NSURLErrorDomain)
+            .hasPrefix("The server can't be reached."))
+        // Not when the kind already says what went wrong.
+        #expect(engine(.storageExhausted, code: URLError.timedOut.rawValue, domain: NSURLErrorDomain).hasPrefix("This device is full."))
+    }
+
+    @Test func saysWhatTheCommonConnectionErrorsMean() {
+        func text(_ code: URLError.Code) -> String { PlaybackFailureMessage.text(for: URLError(code)) }
+        #expect(text(.notConnectedToInternet) == "This device is offline. Connect to the internet, then try again.")
+        #expect(text(.networkConnectionLost) == "The connection to the server was lost.")
+        for code in [URLError.Code.cannotConnectToHost, .cannotFindHost, .timedOut, .dnsLookupFailed] {
+            #expect(text(code) == "The server can't be reached. It may be off, or on another network.")
+        }
+        #expect(text(.serverCertificateUntrusted).hasPrefix("The server's certificate isn't trusted"))
+        #expect(text(.userAuthenticationRequired).hasSuffix("Sign in again to play this."))
+        #expect(text(.badServerResponse) == "The server sent something that isn't a video.")
+        // As a plain NSError too, as AVFoundation passes them on.
+        let wrapped = NSError(domain: NSURLErrorDomain, code: URLError.notConnectedToInternet.rawValue)
+        #expect(PlaybackFailureMessage.text(for: wrapped).hasPrefix("This device is offline."))
+    }
+
+    @Test func keepsTheAppsOwnWordsAndHidesEveryoneElses() {
+        #expect(PlaybackFailureMessage.text(for: PlaybackError.noVersions) == PlaybackError.noVersions.localizedDescription)
+        let refused = JellyfinError.http(status: 401, body: "")
+        #expect(PlaybackFailureMessage.text(for: refused) == refused.localizedDescription)
+        let engineError = NSError(domain: "AetherEngine.DemuxerError", code: 0,
+                                  userInfo: [NSLocalizedDescriptionKey: "avformat_open_input failed: -1094995529"])
+        #expect(PlaybackFailureMessage.text(for: engineError) == PlaybackFailureMessage.unknown)
+        // The engine's account of its own failure classifies it better than what it threw.
+        let info = PlaybackErrorInfo(kind: .storageExhausted, message: "ENOSPC")
+        #expect(PlaybackFailureMessage.text(for: engineError, engine: info).hasPrefix("This device is full."))
+    }
+
+    @Test func anEpisodeNotOutYetIsSaidAsAnEpisode() {
+        var episode = JellyfinItem(id: "e7", name: "Open Water", type: "Episode")
+        episode.parentIndexNumber = 2
+        episode.indexNumber = 6
+        #expect(PlaybackError.notYetAvailable(episode).localizedDescription
+            == "S02E06 · Open Water isn't on the server yet. It plays here once the server has the episode.")
+        let movie = JellyfinItem(id: "m", name: "Copperline", type: "Movie")
+        #expect(PlaybackError.notYetAvailable(movie).localizedDescription.hasPrefix("Copperline isn't out yet."))
+    }
+}
+
+/// Something that ends when it's opened, for a load that waits on something slow to stop.
+@MainActor
+private final class Gate {
+    private var waiter: CheckedContinuation<Void, Never>?
+    var isWaiting: Bool { waiter != nil }
+
+    func wait() async {
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func open() {
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
+@MainActor
+private final class Record {
+    var committed: [String] = []
+    var cancelled: [String] = []
+}
+
+/// One load at a time: a newer one replaces one still under way, whatever order their waits end
+/// in, and a countdown to the next episode started before a load has nothing left to do.
+@MainActor
+struct LoadSequenceTests {
+    @Test func aLoadReplacedWhileItWaitsDoesNothingWhenItsWaitEnds() async {
+        let loads = LoadSequence()
+        let gate = Gate()
+        let record = Record()
+        // The earlier pick's request comes back after the later pick's has.
+        let earlier = Task {
+            await loads.start { generation in
+                await gate.wait()
+                if Task.isCancelled { record.cancelled.append("earlier") }
+                if loads.isCurrent(generation) { record.committed.append("earlier") }
+            }
+        }
+        while !gate.isWaiting { await Task.yield() }
+        await loads.start { generation in
+            if loads.isCurrent(generation) { record.committed.append("later") }
+        }
+        gate.open()
+        await earlier.value
+        #expect(record.committed == ["later"])
+        #expect(record.cancelled == ["earlier"])
+    }
+
+    @Test func cancellingTheCallerCancelsItsLoad() async {
+        let loads = LoadSequence()
+        let record = Record()
+        let caller = Task {
+            await loads.start { _ in
+                try? await Task.sleep(for: .seconds(30))
+                if Task.isCancelled { record.cancelled.append("load") }
+            }
+        }
+        caller.cancel()
+        await caller.value
+        #expect(record.cancelled == ["load"])
+    }
+
+    @Test func aCountdownStartedBeforeAnotherLoadDoesNothingWhenItRunsOut() async {
+        let loads = LoadSequence()
+        await loads.start { _ in }
+        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: "e5", nextEpisodeId: "e6")
+        #expect(countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: true))
+        // Play Again, or a move back on the timeline, during the countdown loads the episode again.
+        await loads.start { _ in }
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: true))
+    }
+
+    @Test func aCountdownIsDueOnlyForTheEpisodeThatEndedAndTheOneItCountedTo() async {
+        let loads = LoadSequence()
+        await loads.start { _ in }
+        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: "e5", nextEpisodeId: "e6")
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: false))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e4", next: "e6", hasEnded: true))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e7", hasEnded: true))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: nil, hasEnded: true))
+    }
+}
+
+/// The requests a playback that ended plays again with, and a failed one tries again with.
+struct ReplayAndRetryTests {
+    private let episode = PlaybackRequest(source: .item(id: "e5", mediaSourceId: nil), title: "Fog Signals")
+
+    @Test func playAgainStartsFromTheBeginning() {
+        let again = episode.replaying(from: 0, title: "Fog Signals")
+        #expect(again.startFromBeginning)
+        #expect(again.startingPoint == nil)
+        #expect(again.source == episode.source)
+    }
+
+    @Test func movingBackAfterTheEndPlaysFromExactlyThere() {
+        let again = episode.replaying(from: 1800, title: "Fog Signals")
+        #expect(!again.startFromBeginning)
+        #expect(again.start(resuming: 600) == 1800)
+        // Not from a resume position further on, as a handed-off playback would.
+        #expect(again.start(resuming: 2400) == 1800)
+    }
+
+    @Test func tryAgainStartsWhereThePlaybackGotTo() {
+        var startOver = episode
+        startOver.startFromBeginning = true
+        let again = startOver.retrying(from: 2400)
+        #expect(!again.startFromBeginning)
+        #expect(again.start(resuming: nil) == 2400)
+        #expect(again.start(resuming: 600) == 2400)
+    }
+
+    @Test func tryAgainKeepsTheStreamsAnotherDeviceAskedFor() {
+        var asked = episode
+        asked.startingPoint = .init(position: 60, audioStreamIndex: 2, subtitleStreamIndex: -1)
+        let again = asked.retrying(from: 300)
+        #expect(again.startingPoint == .init(position: 300, audioStreamIndex: 2, subtitleStreamIndex: -1))
+    }
+
+    @Test func tryAgainBeforeAnythingPlayedIsTheSameRequest() {
+        var asked = episode
+        asked.startingPoint = .init(position: 60, yieldsToLaterResume: true)
+        #expect(asked.retrying(from: nil) == asked)
+        #expect(asked.retrying(from: 0) == asked)
+    }
+
+    @Test func knowsTheSameTitleInAnyVersion() {
+        let other = PlaybackRequest(source: .item(id: "e5", mediaSourceId: "v2"), title: "")
+        #expect(episode.playsSameTitle(as: other))
+        #expect(!episode.playsSameTitle(as: PlaybackRequest(source: .item(id: "e6", mediaSourceId: nil), title: "")))
+        let file = PlaybackRequest(source: .file(bookmark: Data([1, 2]), name: "Movie.mkv"), title: "Movie")
+        #expect(file.playsSameTitle(as: PlaybackRequest(source: .file(bookmark: Data([1, 2]), name: "Movie.mkv"), title: "")))
+        #expect(!file.playsSameTitle(as: episode))
+    }
+
+    @Test func aSavedRequestLeavesTheLoadedItemOut() throws {
+        var request = episode
+        request.loadedItem = JellyfinItem(id: "e5", name: "Fog Signals", type: "Episode")
+        let restored = try JSONDecoder().decode(PlaybackRequest.self, from: JSONEncoder().encode(request))
+        #expect(restored.loadedItem == nil)
+        #expect(restored.id == request.id)
+        #expect(restored.source == request.source)
+        #expect(restored.title == request.title)
+    }
+}
+
+/// The audio and subtitles another stream of the title keeps: Try Again, Play Through the
+/// Server, a move to a lower quality.
+@MainActor
+struct CarriedTracksTests {
+    private let settings = AppSettings(defaults: UserDefaults(suiteName: "CarriedTracksTests-\(UUID().uuidString)")!)
+
+    private func stream(_ type: String, _ index: Int, _ language: String, title: String? = nil, forced: Bool = false) -> MediaStream {
+        var stream = MediaStream(type: type)
+        stream.index = index
+        stream.language = language
+        stream.title = title
+        stream.isForced = forced
+        return stream
+    }
+
+    private func version(_ id: String, _ streams: [MediaStream]) -> MediaSource {
+        var source = MediaSource(id: id, name: id)
+        source.mediaStreams = streams
+        return source
+    }
+
+    private var original: MediaSource {
+        version("v1", [stream("Audio", 1, "jpn"), stream("Audio", 2, "eng"),
+                       stream("Subtitle", 3, "eng", title: "Signs", forced: true), stream("Subtitle", 4, "eng"), stream("Subtitle", 5, "eng")])
+    }
+
+    private func selection(audio: Int?, subtitle: Int?, in source: MediaSource) -> TrackSelection {
+        TrackSelection(
+            audio: source.audioStreams.first { $0.index == audio }.flatMap(TrackChooser.Candidate.init),
+            subtitle: source.subtitleStreams.first { $0.index == subtitle }.flatMap(TrackChooser.Candidate.init),
+            streams: .init(mediaSourceId: source.id, audio: audio, subtitle: subtitle)
+        )
+    }
+
+    @Test func theSameVersionGetsTheVeryStreams() {
+        // The second of two English subtitles alike, under Japanese audio.
+        let tracks = selection(audio: 1, subtitle: 5, in: original)
+        let indexes = tracks.streamIndexes(in: original, settings: settings)
+        #expect(indexes.audio == 1)
+        #expect(indexes.subtitle == 5)
+    }
+
+    @Test func subtitlesThatWereOnStayOnThroughTheServer() {
+        // Known only by language, as on a file the server's list doesn't number the same.
+        var tracks = selection(audio: 1, subtitle: 4, in: original)
+        tracks.streams = nil
+        #expect(tracks.streamIndexes(in: original, settings: settings).subtitle == 4)
+        // In a version without them, the ones the subtitle setting takes rather than none.
+        settings.subtitleMode = .always
+        let other = version("v2", [stream("Audio", 0, "jpn"), stream("Subtitle", 1, "fre"), stream("Subtitle", 2, "eng", title: "Full")])
+        var elsewhere = tracks
+        elsewhere.subtitle = TrackChooser.Candidate(id: 9, language: "ger", isForced: false, isHearingImpaired: false, isDefault: false)
+        #expect(elsewhere.streamIndexes(in: other, settings: settings).subtitle == 2)
+    }
+
+    @Test func anotherVersionGetsTheSameLanguageAndKind() {
+        let tracks = selection(audio: 1, subtitle: 3, in: original)
+        let other = version("v2", [stream("Audio", 0, "eng"), stream("Audio", 1, "jpn"),
+                                   stream("Subtitle", 2, "eng"), stream("Subtitle", 3, "eng", title: "Signs", forced: true)])
+        let indexes = tracks.streamIndexes(in: other, settings: settings)
+        #expect(indexes.audio == 1)
+        #expect(indexes.subtitle == 3)
+    }
+
+    @Test func subtitlesThatWereOffStayOff() {
+        settings.subtitleMode = .always
+        let indexes = selection(audio: 2, subtitle: nil, in: original).streamIndexes(in: original, settings: settings)
+        #expect(indexes.audio == 2)
+        #expect(indexes.subtitle == nil)
+    }
+
+    @Test func audioTheVersionHasntGotFallsBackToTheLanguageSetting() {
+        let tracks = TrackSelection(audio: TrackChooser.Candidate(id: 7, language: "ita", isForced: false, isHearingImpaired: false, isDefault: false))
+        #expect(tracks.streamIndexes(in: original, settings: settings).audio == 2)
+    }
+}
+
+struct PlayerDetailTests {
+    @Test @MainActor func numbersEpisodesForNowPlaying() {
+        var episode = JellyfinItem(id: "e", name: "Breakwater", type: "Episode")
+        episode.parentIndexNumber = 1
+        episode.indexNumber = 4
+        #expect(PlayerModel.nowPlayingEpisodeNumber(episode) == "S1, E4")
+        episode.indexNumberEnd = 5
+        #expect(PlayerModel.nowPlayingEpisodeNumber(episode) == "S1, E4–5")
+        episode.parentIndexNumber = nil
+        #expect(PlayerModel.nowPlayingEpisodeNumber(episode) == "E4–5")
+        episode.indexNumber = nil
+        #expect(PlayerModel.nowPlayingEpisodeNumber(episode) == nil)
+    }
+
+    @Test func takesTheChaptersMarkedInAFile() {
+        let marks = [
+            ChapterInfo(id: 2, name: "", startSeconds: 600, durationSeconds: 300),
+            ChapterInfo(id: 1, name: " Opening ", startSeconds: 0, durationSeconds: 600),
+        ]
+        let chapters = PlaybackResolver.chapters(from: marks)
+        #expect(chapters.map(\.start) == [0, 600])
+        #expect(chapters.map(\.name) == ["Opening", "Chapter 2"])
+        #expect(chapters.allSatisfy { $0.image == nil })
+    }
+}
+
+/// A short silent H.264 video, a keyframe a second, written for a test to play.
+private enum GeneratedVideo {
+    static let size = (width: 320, height: 180)
+    static let framesPerSecond = 10
+
+    static func write(seconds: Int) async throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "GeneratedVideo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: "Generated.mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: size.width,
+            AVVideoHeightKey: size.height,
+            AVVideoCompressionPropertiesKey: [AVVideoMaxKeyFrameIntervalKey: framesPerSecond],
+        ])
+        let attributes = CVPixelBufferCreationAttributes(pixelFormatType: CVPixelFormatType(rawValue: kCVPixelFormatType_32BGRA),
+                                                         size: CVImageSize(width: size.width, height: size.height))
+        let frames = writer.inputPixelBufferReceiver(for: input, pixelBufferAttributes: attributes)
+        try writer.start()
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<(seconds * framesPerSecond) {
+            let buffer = try CVMutablePixelBuffer(attributes)
+            buffer.withUnsafeBuffer { pixels in
+                CVPixelBufferLockBaseAddress(pixels, [])
+                // A shade a frame, so no two frames are alike.
+                memset(CVPixelBufferGetBaseAddress(pixels), Int32(frame * 3 % 256), CVPixelBufferGetDataSize(pixels))
+                CVPixelBufferUnlockBaseAddress(pixels, [])
+            }
+            try await frames.append(CVReadOnlyPixelBuffer(buffer), with: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(framesPerSecond)))
+        }
+        frames.finish()
+        await withCheckedContinuation { finished in writer.finishWriting { finished.resume() } }
+        guard writer.status == .completed else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
+        return url
+    }
+}
+
+/// A playback through the engine, at its edges: moving back once it ended, playing it again, a
+/// press while it starts. Plays a video it writes.
+@MainActor
+@Suite(.serialized)
+struct PlaybackEdgeTests {
+    private func makeModel(playing file: URL, engine: AetherEngine) throws -> PlayerModel {
+        let defaults = try #require(UserDefaults(suiteName: "PlaybackEdgeTests-\(UUID().uuidString)"))
+        let accounts = AccountStore(defaults: defaults)
+        let settings = AppSettings(defaults: defaults)
+        let history = WatchHistory(file: FileManager.default.temporaryDirectory.appending(path: "Edges-\(UUID().uuidString).json"))
+        let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { _, _ in nil }
+        return PlayerModel(request: try .file(file), engine: engine, lease: EngineLease(),
+                           resolver: resolver, accounts: accounts, history: history, settings: settings) { _ in nil }
+    }
+
+    private static func episode(_ id: String, _ number: Int) -> JellyfinItem {
+        var episode = JellyfinItem(id: id, name: "Episode \(number)", type: "Episode")
+        episode.seriesId = "show"
+        episode.seriesName = "Show"
+        episode.parentIndexNumber = 1
+        episode.indexNumber = number
+        return episode
+    }
+
+    /// Two episodes downloaded, both `file`, the first playing.
+    private func makeModel(playingEpisodesOf file: URL, engine: AetherEngine) throws -> PlayerModel {
+        let first = Self.episode("e1", 1)
+        let second = Self.episode("e2", 2)
+        let defaults = try #require(UserDefaults(suiteName: "PlaybackEdgeTests-\(UUID().uuidString)"))
+        let accounts = AccountStore(defaults: defaults)
+        let settings = AppSettings(defaults: defaults)
+        let history = WatchHistory(file: FileManager.default.temporaryDirectory.appending(path: "Edges-\(UUID().uuidString).json"))
+        let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { id, _ in
+            [first, second].first { $0.id == id }.map { PlaybackResolver.DownloadedCopy(url: file, item: $0, segments: []) }
+        }
+        return PlayerModel(request: .item(first), engine: engine, lease: EngineLease(),
+                           resolver: resolver, accounts: accounts, history: history, settings: settings) { $0.id == first.id ? second : nil }
+    }
+
+    private func waitUntil(seconds: Double = 30, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(seconds)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private func playToTheEnd(_ model: PlayerModel) async throws {
+        await model.start()
+        try await waitUntil { model.status == .ended }
+        try #require(model.status == .ended, "Didn't end: \(model.status)")
+    }
+
+    @Test func movingBackAfterTheEndPlaysAgainFromThere() async throws {
+        let file = try await GeneratedVideo.write(seconds: 8)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        try await playToTheEnd(model)
+        // The title stays on screen for the controls, and plays from the start on another device.
+        #expect(model.current != nil)
+        #expect(model.handOverPosition == 0)
+
+        model.seek(to: 3)
+        try await waitUntil { model.status == .playing && model.clock.time > 3.2 }
+        #expect(model.status == .playing)
+        #expect(model.clock.time >= 3 && model.clock.time < 7, "Played from \(model.clock.time)")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func goingBackTenSecondsAfterTheEndPlaysTheEndAgain() async throws {
+        let file = try await GeneratedVideo.write(seconds: 15)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        await model.start()
+        try await waitUntil { model.status == .playing }
+        model.seek(to: 12)
+        try await waitUntil { model.status == .ended }
+        try #require(model.status == .ended)
+        let end = model.clock.time
+
+        model.skip(by: -PlayerModel.skipInterval)
+        try await waitUntil { model.status == .playing && model.clock.time > end - PlayerModel.skipInterval + 0.2 }
+        #expect(model.status == .playing)
+        #expect(model.clock.time < end - 5, "Played from \(model.clock.time), the end at \(end)")
+
+        // Forward from the end has nowhere to go.
+        try await waitUntil { model.status == .ended }
+        model.skip(by: PlayerModel.skipInterval)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(model.status == .ended)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func playAgainStartsFromTheBeginning() async throws {
+        let file = try await GeneratedVideo.write(seconds: 6)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        try await playToTheEnd(model)
+
+        model.togglePlayPause()
+        try await waitUntil { model.status == .playing && model.clock.time > 0.2 }
+        #expect(model.status == .playing)
+        #expect(model.clock.time < 3, "Played again from \(model.clock.time)")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func theCountdownPlaysTheNextEpisodeWhenItRunsOut() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        try await playToTheEnd(model)
+        try await waitUntil { model.upNextCountdown != nil }
+        try #require(model.upNextCountdown != nil, "No countdown")
+
+        try await waitUntil(seconds: 20) { model.item?.id == "e2" && model.status == .playing }
+        #expect(model.item?.id == "e2")
+        #expect(model.status == .playing)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func playAgainDuringTheCountdownStaysOnTheEpisode() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        try await playToTheEnd(model)
+        try await waitUntil { model.upNextCountdown != nil }
+        try #require(model.upNextCountdown != nil, "No countdown")
+
+        model.togglePlayPause()
+        try await waitUntil { model.status == .playing }
+        #expect(model.upNextCountdown == nil)
+        // Past the end of the countdown it was in.
+        try await Task.sleep(for: .seconds(6))
+        #expect(model.item?.id == "e1")
+        #expect(model.requestedItemId == "e1")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func aPressWhileItStartsDoesntPauseIt() async throws {
+        let file = try await GeneratedVideo.write(seconds: 6)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let starting = Task { await model.start() }
+        await Task.yield()
+        #expect(model.status == .preparing)
+        model.togglePlayPause()
+        // Again once the engine has it, before the picture is up, when it can be caught there.
+        let deadline = ContinuousClock.now + .seconds(10)
+        while model.status == .preparing, ContinuousClock.now < deadline { await Task.yield() }
+        if model.status == .loading { model.togglePlayPause() }
+        await starting.value
+        try await waitUntil(seconds: 15) { model.status == .playing }
+        #expect(model.status == .playing)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 }
 

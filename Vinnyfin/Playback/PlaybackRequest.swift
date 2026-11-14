@@ -29,6 +29,14 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
     var title: String
     var startFromBeginning = false
     var startingPoint: StartingPoint?
+    /// The item as `JellyfinClient.item(id:userId:)` gave it moments ago, versions and all, which
+    /// saves the player asking for it again. Not kept when the request is saved: by the time a
+    /// saved request plays again, the item may have changed.
+    var loadedItem: JellyfinItem?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, source, title, startFromBeginning, startingPoint
+    }
 
     /// `continuingFrom` is where another of the person's devices had got to, for a playback it
     /// handed off.
@@ -36,6 +44,34 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
                      continuingFrom position: Double? = nil) -> PlaybackRequest {
         PlaybackRequest(source: .item(id: item.id, mediaSourceId: mediaSourceId), title: item.name, startFromBeginning: fromBeginning,
                         startingPoint: position.map { StartingPoint(position: $0, yieldsToLaterResume: true) })
+    }
+
+    /// The same title again from `position`, as a playback that ended plays again when it's moved
+    /// back: from the start at 0, else from exactly there, whatever the title's resume position.
+    func replaying(from position: Double, title: String) -> PlaybackRequest {
+        PlaybackRequest(source: source, title: title, startFromBeginning: position <= 0,
+                        startingPoint: position > 0 ? StartingPoint(position: position) : nil)
+    }
+
+    /// This request tried again after a failure: from `position`, where the playback had got to,
+    /// when it got anywhere, with the streams another device asked for kept.
+    func retrying(from position: Double?) -> PlaybackRequest {
+        guard let position, position > 0 else { return self }
+        var again = self
+        again.startFromBeginning = false
+        again.startingPoint = StartingPoint(position: position, audioStreamIndex: startingPoint?.audioStreamIndex,
+                                            subtitleStreamIndex: startingPoint?.subtitleStreamIndex)
+        return again
+    }
+
+    /// Whether `other` plays the same title: the same server item, in whichever version, or the
+    /// same file.
+    func playsSameTitle(as other: PlaybackRequest) -> Bool {
+        switch (source, other.source) {
+        case (.item(let id, _), .item(let otherId, _)): id == otherId
+        case (.file(let bookmark, _), .file(let otherBookmark, _)): bookmark == otherBookmark
+        default: false
+        }
     }
 
     /// Where to start, given where the title resumes: there, unless another device asked for
@@ -116,6 +152,8 @@ nonisolated enum PlaybackError: LocalizedError {
     case fileUnavailable(String)
     /// The server has nothing to play of it yet (`JellyfinItem.isNotYetAvailable`).
     case notYetAvailable(String)
+    /// An episode the server lists without a file: one that hasn't aired, or isn't in the library.
+    case episodeNotYetAvailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -124,8 +162,100 @@ nonisolated enum PlaybackError: LocalizedError {
         case .transcodeRefused(let code): "The server couldn't prepare a stream\(code.map { " (\($0))" } ?? "")."
         case .fileUnavailable(let name): "\(name) can't be opened. It may have been moved or deleted."
         case .notYetAvailable(let name): "\(name) isn't out yet. It plays here as soon as any copy of it is out, even one filmed in a theater."
+        case .episodeNotYetAvailable(let name): "\(name) isn't on the server yet. It plays here once the server has the episode."
         }
     }
+
+    /// Nothing to play of `item` yet, said the way that fits it.
+    static func notYetAvailable(_ item: JellyfinItem) -> PlaybackError {
+        guard item.isEpisode else { return .notYetAvailable(item.titleWithYear) }
+        return .episodeNotYetAvailable([item.episodeCode, item.name].compactMap(\.self).joined(separator: " · "))
+    }
+}
+
+/// What the player says when a playback fails, in a plain sentence: what failed and what might
+/// help. The engine's own wording and the system's, which can be a log line or a sentence about
+/// HTTP, go to the log instead.
+nonisolated enum PlaybackFailureMessage {
+    /// For an error a load threw. `engine` is the engine's account of a failure of its own, which
+    /// classifies it better than the error it threw.
+    static func text(for error: any Error, engine info: PlaybackErrorInfo? = nil) -> String {
+        if let info { return text(for: info) }
+        switch error {
+        // The app's own errors already say what happened in words for the screen.
+        case let error as PlaybackError: return error.localizedDescription
+        case let error as JellyfinError: return error.localizedDescription
+        case let error as URLError: return text(for: error.code)
+        default:
+            let error = error as NSError
+            return error.domain == NSURLErrorDomain ? text(for: URLError.Code(rawValue: error.code)) : unknown
+        }
+    }
+
+    /// For a failure the engine published.
+    static func text(for info: PlaybackErrorInfo) -> String {
+        switch info.kind {
+        case .sourceRefused:
+            return switch info.underlyingCode {
+            case 401: "The server no longer accepts this sign-in. Sign in again to play this."
+            case 403: "This account isn't allowed to play this. An administrator can allow it in Jellyfin's dashboard."
+            case 404: "The server couldn't find this video. It may have been removed from the library."
+            case let status? where status >= 500: "The server ran into a problem playing this."
+            default: "The server turned down the request to play this."
+            }
+        case .sourceRateLimited:
+            return "The server is too busy to play this right now. Wait a moment, then try again."
+        case .sourceCertificateRejected:
+            return untrusted
+        case .storageExhausted:
+            return "This device is full. Free up some space, then try again."
+        default:
+            break
+        }
+        // A failure underneath that was the connection's, whichever part of the engine met it.
+        if info.underlyingDomain == NSURLErrorDomain, let code = info.underlyingCode {
+            return text(for: URLError.Code(rawValue: code))
+        }
+        switch info.kind {
+        case .vodSourceFailed, .liveSourceUnavailable, .reloadFailed, .liveReloadNeverReady:
+            return "The connection to the server was lost."
+        case .sourceOpenFailed, .customSourceProbeFailed:
+            return "This video couldn't be opened. The file may be damaged."
+        case .dolbyVisionRequiresHardware:
+            return "This device can't play this Dolby Vision video."
+        case .hlsFormatUnsupported, .hlsIngestFailed, .hlsPlaylistOnRawLivePath, .demuxedAudioLiveUnsupported,
+             .nativeItemFailed, .noPlayableTrackWithinBudget, .masterPlaylistRejected, .softwarePipelineFailed,
+             .audioSessionFailed, .audioTrackSwitchFailed, .audioBridgeProducedNoOutput:
+            return "This device couldn't play this video."
+        default:
+            return unknown
+        }
+    }
+
+    static func text(for code: URLError.Code) -> String {
+        switch code {
+        case .notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff, .callIsActive:
+            "This device is offline. Connect to the internet, then try again."
+        case .networkConnectionLost:
+            "The connection to the server was lost."
+        case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .timedOut, .resourceUnavailable:
+            "The server can't be reached. It may be off, or on another network."
+        case .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+             .serverCertificateHasUnknownRoot, .clientCertificateRejected, .clientCertificateRequired, .secureConnectionFailed:
+            untrusted
+        case .userAuthenticationRequired, .userCancelledAuthentication:
+            "The server no longer accepts this sign-in. Sign in again to play this."
+        case .badServerResponse, .cannotParseResponse, .zeroByteResource, .cannotDecodeRawData, .cannotDecodeContentData:
+            "The server sent something that isn't a video."
+        case .fileDoesNotExist, .noPermissionsToReadFile:
+            "This video can't be opened. It may have been moved or deleted."
+        default:
+            "The server can't be reached. It may be off, or on another network."
+        }
+    }
+
+    private static let untrusted = "The server's certificate isn't trusted, so this device won't play from it."
+    static let unknown = "Something went wrong while playing this."
 }
 
 /// Turns a request into a URL and the details around it.
@@ -151,7 +281,9 @@ struct PlaybackResolver {
         var chapterImages: [Int: URL] = [:]
     }
 
-    func resolve(_ request: PlaybackRequest) async throws -> ResolvedPlayback {
+    /// `tracks` are the audio and subtitles a playback of the title had, which a transcode is asked
+    /// for; a version that plays as it is picks its own from them once it's loaded.
+    func resolve(_ request: PlaybackRequest, carrying tracks: TrackSelection? = nil) async throws -> ResolvedPlayback {
         switch request.source {
         case .file(let bookmark, let name):
             return try resolveFile(bookmark: bookmark, name: name, request: request)
@@ -159,7 +291,7 @@ struct PlaybackResolver {
             if let copy = downloadedCopy(id, mediaSourceId) {
                 return resolveDownload(copy, itemId: id, request: request)
             }
-            return try await resolveStream(itemId: id, mediaSourceId: mediaSourceId, request: request)
+            return try await resolveStream(itemId: id, mediaSourceId: mediaSourceId, request: request, tracks: tracks)
         }
     }
 
@@ -182,7 +314,7 @@ struct PlaybackResolver {
         return ResolvedPlayback(
             url: url,
             title: url.deletingPathExtension().lastPathComponent,
-            startPosition: request.startFromBeginning ? nil : history.resumePosition(for: key),
+            startPosition: request.start(resuming: request.startFromBeginning ? nil : history.resumePosition(for: key)),
             duration: history.entry(for: key)?.duration,
             externalSubtitles: externalSubtitles,
             historyKey: key,
@@ -258,17 +390,18 @@ struct PlaybackResolver {
 
     // MARK: Streaming
 
-    private func resolveStream(itemId: String, mediaSourceId: String?, request: PlaybackRequest) async throws -> ResolvedPlayback {
+    private func resolveStream(itemId: String, mediaSourceId: String?, request: PlaybackRequest,
+                               tracks: TrackSelection?) async throws -> ResolvedPlayback {
         guard let client = accounts.client, let account = accounts.account else { throw PlaybackError.notSignedIn }
-        let item = try await client.item(id: itemId, userId: account.userId)
+        let item: JellyfinItem
+        if let loaded = request.loadedItem, loaded.id == itemId {
+            item = loaded
+        } else {
+            item = try await client.item(id: itemId, userId: account.userId)
+        }
         // The server offers such a title to play, with a placeholder version that fails once streamed.
-        if item.isNotYetAvailable() { throw PlaybackError.notYetAvailable(item.titleWithYear) }
-        let sources = item.mediaSources ?? []
-        let preferred = mediaSourceId.flatMap { id in sources.first { $0.id == id } }
-        guard let plan = VersionChooser.planStreaming(
-            sources: sources, preferred: preferred,
-            limit: settings.streamingLimit, allowTranscoding: settings.allowTranscoding
-        ) else { throw PlaybackError.noVersions }
+        if item.isNotYetAvailable() { throw PlaybackError.notYetAvailable(item) }
+        guard let plan = streamingPlan(for: item, mediaSourceId: mediaSourceId) else { throw PlaybackError.noVersions }
 
         // Where the version played last got to, whichever version plays now.
         var start = request.startFromBeginning ? nil : item.resumeSeconds
@@ -282,12 +415,38 @@ struct PlaybackResolver {
         case .direct(let source):
             return try direct(item: item, source: source, start: resume)
         case .transcode(let source, let quality):
-            let audioIndex = asked?.audioStreamIndex ?? Self.preferredAudioIndex(in: source, language: settings.audioLanguage)
-            let subtitleIndex = asked?.subtitleStreamIndex.map { $0 < 0 ? nil : $0 }
-                ?? Self.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
+            let carried = tracks?.streamIndexes(in: source, settings: settings)
+            let audioIndex = asked?.audioStreamIndex ?? carried?.audio
+                ?? Self.preferredAudioIndex(in: source, language: settings.audioLanguage)
+            let subtitleIndex: Int? = if let asked = asked?.subtitleStreamIndex {
+                asked < 0 ? nil : asked
+            } else if let carried {
+                carried.subtitle
+            } else {
+                Self.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
+            }
             return try await transcode(item: item, source: source, quality: quality, audioIndex: audioIndex,
                                        subtitleIndex: subtitleIndex, start: resume)
         }
+    }
+
+    /// How a stream of `item` would get to the screen: the version picked, or the one the streaming
+    /// limit allows, as it is or through the server's transcoder.
+    private func streamingPlan(for item: JellyfinItem, mediaSourceId: String?) -> PlaybackPlan? {
+        let sources = item.mediaSources ?? []
+        let preferred = mediaSourceId.flatMap { id in sources.first { $0.id == id } }
+        return VersionChooser.planStreaming(sources: sources, preferred: preferred,
+                                            limit: settings.streamingLimit, allowTranscoding: settings.allowTranscoding)
+    }
+
+    /// The address a playback of `item` (as `JellyfinClient.item(id:userId:)` gives it) would open,
+    /// for warming it up ahead of time: a version that streams as it is. Nil for a download, which
+    /// plays from this device, and for a transcode, which AVPlayer fetches itself and the server
+    /// only starts once asked.
+    func addressToWarm(for item: JellyfinItem) -> URL? {
+        guard downloadedCopy(item.id, nil) == nil, !item.isNotYetAvailable(), let client = accounts.client,
+              case .direct(let source) = streamingPlan(for: item, mediaSourceId: nil) else { return nil }
+        return client.streamURL(itemId: item.id, mediaSourceId: source.id)
     }
 
     /// Plays `source` as it is.
@@ -363,6 +522,15 @@ struct PlaybackResolver {
         }
     }
 
+    /// The chapters marked in the file itself, as the engine read them, for a playback the server
+    /// gives none for, such as a file of this device's.
+    nonisolated static func chapters(from marks: [ChapterInfo]) -> [ChapterMark] {
+        marks.sorted { $0.startSeconds < $1.startSeconds }.enumerated().map { index, chapter in
+            let name = chapter.name.trimmingCharacters(in: .whitespaces)
+            return ChapterMark(index: index, start: chapter.startSeconds, name: name.isEmpty ? "Chapter \(index + 1)" : name, image: nil)
+        }
+    }
+
     /// A resume position, unless it's at or past the end of this version, which happens when the
     /// position was reached in a longer one: a title resumes where its version played last got to.
     static func resumable(_ start: Double?, length: Double?) -> Double? {
@@ -405,6 +573,52 @@ struct PlaybackResolver {
 
     static func newPlaySessionId() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+}
+
+/// The audio and subtitles chosen in a playback, described so that another version of the
+/// title, whose tracks are numbered differently, can choose the same.
+struct TrackSelection {
+    var audio: TrackChooser.Candidate?
+    /// Nil when subtitles are off.
+    var subtitle: TrackChooser.Candidate?
+    /// The server's indexes of the chosen streams, in the version they were chosen in, which pick
+    /// them out exactly there. Nil for a file of this device's.
+    var streams: ServerStreams?
+
+    struct ServerStreams {
+        let mediaSourceId: String
+        var audio: Int?
+        var subtitle: Int?
+    }
+
+    /// The server's index of the chosen audio in `source`, when that's the version it was chosen in.
+    func exactAudioIndex(in source: MediaSource?) -> Int? {
+        guard let source, streams?.mediaSourceId == source.id, let index = streams?.audio,
+              source.audioStreams.contains(where: { $0.index == index }) else { return nil }
+        return index
+    }
+
+    /// The server's index of the chosen subtitles in `source`, when that's the version they were
+    /// chosen in and they're on.
+    func exactSubtitleIndex(in source: MediaSource?) -> Int? {
+        guard subtitle != nil, let source, streams?.mediaSourceId == source.id, let index = streams?.subtitle,
+              source.subtitleStreams.contains(where: { $0.index == index }) else { return nil }
+        return index
+    }
+
+    /// The server's indexes in `source` of the same audio and subtitles, to ask a transcode for:
+    /// the very streams in the version they were chosen in, the same language and kind in another,
+    /// and what the language settings ask for when it has neither. Subtitles that were off stay off.
+    func streamIndexes(in source: MediaSource, settings: AppSettings) -> (audio: Int?, subtitle: Int?) {
+        let audioIndex = exactAudioIndex(in: source)
+            ?? audio.flatMap { TrackChooser.same(as: $0, in: source.audioStreams.compactMap(TrackChooser.Candidate.init)) }
+            ?? PlaybackResolver.preferredAudioIndex(in: source, language: settings.audioLanguage)
+        guard let subtitle else { return (audioIndex, nil) }
+        let subtitleIndex = exactSubtitleIndex(in: source)
+            ?? TrackChooser.same(as: subtitle, in: source.subtitleStreams.compactMap(TrackChooser.Candidate.init))
+            ?? PlaybackResolver.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
+        return (audioIndex, subtitleIndex)
     }
 }
 

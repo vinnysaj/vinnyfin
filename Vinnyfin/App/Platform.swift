@@ -133,6 +133,53 @@ extension View {
     }
 }
 
+extension View {
+    /// Artwork in a card that Apple TV lifts under focus, with the system's sheen, sway and glass
+    /// rim. The card's button style lifts the first picture in its label by itself, but not one
+    /// clipped to rounded corners, as `Artwork` is: without this, focus barely shows on it.
+    /// Elsewhere nothing.
+    func liftsUnderFocus() -> some View {
+        #if os(tvOS)
+        hoverEffect(.highlight)
+        #else
+        self
+        #endif
+    }
+}
+
+/// The title and details under a card's artwork. On Apple TV they're dimmed but for the card
+/// with focus, so it stands out beside its row, and move down out of the way of its artwork as
+/// focus lifts it.
+struct CardCaptionStyle: ViewModifier {
+    /// The artwork's height. The lift grows it by about 15 percent, half of that below.
+    var artworkHeight: CGFloat = 0
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
+
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+        content
+            .foregroundStyle(isFocused ? HierarchicalShapeStyle.primary : .secondary)
+            .offset(y: isFocused ? artworkHeight * 0.075 : 0)
+            .animation(.easeOut(duration: 0.2), value: isFocused)
+        #else
+        content
+        #endif
+    }
+}
+
+extension View {
+    /// Tells `height` the view's height, on Apple TV, where a card's caption moves by it.
+    func measuresCardArtwork(_ height: Binding<CGFloat>) -> some View {
+        #if os(tvOS)
+        onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height.wrappedValue = $0 }
+        #else
+        self
+        #endif
+    }
+}
+
 /// For artwork cards: Apple TV lifts them under focus; elsewhere they stay untinted, with the
 /// title in the text color rather than the accent.
 #if os(tvOS)

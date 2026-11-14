@@ -465,7 +465,7 @@ private struct EpisodeRow: View {
     var body: some View {
         Button(action: action) {
             // At the accessibility text sizes the still goes above the words, which need the width.
-            AdaptiveStack(rowAlignment: .top, spacing: 14) {
+            AdaptiveStack(rowAlignment: .top, spacing: stillSpacing) {
                 if isSelecting {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                         .font(.title2)
@@ -479,6 +479,7 @@ private struct EpisodeRow: View {
                         if let progress = episode.progress { ProgressBar(fraction: progress).padding(6) }
                     }
                     .overlay(alignment: .topTrailing) { WatchBadge(item: episode).padding(6) }
+                    .liftsUnderFocus()
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
@@ -520,6 +521,15 @@ private struct EpisodeRow: View {
         150
         #else
         220
+        #endif
+    }
+
+    /// Apple TV's leaves room for the still to lift under focus without covering the words.
+    private var stillSpacing: CGFloat {
+        #if os(tvOS)
+        44
+        #else
+        14
         #endif
     }
 

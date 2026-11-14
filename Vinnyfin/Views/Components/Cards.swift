@@ -39,6 +39,7 @@ enum Metrics {
 struct PosterCard: View {
     let item: JellyfinItem
     var showsTitle = true
+    @State private var artworkHeight: CGFloat = 0
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     #if !os(tvOS)
@@ -65,6 +66,8 @@ struct PosterCard: View {
                     }
                 }
                 #endif
+                .liftsUnderFocus()
+                .measuresCardArtwork($artworkHeight)
             if showsTitle {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(item.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
@@ -72,6 +75,7 @@ struct PosterCard: View {
                         Text(year).font(.caption2).foregroundStyle(.secondary)
                     }
                 }
+                .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
             }
         }
         .contentShape(.rect)
@@ -155,6 +159,7 @@ struct ProgressBar: View {
 /// A 16:9 card for Continue Watching and Next Up: the episode's still, its show and number.
 struct LandscapeCard: View {
     let item: JellyfinItem
+    @State private var artworkHeight: CGFloat = 0
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -166,12 +171,15 @@ struct LandscapeCard: View {
                         ProgressBar(fraction: progress).padding(8)
                     }
                 }
+                .liftsUnderFocus()
+                .measuresCardArtwork($artworkHeight)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.titleName)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(dynamicTypeSize.lineLimit(1))
                 Text(item.cardDetail).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
             }
+            .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
         }
         .contentShape(.rect)
         .accessibilityElement(children: .ignore)
@@ -307,6 +315,7 @@ struct ShelfPlaceholder: View {
 /// The end of an Apple TV row: opens the whole list.
 private struct SeeAllCard: View {
     let style: BrowseList.Style
+    @State private var artworkHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -318,7 +327,9 @@ private struct SeeAllCard: View {
                         .font(.system(size: 56))
                         .foregroundStyle(.secondary)
                 }
-            Text("See All").font(.caption.weight(.medium))
+                .liftsUnderFocus()
+                .measuresCardArtwork($artworkHeight)
+            Text("See All").font(.caption.weight(.medium)).modifier(CardCaptionStyle(artworkHeight: artworkHeight))
         }
         .contentShape(.rect)
     }

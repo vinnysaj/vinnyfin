@@ -21,6 +21,8 @@ struct SearchView: View {
     @State private var path = NavigationPath()
     @State private var isSearching = false
     @State private var searchError: String?
+    /// Try Again's presses, each of which searches again for the same text.
+    @State private var retries = 0
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -41,7 +43,9 @@ struct SearchView: View {
             }
             .overlay {
                 if let searchError {
-                    ContentUnavailableView("Search Failed", systemImage: "exclamationmark.magnifyingglass", description: Text(searchError))
+                    LoadFailureView(LoadFailure("Search Failed", message: searchError), systemImage: "exclamationmark.magnifyingglass") {
+                        retries += 1
+                    }
                 } else if text.isEmpty {
                     ContentUnavailableView("Search Your Library", systemImage: "magnifyingglass",
                                            description: Text("Find movies, shows and episodes by name."))
@@ -61,7 +65,7 @@ struct SearchView: View {
             }
             #endif
             .itemDestinations()
-            .task(id: text) { await search() }
+            .task(id: Run(text: text, retries: retries)) { await search() }
             .onChange(of: player.endedPlayback) {
                 let ended = player.endedPlayback
                 movies = ended.applied(to: movies)
@@ -70,6 +74,12 @@ struct SearchView: View {
             }
         }
         .opensTitles(on: $path)
+    }
+
+    /// A search for the text as it is; Try Again runs it again.
+    private struct Run: Hashable {
+        let text: String
+        let retries: Int
     }
 
     /// What was found, for VoiceOver, whose cursor stays in the search field as results come in:

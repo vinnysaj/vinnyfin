@@ -35,7 +35,7 @@ struct HomeView: View {
                     if feed.sessionEnded {
                         sessionEndedNotice
                     } else if let loadError = feed.loadError {
-                        offlineNotice(loadError)
+                        failureNotice(loadError)
                     }
                     ForEach(feed.rows) { row in
                         HomeRowView(row: row, feed: feed) { path.append($0) }
@@ -143,22 +143,15 @@ struct HomeView: View {
         .padding(.horizontal, Metrics.edge)
     }
 
-    private func offlineNotice(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Can't reach \(session?.account.serverName ?? "the server")", systemImage: "wifi.exclamationmark")
-                .font(.headline)
-            Text(message).font(.subheadline).foregroundStyle(.secondary)
-            AdaptiveStack {
-                Button("Try Again") { Task { await load() } }
-                #if !os(tvOS)
-                Button("Watch Downloads", action: openDownloads)
-                #endif
-            }
-            .buttonStyle(.platformGlass)
+    /// Why Home couldn't load: the server out of reach, or failing.
+    private func failureNotice(_ message: String) -> some View {
+        LoadFailureNotice(failure: LoadFailure("Couldn't Load Home", message: message)) {
+            Task { await load() }
+        } more: {
+            #if !os(tvOS)
+            Button("Watch Downloads", action: openDownloads)
+            #endif
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
         .padding(.horizontal, Metrics.edge)
     }
 
@@ -169,6 +162,7 @@ struct HomeView: View {
             Text("\(session?.account.serverName ?? "The server") has no movies or shows for you. Add some in Jellyfin, then check again.")
         } actions: {
             Button("Check Again") { Task { await load() } }
+                .buttonStyle(.platformGlassProminent)
                 .accessibilityIdentifier("home.checkAgain")
         }
     }
@@ -224,20 +218,8 @@ private struct HomeRowView: View {
     }
 
     private func problemRow(_ problem: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(row.list.title)
-                .font(.title3.weight(.semibold))
-                .accessibilityAddTraits(.isHeader)
-            Label("Couldn't load these: \(problem)", systemImage: "exclamationmark.triangle")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Button("Try Again") { feed.retry(row.id) }
-                .buttonStyle(.platformGlass)
-        }
-        .padding(.horizontal, Metrics.edge)
-        #if os(tvOS)
-        .focusSection()
-        #endif
+        LoadFailureNotice(LoadFailure("Couldn't Load \(row.list.title)", message: problem)) { feed.retry(row.id) }
+            .padding(.horizontal, Metrics.edge)
     }
 }
 

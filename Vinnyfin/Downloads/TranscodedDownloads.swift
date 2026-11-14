@@ -644,7 +644,7 @@ final class TranscodedDownloads {
         case 400..<500 where ![408, 429].contains(status):
             return .giveUp("The server refused piece \(segment) of the transcode (HTTP \(status)).")
         default:
-            return .retry(.server("The server answered with HTTP \(status)."))
+            return .retry(.server(JellyfinError.message(status: status, body: "")))
         }
     }
 

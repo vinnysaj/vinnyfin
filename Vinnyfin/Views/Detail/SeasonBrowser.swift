@@ -83,7 +83,7 @@ struct SeasonBrowser: View {
     @State private var seasons: [JellyfinItem] = []
     @State private var seasonId: String?
     @State private var episodes: [JellyfinItem]?
-    @State private var problem: String?
+    @State private var problem: LoadFailure?
     @State private var position = ScrollPosition(idType: String.self)
     #if os(tvOS)
     @FocusState private var focused: String?
@@ -153,11 +153,14 @@ struct SeasonBrowser: View {
             #endif
             .onAppear { reveal(in: episodes) }
             .onChange(of: episode.id) { reveal(in: episodes) }
-        } else if let problem {
-            Label(problem, systemImage: "exclamationmark.triangle")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, Metrics.edge)
+        } else if let problem, let seriesId = episode.seriesId {
+            LoadFailureNotice(problem) {
+                Task {
+                    if seasons.isEmpty { await loadSeasons(seriesId: seriesId) }
+                    await loadEpisodes(seriesId: seriesId)
+                }
+            }
+            .padding(.horizontal, Metrics.edge)
         } else if episodes == nil {
             ProgressView()
                 .frame(maxWidth: .infinity)
@@ -181,7 +184,7 @@ struct SeasonBrowser: View {
             }
         } catch {
             guard !error.isCancellation else { return }
-            problem = "Couldn't load the seasons: \(error.localizedDescription)"
+            problem = LoadFailure("Couldn't Load the Seasons", error: error)
         }
     }
 
@@ -196,7 +199,7 @@ struct SeasonBrowser: View {
             problem = nil
         } catch {
             guard !error.isCancellation else { return }
-            problem = "Couldn't load the episodes: \(error.localizedDescription)"
+            problem = LoadFailure("Couldn't Load the Episodes", error: error)
         }
     }
 }

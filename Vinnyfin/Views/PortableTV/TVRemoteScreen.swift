@@ -156,6 +156,7 @@ private struct TVRemoteControls: View {
                 }
                 .accessibilityIdentifier("tvRemote.searchField")
             Button("Cancel") { isTyping = false }
+                .buttonStyle(.platformGlass)
         }
         .onAppear { fieldHasFocus = true }
     }

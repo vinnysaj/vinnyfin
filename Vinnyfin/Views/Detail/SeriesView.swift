@@ -23,7 +23,7 @@ struct SeriesView: View {
     @State private var episodes: [JellyfinItem]?
     @State private var nextUp: JellyfinItem?
     @State private var similar: [JellyfinItem] = []
-    @State private var loadError: String?
+    @State private var loadError: LoadFailure?
     @State private var isSelecting = false
     @State private var selection = Set<String>()
     @State private var batch: Batch?
@@ -57,10 +57,7 @@ struct SeriesView: View {
                 DetailHero(item: shown) { actions }
                 VStack(alignment: .leading, spacing: 24) {
                     if let loadError {
-                        Label(loadError, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, Metrics.edge)
-                        Button("Try Again", systemImage: "arrow.clockwise") { Task { await load() } }
+                        LoadFailureNotice(loadError) { Task { await retry() } }
                             .padding(.horizontal, Metrics.edge)
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
@@ -350,14 +347,14 @@ struct SeriesView: View {
             }
         } catch {
             guard !error.isCancellation else { return }
-            loadError = "Couldn't load the show: \(error.localizedDescription)"
+            loadError = LoadFailure("Couldn't Load the Show", error: error)
         }
         do {
             similar = try await session.client.similar(to: series.id, userId: session.userId)
         } catch {
             guard !error.isCancellation else { return }
             similar = []
-            loadError = loadError ?? "Couldn't load shows like this one: \(error.localizedDescription)"
+            loadError = loadError ?? LoadFailure("Couldn't Load Shows Like This", error: error)
         }
     }
 
@@ -371,7 +368,7 @@ struct SeriesView: View {
         do {
             episodes = try await seasonEpisodes(seasonId, session: session)
         } catch {
-            if !error.isCancellation { loadError = "Couldn't load the episodes: \(error.localizedDescription)" }
+            if !error.isCancellation { loadError = LoadFailure("Couldn't Load the Episodes", error: error) }
         }
     }
 
@@ -390,7 +387,7 @@ struct SeriesView: View {
             self.nextUp = try await nextUp
         } catch {
             guard !error.isCancellation else { return }
-            loadError = "Couldn't load the show: \(error.localizedDescription)"
+            loadError = LoadFailure("Couldn't Load the Show", error: error)
         }
     }
 
@@ -401,6 +398,12 @@ struct SeriesView: View {
             if let index = seasons.firstIndex(where: { $0.id == updated.id }) { seasons[index] = updated }
         }
         await reloadWatchState()
+    }
+
+    /// Everything that didn't load, again: the show, and the season's episodes if they didn't come.
+    private func retry() async {
+        await load()
+        if episodes == nil { await loadEpisodes() }
     }
 
     private func seasonEpisodes(_ seasonId: String, session: ServerSession) async throws -> [JellyfinItem] {

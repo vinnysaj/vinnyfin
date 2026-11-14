@@ -18,7 +18,7 @@ struct PlayerTabs: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(spacing: 24) {
             HStack(spacing: 16) {
                 ForEach(tabs) { tab in
                     Button {
@@ -39,9 +39,12 @@ struct PlayerTabs: View {
             }
             if let open = panel, open.isTab {
                 content(open)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        // Across the screen, so a swipe down from any of the buttons finds the tabs.
+        .frame(maxWidth: .infinity)
         .focusSection()
         .animation(.snappy, value: panel)
         .onChange(of: focus.wrappedValue) { _, focused in
@@ -106,9 +109,12 @@ private struct PlayerInfo: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 24, verticalSpacing: 10) {
                 if model.duration > 0 {
-                    TimelineView(.everyMinute) { _ in
-                        let end = TimeLabel.end(after: model.duration - model.clock.time, rate: model.rate, from: .now)
-                        fact("Ends", end.formatted(.dateTime.hour().minute()))
+                    GridRow {
+                        name("Ends")
+                        TimelineView(.everyMinute) { _ in
+                            let end = TimeLabel.end(after: model.duration - model.clock.time, rate: model.rate, from: .now)
+                            value(end.formatted(.dateTime.hour().minute()))
+                        }
                     }
                 }
                 if let video { fact("Picture", video) }
@@ -123,11 +129,19 @@ private struct PlayerInfo: View {
         .accessibilityIdentifier("player.info")
     }
 
-    private func fact(_ name: String, _ value: String) -> some View {
+    private func fact(_ title: String, _ text: String) -> some View {
         GridRow {
-            Text(name).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Text(value).font(.callout).lineLimit(2)
+            name(title)
+            value(text)
         }
+    }
+
+    private func name(_ title: String) -> some View {
+        Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+    }
+
+    private func value(_ text: String) -> some View {
+        Text(text).font(.callout).lineLimit(2)
     }
 
     /// "S1, E2 · The Night Ferry", or the title.

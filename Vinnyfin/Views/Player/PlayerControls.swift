@@ -611,9 +611,9 @@ struct PlayerControls: View {
     }
 }
 
-/// What's on screen when it's worth saying: a speed other than 1×, 3D, a stream's picture size,
-/// Dolby Vision or HDR, or that the server is transcoding. With `action`, a button that opens
-/// the Quality panel, there for every stream.
+/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
+/// that the server is transcoding. With `action`, a button that opens the Quality panel, there
+/// for every stream, which says the stream's picture size too.
 private struct FormatBadge: View {
     let model: PlayerModel
     var action: (() -> Void)?
@@ -661,7 +661,8 @@ private struct FormatBadge: View {
         #if os(visionOS)
         if coordinator.pictureIsStereo { parts.append("3D") }
         #endif
-        if model.current?.isStream == true, let size = model.qualityLabel { parts.append(size) }
+        // As the way into the Quality panel; on Apple TV that's the bottom row's, which says it.
+        if action != nil, model.current?.isStream == true, let size = model.qualityLabel { parts.append(size) }
         switch model.videoFormat {
         case .dolbyVision: parts.append("Dolby Vision")
         case .hdr10: parts.append("HDR10")

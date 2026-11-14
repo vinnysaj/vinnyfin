@@ -89,12 +89,12 @@ typealias PlatformGlassButtonStyle = GlassButtonStyle
 
 /// A screen's main action, filled with the accent color: on Liquid Glass, or on Vision Pro its
 /// own glass. White reads on the accent green at only 2.6 to 1, so with Increase Contrast the fill
-/// is a deeper green it reads on at 5.8. Apple TV's accent is white, with a dark title already.
+/// is a deeper green it reads on at 5.9. Apple TV's accent is white, with a dark title already.
 struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
     @Environment(\.colorSchemeContrast) private var contrast
 
     /// The accent green's own high-contrast variant in light mode, which white reads on.
-    private static let increasedContrastFill = Color(red: 0.212, green: 0.447, blue: 0.2)
+    private static let increasedContrastFill = Color(red: 0.20658, green: 0.43823, blue: 0.27906)
 
     func makeBody(configuration: Configuration) -> some View {
         Button(configuration)

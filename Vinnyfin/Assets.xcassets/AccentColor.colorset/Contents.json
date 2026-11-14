@@ -1,9 +1,9 @@
 {
   "colors" : [
-    { "color" : { "color-space" : "display-p3", "components" : { "red" : "0.47381", "green" : "0.69075", "blue" : "0.46049", "alpha" : "1.00000" } }, "idiom" : "universal" },
-    { "appearances" : [ { "appearance" : "contrast", "value" : "high" } ], "color" : { "color-space" : "srgb", "components" : { "red" : "0.21200", "green" : "0.44700", "blue" : "0.20000", "alpha" : "1.00000" } }, "idiom" : "universal" },
-    { "appearances" : [ { "appearance" : "luminosity", "value" : "dark" } ], "color" : { "color-space" : "display-p3", "components" : { "red" : "0.47381", "green" : "0.69075", "blue" : "0.46049", "alpha" : "1.00000" } }, "idiom" : "universal" },
-    { "appearances" : [ { "appearance" : "luminosity", "value" : "dark" }, { "appearance" : "contrast", "value" : "high" } ], "color" : { "color-space" : "srgb", "components" : { "red" : "0.58000", "green" : "0.80000", "blue" : "0.56500", "alpha" : "1.00000" } }, "idiom" : "universal" }
+    { "color" : { "color-space" : "display-p3", "components" : { "red" : "0.50213", "green" : "0.67931", "blue" : "0.52652", "alpha" : "1.00000" } }, "idiom" : "universal" },
+    { "appearances" : [ { "appearance" : "contrast", "value" : "high" } ], "color" : { "color-space" : "srgb", "components" : { "red" : "0.20658", "green" : "0.43823", "blue" : "0.27906", "alpha" : "1.00000" } }, "idiom" : "universal" },
+    { "appearances" : [ { "appearance" : "luminosity", "value" : "dark" } ], "color" : { "color-space" : "display-p3", "components" : { "red" : "0.58730", "green" : "0.75725", "blue" : "0.60951", "alpha" : "1.00000" } }, "idiom" : "universal" },
+    { "appearances" : [ { "appearance" : "luminosity", "value" : "dark" }, { "appearance" : "contrast", "value" : "high" } ], "color" : { "color-space" : "srgb", "components" : { "red" : "0.65900", "green" : "0.85815", "blue" : "0.70700", "alpha" : "1.00000" } }, "idiom" : "universal" }
   ],
   "info" : { "author" : "xcode", "version" : 1 }
 }

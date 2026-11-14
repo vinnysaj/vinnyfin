@@ -709,3 +709,41 @@ struct KeptSignInTests {
     }
 }
 
+struct DiscoveryTests {
+    @Test func readsAServersAnswer() throws {
+        let reply = #"{"Address":"http://192.168.1.10:8096","Id":"a1b2","Name":"Home","EndpointAddress":null}"#
+        let server = try #require(DiscoveredServer(reply: Data(reply.utf8)))
+        #expect(server == DiscoveredServer(id: "a1b2", name: "Home", address: URL(string: "http://192.168.1.10:8096")!))
+    }
+
+    @Test func keepsABasePathAndNamesAServerWithoutANameByItsHost() throws {
+        let reply = #"{"Address":"https://jf.example.com/jellyfin/","Id":"a1b2","Name":" "}"#
+        let server = try #require(DiscoveredServer(reply: Data(reply.utf8)))
+        #expect(server.address == URL(string: "https://jf.example.com/jellyfin")!)
+        #expect(server.name == "jf.example.com")
+    }
+
+    @Test func ignoresAnythingElse() {
+        let replies = [
+            "who is JellyfinServer?",
+            "{}",
+            #"{"Address":"http://nas.local:8096","Id":""}"#,
+            #"{"Address":"ftp://nas.local","Id":"a1b2"}"#,
+            #"{"Address":"nas.local:8096","Id":"a1b2"}"#,
+            #"{"Id":"a1b2","Name":"Home"}"#,
+        ]
+        for reply in replies {
+            #expect(DiscoveredServer(reply: Data(reply.utf8)) == nil, "\(reply)")
+        }
+    }
+
+    @Test func listsEachServerOnceByName() {
+        let discovery = ServerDiscovery()
+        discovery.take(DiscoveredServer(id: "2", name: "work", address: URL(string: "https://jf.example.com")!))
+        discovery.take(DiscoveredServer(id: "1", name: "Home", address: URL(string: "http://192.168.1.10:8096")!))
+        // The same server answering from another of its addresses.
+        discovery.take(DiscoveredServer(id: "1", name: "Home", address: URL(string: "http://192.168.1.11:8096")!))
+        #expect(discovery.servers.map(\.id) == ["1", "2"])
+        #expect(discovery.servers.first?.address.host() == "192.168.1.11")
+    }
+}

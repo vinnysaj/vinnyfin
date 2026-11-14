@@ -74,7 +74,7 @@ final class AccessibilityUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         #elseif os(tvOS)
         openTab("Settings", in: app)
-        XCTAssertTrue(app.buttons["settings.signOut"].waitForExistence(timeout: uiTimeout), "Settings never opened")
+        XCTAssertTrue(app.buttons["settings.account"].waitForExistence(timeout: uiTimeout), "Settings never opened")
         try await check(app, "settings")
         #else
         tap(app.buttons["home.settings"])

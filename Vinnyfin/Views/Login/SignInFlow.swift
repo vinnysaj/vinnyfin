@@ -432,3 +432,32 @@ nonisolated struct SignInFlow: Sendable {
             && password == demoPassword
     }
 }
+
+/// The languages a Jellyfin user prefers for audio and subtitles, from their configuration on the
+/// server (`/Users/Me`), which a first sign-in defaults vinnyfin's to
+/// (`AppSettings.defaultLanguages`). Empty or missing when they haven't said.
+nonisolated struct UserLanguages: Decodable, Sendable {
+    let audio: String?
+    let subtitle: String?
+
+    private enum CodingKeys: String, CodingKey { case configuration = "Configuration" }
+    private enum ConfigurationKeys: String, CodingKey {
+        case audio = "AudioLanguagePreference", subtitle = "SubtitleLanguagePreference"
+    }
+
+    init(audio: String?, subtitle: String?) {
+        self.audio = audio
+        self.subtitle = subtitle
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.configuration) else {
+            self.init(audio: nil, subtitle: nil)
+            return
+        }
+        let configuration = try container.nestedContainer(keyedBy: ConfigurationKeys.self, forKey: .configuration)
+        self.init(audio: try configuration.decodeIfPresent(String.self, forKey: .audio),
+                  subtitle: try configuration.decodeIfPresent(String.self, forKey: .subtitle))
+    }
+}

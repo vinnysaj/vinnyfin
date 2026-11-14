@@ -835,3 +835,68 @@ struct DiscoveryTests {
         #expect(discovery.servers.first?.address.host() == "192.168.1.11")
     }
 }
+
+/// iCloud's key-value store as a dictionary.
+private final class LanguageCloud: CloudKeyValues {
+    var values: [String: Any]
+
+    init(_ values: [String: Any]) {
+        self.values = values
+    }
+
+    func object(forKey key: String) -> Any? { values[key] }
+    func set(_ value: Any?, forKey key: String) { values[key] = value }
+    func removeObject(forKey key: String) { values[key] = nil }
+    var dictionaryRepresentation: [String: Any] { values }
+}
+
+struct FirstSignInLanguageTests {
+    private func freshDefaults() throws -> UserDefaults {
+        try #require(UserDefaults(suiteName: "FirstSignInLanguageTests-\(UUID().uuidString)"))
+    }
+
+    @Test func aChoiceComesFirstThenTheServersLanguageThenTheDevices() {
+        #expect(AppSettings.languageDefault(chosen: false, server: "jpn", device: "fr-FR") == "jpn")
+        #expect(AppSettings.languageDefault(chosen: false, server: nil, device: "fr-FR") == "fre")
+        #expect(AppSettings.languageDefault(chosen: false, server: "", device: "de-AT") == "ger")
+        // One vinnyfin doesn't offer is passed over.
+        #expect(AppSettings.languageDefault(chosen: false, server: "tlh", device: "es-MX") == "spa")
+        #expect(AppSettings.languageDefault(chosen: false, server: "tlh", device: "eo") == nil)
+        #expect(AppSettings.languageDefault(chosen: true, server: "jpn", device: "fr-FR") == nil)
+    }
+
+    @Test func readsTheLanguagesAJellyfinUserPrefers() throws {
+        let user = #"{"Id":"u1","Name":"Alex","Configuration":{"AudioLanguagePreference":"jpn","SubtitleLanguagePreference":"eng","PlayDefaultAudioTrack":true}}"#
+        let languages = try JSONDecoder().decode(UserLanguages.self, from: Data(user.utf8))
+        #expect(languages.audio == "jpn")
+        #expect(languages.subtitle == "eng")
+        let unsaid = try JSONDecoder().decode(UserLanguages.self, from: Data(#"{"Id":"u1","Configuration":{}}"#.utf8))
+        #expect(unsaid.audio == nil && unsaid.subtitle == nil)
+        let unconfigured = try JSONDecoder().decode(UserLanguages.self, from: Data(#"{"Id":"u1"}"#.utf8))
+        #expect(unconfigured.audio == nil && unconfigured.subtitle == nil)
+    }
+
+    @Test func aFirstSignInDefaultsOnlyTheLanguagesNeverChosen() throws {
+        let defaults = try freshDefaults()
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.needsLanguageDefaults)
+        settings.subtitleLanguage = "spa"
+        settings.defaultLanguages(audio: "jpn", subtitle: "eng", device: "fr-FR")
+        #expect(settings.audioLanguage == "jpn")
+        #expect(settings.subtitleLanguage == "spa")
+        #expect(!settings.needsLanguageDefaults)
+        // The next sign-in leaves them as they are.
+        settings.defaultLanguages(audio: "kor", subtitle: "kor", device: nil)
+        #expect(settings.audioLanguage == "jpn")
+        #expect(AppSettings(defaults: defaults).audioLanguage == "jpn")
+    }
+
+    @Test func aLanguageChosenOnAnotherDeviceIsntDefaultedAndTheDefaultStaysHere() throws {
+        let cloud = LanguageCloud(["settings.audioLanguage": "ger"])
+        let settings = AppSettings(defaults: try freshDefaults(), cloud: cloud)
+        settings.defaultLanguages(audio: "jpn", subtitle: "jpn", device: nil)
+        #expect(settings.audioLanguage != "jpn")
+        #expect(settings.subtitleLanguage == "jpn")
+        #expect(cloud.values["settings.subtitleLanguage"] == nil)
+    }
+}

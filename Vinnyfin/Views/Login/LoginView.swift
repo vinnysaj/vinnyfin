@@ -14,6 +14,7 @@ struct LoginView: View {
 
     @Environment(AccountStore.self) private var accounts
     @Environment(KnownServers.self) private var knownServers
+    @Environment(AppSettings.self) private var settings
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
@@ -774,6 +775,7 @@ struct LoginView: View {
             fail(going, while: .signingIn, with: error)
             return
         }
+        defaultLanguages()
         guard !Task.isCancelled else { return }
         quickConnect = nil
         dismiss()
@@ -781,6 +783,21 @@ struct LoginView: View {
 
     /// How long the Quick Connect code says it's signed in before the screen goes.
     private static let signedInMoment = Duration.seconds(1)
+
+    /// The first sign-in sets the audio and subtitle languages never chosen in vinnyfin to the
+    /// Jellyfin user's own, or else this device's.
+    private func defaultLanguages() {
+        guard settings.needsLanguageDefaults, let client = accounts.client else { return }
+        let settings = settings
+        Task {
+            do {
+                let languages: UserLanguages = try await client.currentUser()
+                settings.defaultLanguages(audio: languages.audio, subtitle: languages.subtitle)
+            } catch {
+                // Asked again at the next sign-in.
+            }
+        }
+    }
 
     private func fail(_ attempt: SignInFlow.Attempt, while stage: SignInFlow.Stage, with error: any Error) {
         guard !Task.isCancelled, !error.isCancellation else { return }

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Nuke
 import Testing
 @testable import vinnyfin
@@ -378,6 +379,46 @@ struct ArtworkTests {
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.dataIsEmpty))
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.imageRequestMissing))
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.cancelled))
+        let context = ImageDecodingContext(request: ImageRequest(url: nil), data: Data())
+        #expect(Artwork.isWorthRetrying(ImagePipeline.Error.decodingFailed(decoder: ImageDecoders.Empty(), context: context, error: IncompleteImage())))
+        #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.decodingFailed(decoder: ImageDecoders.Empty(), context: context, error: ImageDecodingError.unknown)))
+    }
+
+    /// A picture of noise, which compresses poorly, so its file is a good deal bigger than the
+    /// cut-off download that was found cached: 24,576 bytes of an 80,629-byte logo.
+    private static func noise(as type: String) throws -> Data {
+        let size = 256
+        var random = SeededRandom(seed: 3)
+        var pixels = (0..<size * size * 4).map { _ in UInt8.random(in: 0...255, using: &random) }
+        let image = try #require(pixels.withUnsafeMutableBytes { bytes in
+            CGContext(data: bytes.baseAddress, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        })
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, type as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    @Test func aPictureCutOffPartwayIsIncomplete() throws {
+        let png = try Self.noise(as: "public.png")
+        #expect(png.count > 24_576)
+        #expect(ImageData.isComplete(png))
+        #expect(!ImageData.isComplete(png.prefix(24_576)))
+        let jpeg = try Self.noise(as: "public.jpeg")
+        #expect(ImageData.isComplete(jpeg))
+        #expect(!ImageData.isComplete(jpeg.prefix(jpeg.count / 2)))
+        #expect(!ImageData.isComplete(Data()))
+    }
+
+    @Test func theDecoderTurnsDownAPictureCutOffPartway() throws {
+        let png = try Self.noise(as: "public.png")
+        let context = ImageDecodingContext(request: ImageRequest(url: nil), data: png)
+        let decoder = try #require(ImageDecoderRegistry.shared.decoder(for: context))
+        let complete = CompleteImageDecoder(base: decoder, request: context.request)
+        #expect(throws: IncompleteImage.self) { try complete.decode(png.prefix(24_576)) }
+        #expect(throws: Never.self) { try complete.decode(png) }
     }
 
     @Test func waitsLongerEachTimeUpToHalfAMinute() {

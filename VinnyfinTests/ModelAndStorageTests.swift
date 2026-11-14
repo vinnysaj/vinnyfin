@@ -71,6 +71,42 @@ struct JellyfinDecodingTests {
     }
 }
 
+/// SwiftUI redraws a view given an item only when the item differs from the one it had, so a
+/// page that starts on a list's item and then gets its details needs the two to differ.
+struct ItemEqualityTests {
+    static let listed = Samples.item("""
+    {"Id":"m1","Name":"Copperline","Type":"Movie","UserData":{"Played":false,"PlaybackPositionTicks":0,"IsFavorite":false}}
+    """)
+    static let detailed = Samples.item("""
+    {"Id":"m1","Name":"Copperline","Type":"Movie","Overview":"A river town keeps a secret.",
+     "Taglines":["The water remembers."],"UserData":{"Played":false,"PlaybackPositionTicks":0,"IsFavorite":false}}
+    """)
+
+    @Test func anItemsDetailsArentTheListsItem() {
+        #expect(Self.listed.id == Self.detailed.id)
+        #expect(Self.listed.userData == Self.detailed.userData)
+        #expect(Self.listed != Self.detailed)
+        var retold = Self.detailed
+        retold.taglines = ["Another tagline."]
+        #expect(retold != Self.detailed)
+    }
+
+    @Test func theWatchStateCounts() {
+        var watched = Self.listed
+        watched.userData?.played = true
+        #expect(watched != Self.listed)
+    }
+
+    @Test func theSameItemTwiceIsEqualAndHashedAlike() {
+        let again = Samples.item("""
+        {"Id":"m1","Name":"Copperline","Type":"Movie","UserData":{"Played":false,"PlaybackPositionTicks":0,"IsFavorite":false}}
+        """)
+        #expect(again == Self.listed)
+        #expect(Set([Self.listed, again]).count == 1)
+        #expect(Set([Self.listed, Self.detailed]).count == 2)
+    }
+}
+
 #if !os(tvOS)
 struct NamingTests {
     @Test func namesMoviesWithTheirYear() {

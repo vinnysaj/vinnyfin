@@ -113,6 +113,10 @@ nonisolated enum PlaybackPlan: Equatable, Sendable {
         }
     }
 
+    var isTranscode: Bool {
+        if case .transcode = self { true } else { false }
+    }
+
     /// The picture size it plays at, as the quality settings name it: "4K", "720p". Nil when
     /// nothing says.
     var label: String? {
@@ -213,6 +217,73 @@ nonisolated enum VersionChooser {
         if let version = dearestFirst(versions).first(where: fits) { return version.plan }
         if let transcode = dearestFirst(transcodes).first(where: fits) { return transcode.plan }
         return dearestFirst(versions + transcodes).last?.plan
+    }
+
+    /// A dearer way to go on playing a title once the connection has recovered from a step down:
+    /// the best way between `playing` and `ceiling`, the way the title started, that a link holding
+    /// `throughput` carries with room to spare. Ranks by picture size, then a version as it is over
+    /// the server's conversion, then bitrate. A title that started as a conversion steps up only
+    /// to conversions of the same version: none of its versions fit as they are, or this device
+    /// couldn't play it. Nil when nothing dearer fits, or `playing` is the ceiling already.
+    ///
+    /// - Parameters:
+    ///   - throughput: What the link has held, in bits per second (`RecoveryWatch.heldThroughput`).
+    static func planStepUp(from playing: PlaybackPlan, toward ceiling: PlaybackPlan, throughput: Int,
+                           sources: [MediaSource], allowTranscoding: Bool) -> PlaybackPlan? {
+        guard playing != ceiling, let current = StepUpOption(playing), let top = StepUpOption(ceiling) else { return nil }
+        let budget = Double(throughput) / stepUpHeadroom
+        let versions: [PlaybackPlan] = ceiling.isTranscode ? [] : sources.map { .direct($0) }
+        let transcodes: [PlaybackPlan] = !allowTranscoding && !ceiling.isTranscode ? [] : VideoQuality.limited.map { quality in
+            let source = ceiling.isTranscode ? ceiling.source : transcodeSource(for: quality, from: sources) ?? playing.source
+            return .transcode(source, quality)
+        }
+        let better = (versions + transcodes).compactMap(StepUpOption.init).filter { option in
+            // Worth the pause it costs, never a smaller picture, and no more than the title started at.
+            (option.resolution > current.resolution || Double(option.bitrate) >= Double(current.bitrate) * 1.15)
+                && option.resolution >= current.resolution
+                && option.resolution <= top.resolution && option.bitrate <= top.bitrate
+                && Double(option.bitrate) <= budget
+        }
+        return better.max { ($0.resolution, $0.isDirect ? 1 : 0, $0.bitrate) < ($1.resolution, $1.isDirect ? 1 : 0, $1.bitrate) }?.plan
+    }
+
+    /// A step up has to fit the link this many times over, so a dip doesn't bring it back down.
+    static let stepUpHeadroom: Double = 1.5
+
+    /// A way of playing for ranking a step up: what it asks of the link and the size it plays at.
+    private struct StepUpOption {
+        let plan: PlaybackPlan
+        let bitrate: Int
+        let resolution: Int
+        var isDirect: Bool { !plan.isTranscode }
+
+        init?(_ plan: PlaybackPlan) {
+            switch plan {
+            case .direct(let source):
+                let traits = VersionTraits(source)
+                guard let bitrate = traits.estimatedBitrate else { return nil }
+                self.bitrate = bitrate
+                resolution = traits.resolutionClass ?? 0
+            case .transcode(_, let quality):
+                bitrate = quality.transcodeBitrate
+                resolution = quality.maxHeight ?? 0
+            }
+            self.plan = plan
+        }
+    }
+
+    /// What to offer when this device can't draw `playing`'s picture fast enough: the version with
+    /// the next smaller picture, else the server's conversion at the size `limit` allows, or 1080p
+    /// without one. Nil for a conversion, which the server already makes light.
+    static func lighter(than playing: PlaybackPlan, sources: [MediaSource], limit: StreamingLimit) -> PlaybackPlan? {
+        guard case .direct(let source) = playing else { return nil }
+        let height = VersionTraits(source).resolutionClass ?? .max
+        let smaller = sources.filter { (VersionTraits($0).resolutionClass ?? .max) < height }
+        if let best = smaller.max(by: { (VersionTraits($0).resolutionClass ?? 0) < (VersionTraits($1).resolutionClass ?? 0) }) {
+            return .direct(best)
+        }
+        guard source.supportsTranscoding != false else { return nil }
+        return .transcode(source, limit.transcodeQuality ?? .fullHD)
     }
 
     /// The version a transcode to `quality` is best made from: the smallest that is at least

@@ -7,13 +7,17 @@ import UIKit
 /// makes use of and by the bitrate the connection was learned to carry.
 nonisolated struct StreamingLimit: Equatable, Sendable {
     var quality: VideoQuality
+    /// The network that holds `quality` below the streaming quality, to save data; nil when
+    /// `quality` is the streaming quality.
+    var savingData: StreamingNetwork?
     /// The tallest picture the display makes use of, in lines; nil when it makes use of any.
     var displayHeight: Int?
     /// Bits per second, from `QualityLearning`; nil when nothing was learned.
     var bitrate: Int?
 
-    init(quality: VideoQuality, displayHeight: Int? = nil, bitrate: Int? = nil) {
+    init(quality: VideoQuality, savingData: StreamingNetwork? = nil, displayHeight: Int? = nil, bitrate: Int? = nil) {
         self.quality = quality
+        self.savingData = savingData
         self.displayHeight = displayHeight
         self.bitrate = bitrate
     }
@@ -42,6 +46,31 @@ nonisolated struct StreamingLimit: Equatable, Sendable {
             }
         }
         return isKnown ? true : nil
+    }
+
+    /// What in the limit holds a version back.
+    enum Hold: Equatable, Sendable {
+        /// The streaming quality.
+        case setting(VideoQuality)
+        /// The cellular streaming quality, on a network that saves data.
+        case network(StreamingNetwork)
+        /// The display, which makes use of no more lines than these.
+        case display(Int)
+        /// Adaptive Quality, which learned that the connection carries this many bits per second.
+        case learnedBitrate(Int)
+    }
+
+    /// What holds a version back from playing as it is: the tighter of the display and the
+    /// streaming quality, or the network's, where its picture is too large, else the learned
+    /// bitrate. Nil when the limit admits it, or as far as what's known of it goes.
+    func hold(on traits: VersionTraits) -> Hold? {
+        if let resolution = traits.resolutionClass {
+            let setting = quality.maxHeight ?? .max
+            if let displayHeight, resolution > displayHeight, displayHeight < setting { return .display(displayHeight) }
+            if resolution > setting { return savingData.map(Hold.network) ?? .setting(quality) }
+        }
+        if let bitrate, let measured = traits.bitrate, measured > bitrate { return .learnedBitrate(bitrate) }
+        return nil
     }
 
     /// How far a version is over the limit, for taking the least over when none is within it: a
@@ -100,7 +129,9 @@ extension AppSettings {
     /// an Apple TV's output makes use of, and with Adaptive Quality, the bitrate the connection was
     /// learned to carry.
     var streamingLimit: StreamingLimit {
-        StreamingLimit(quality: streamingQuality(on: .current), displayHeight: DisplayOutput.streamingHeight,
-                       bitrate: adaptiveQuality ? learnedQuality.limit : nil)
+        let network = StreamingNetwork.current
+        let quality = streamingQuality(on: network)
+        return StreamingLimit(quality: quality, savingData: quality == streamingQuality ? nil : network,
+                              displayHeight: DisplayOutput.streamingHeight, bitrate: adaptiveQuality ? learnedQuality.limit : nil)
     }
 }

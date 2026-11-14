@@ -28,6 +28,17 @@ nonisolated enum StreamingNetwork: Equatable, Sendable {
         #endif
     }
 
+    /// The device is on cellular data or a Personal Hotspot, in Low Data Mode or not: not the
+    /// connection it's usually on, which Adaptive Quality learns (`QualityLearning`) and steps
+    /// back up on. Low Data Mode alone leaves the connection what it was.
+    static var isExpensive: Bool {
+        #if os(tvOS)
+        false
+        #else
+        monitor.currentPath.isExpensive
+        #endif
+    }
+
     /// Starts following the network, so it's known by the first stream: until the monitor's
     /// first update its path says nothing.
     static func follow() {

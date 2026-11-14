@@ -35,8 +35,8 @@ struct PlayerControls: View {
     let onClose: () -> Void
     /// Called on every use, so the controls stay up while they're being used.
     let onInteraction: () -> Void
-    /// Nil when Picture in Picture isn't possible right now.
-    let pictureInPicture: (() -> Void)?
+    /// Picture in Picture's button; nil where the player has none.
+    let pictureInPicture: PictureInPictureButton?
     /// Opens Play On and SharePlay; nil when the playback is only this device's, or on Apple TV.
     let playElsewhere: (() -> Void)?
     var isBelowFold = false
@@ -84,9 +84,9 @@ struct PlayerControls: View {
         #if os(tvOS)
         .defaultFocus(focus, .timeline)
         .onChange(of: focus.wrappedValue) { onInteraction() }
-        // Back to the button that opened a panel once it closes.
+        // Back to the button that opened a panel once it closes; from a tab below the buttons, to them.
         .onChange(of: panel) { closed, opened in
-            if opened == nil, let closed { focus.wrappedValue = .panel(closed) }
+            if opened == nil, let closed { focus.wrappedValue = closed.isTab ? .playPause : .panel(closed) }
         }
         .animation(.easeInOut(duration: 0.25), value: isCompact)
         #else
@@ -151,6 +151,12 @@ struct PlayerControls: View {
                     Spacer()
                     #endif
                     bottomBar
+                    #if os(tvOS)
+                    if !showsOnlyTimeline {
+                        PlayerTabs(model: model, panel: $panel, focus: focus, onInteraction: onInteraction)
+                            .padding(.top, 20)
+                    }
+                    #endif
                 }
             }
             .padding(.horizontal, Metrics.playerInset)
@@ -214,7 +220,11 @@ struct PlayerControls: View {
                 if !isTitleOwnRow { titleBlock.padding(.top, 6) }
                 Spacer()
                 HStack(alignment: .top, spacing: 14) {
+                    #if os(tvOS)
                     FormatBadge(model: model).padding(.top, 6)
+                    #else
+                    if !isTitleOwnRow { qualityButton }
+                    #endif
                     if let playElsewhere {
                         Button {
                             playElsewhere()
@@ -232,14 +242,20 @@ struct PlayerControls: View {
                     #if os(iOS) || os(macOS)
                     RoutePicker()
                     if let pictureInPicture {
-                        Button(action: pictureInPicture) {
-                            symbol("pip.enter")
+                        // Always there, so it's found where it was, and dimmed while the window can't start.
+                        Button {
+                            pictureInPicture.toggle()
+                            onInteraction()
+                        } label: {
+                            symbol(pictureInPicture.isActive ? "pip.exit" : "pip.enter")
                         }
                         .buttonStyle(.platformGlass)
                         .buttonBorderShape(.circle)
                         .controlSize(.large)
-                        .accessibilityLabel("Picture in Picture")
+                        .disabled(!pictureInPicture.isPossible && !pictureInPicture.isActive)
+                        .accessibilityLabel(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                         .accessibilityShowsLargeContentViewer()
+                        .accessibilityIdentifier("player.pictureInPicture")
                     }
                     #endif
                     #if os(iOS)
@@ -249,10 +265,32 @@ struct PlayerControls: View {
                 }
                 .dynamicTypeSize(...Self.largestControlSize)
             }
-            if isTitleOwnRow { titleBlock }
+            if isTitleOwnRow {
+                #if os(tvOS)
+                titleBlock
+                #else
+                // Opposite the title, where a phone held upright has room its row of buttons hasn't.
+                HStack(alignment: .top, spacing: 14) {
+                    titleBlock
+                    Spacer(minLength: 0)
+                    qualityButton
+                        .dynamicTypeSize(...Self.largestControlSize)
+                }
+                #endif
+            }
         }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topBarBottom = $0 }
     }
+
+    #if !os(tvOS)
+    /// The way into the Quality panel, saying what plays.
+    private var qualityButton: some View {
+        FormatBadge(model: model) {
+            panel = panel == .quality ? nil : .quality
+            onInteraction()
+        }
+    }
+    #endif
 
     /// Like the system player's, the buttons keep their size past the default text size, where a
     /// row of them would run off the screen; the Large Content Viewer shows each one large.
@@ -436,21 +474,14 @@ struct PlayerControls: View {
                 .focused(focus, equals: .playPause)
                 #endif
                 trackMenus
-                Spacer()
-                if let next = model.nextEpisode {
-                    Button {
-                        Task { await model.play(next) }
-                    } label: {
-                        symbol("forward.end.fill")
-                    }
-                    .buttonStyle(.platformGlass)
-                    .accessibilityLabel("Next Episode")
-                    .accessibilityHint(next.name)
-                    .accessibilityShowsLargeContentViewer()
-                    #if os(tvOS)
-                    .focused(focus, equals: .next)
-                    #endif
+                #if os(tvOS)
+                if !model.qualityOptions.isEmpty {
+                    panelButton(.quality, identifier: "player.quality", text: model.qualityLabel,
+                                value: model.qualityStatus?.summary)
                 }
+                #endif
+                Spacer()
+                episodeButtons
                 #if os(iOS)
                 Button {
                     fillsScreen.toggle()
@@ -527,6 +558,51 @@ struct PlayerControls: View {
         #endif
     }
 
+    /// The Episodes panel, which has Previous and Next in it, for an episode on iPhone, iPad and
+    /// the Mac. Elsewhere Next, and on Apple TV Previous too: below the fold and on Vision Pro the
+    /// episodes are on screen already, and Apple TV has them a swipe down from these buttons.
+    @ViewBuilder private var episodeButtons: some View {
+        #if os(iOS) || os(macOS)
+        if !isBelowFold, let item = model.item, item.isEpisode, item.seriesId != nil {
+            panelButton(.episodes, identifier: "player.episodes", value: item.episodeCode)
+        } else {
+            nextButton
+        }
+        #else
+        #if os(tvOS)
+        if let item = model.item, item.isEpisode, item.seriesId != nil {
+            Button {
+                Task { await model.playPreviousEpisode() }
+                onInteraction()
+            } label: {
+                symbol("backward.end.fill")
+            }
+            .buttonStyle(.platformGlass)
+            .accessibilityLabel("Previous Episode")
+            .accessibilityIdentifier("player.previous")
+        }
+        #endif
+        nextButton
+        #endif
+    }
+
+    @ViewBuilder private var nextButton: some View {
+        if let next = model.nextEpisode {
+            Button {
+                Task { await model.play(next) }
+            } label: {
+                symbol("forward.end.fill")
+            }
+            .buttonStyle(.platformGlass)
+            .accessibilityLabel("Next Episode")
+            .accessibilityHint(next.name)
+            .accessibilityShowsLargeContentViewer()
+            #if os(tvOS)
+            .focused(focus, equals: .next)
+            #endif
+        }
+    }
+
     @ViewBuilder private var trackMenus: some View {
         // Filled while subtitles show; VoiceOver hears which, and the audio when there's a choice.
         let subtitle = model.subtitleOptions.first { $0.id == model.selectedSubtitle }?.title
@@ -577,16 +653,46 @@ struct PlayerControls: View {
     }
 }
 
-/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision, HDR, or
-/// that the server is transcoding.
+/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
+/// that the server is transcoding. With `action`, a button that opens the Quality panel, there
+/// for every stream, which says the stream's picture size too.
 private struct FormatBadge: View {
     let model: PlayerModel
+    var action: (() -> Void)?
     #if os(visionOS)
     @Environment(PlayerCoordinator.self) private var coordinator
     #endif
 
     var body: some View {
-        if let text {
+        if let action, !model.qualityOptions.isEmpty || text != nil {
+            Button(action: action) {
+                // Whole, never cut short: where the bar has no room for all of it, the picture
+                // size alone, and then the panel's symbol.
+                ViewThatFits(in: .horizontal) {
+                    if let text { Text(text).fixedSize() }
+                    if let size = model.qualityLabel, size != text { Text(size).fixedSize() }
+                    Image(systemName: PlayerPanel.quality.symbol)
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(minHeight: 22)
+            }
+            .buttonStyle(.platformGlass)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .accessibilityLabel(PlayerPanel.quality.title)
+            .accessibilityValue(model.qualityStatus?.summary ?? text ?? "")
+            .accessibilityShowsLargeContentViewer()
+            #if os(macOS)
+            .help(model.qualityStatus?.summary ?? PlayerPanel.quality.title)
+            #endif
+            .accessibilityIdentifier("player.quality")
+            // For the panel to open below it.
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: PanelButtonFrames.self, value: [.quality: geometry.frame(in: .global)])
+                }
+            }
+        } else if let text {
             Text(text)
                 .font(.caption.weight(.bold))
                 .padding(.horizontal, 8)
@@ -603,6 +709,8 @@ private struct FormatBadge: View {
         #if os(visionOS)
         if coordinator.pictureIsStereo { parts.append("3D") }
         #endif
+        // As the way into the Quality panel; on Apple TV that's the bottom row's, which says it.
+        if action != nil, model.current?.isStream == true, let size = model.qualityLabel { parts.append(size) }
         switch model.videoFormat {
         case .dolbyVision: parts.append("Dolby Vision")
         case .hdr10: parts.append("HDR10")

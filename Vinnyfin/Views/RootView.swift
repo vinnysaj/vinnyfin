@@ -68,7 +68,8 @@ struct RootView: View {
             #endif
         }
         #else
-        .fullScreenCover(item: $player.presented) {
+        // Away while its playback plays in Picture in Picture (`PlayerCoordinator.isInPictureInPicture`).
+        .fullScreenCover(item: $player.coverModel) {
             #if os(iOS)
             playerCovers = false
             #endif
@@ -243,7 +244,7 @@ struct RootView: View {
                 messages.show("Sign in to see \(link.name).")
                 return
             }
-            if player.coversScreens && !player.isInPictureInPicture {
+            if player.coversScreens {
                 Task { await player.dismiss() }
             }
             linkedItem = link.item

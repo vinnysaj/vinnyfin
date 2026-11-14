@@ -231,6 +231,15 @@ final class PlayerModel: Identifiable {
     private(set) var asksStillWatching = false
     /// A word about the playback, such as a move to a lower quality, shown for a few seconds.
     private(set) var notice: PlaybackNotice?
+    /// Why the stream playing is the version, or the size, it is, as the Quality panel says.
+    private(set) var qualityReason = QualityReason.streamingLimit(nil)
+    /// The way to play the title the viewer picked in the Quality panel, which holds until Auto is
+    /// picked or the title is asked for again; nil leaves it to Auto.
+    private(set) var qualityPick: QualityOption?
+    /// A transcode the server lost is being asked for again (`TranscodeReconnect`).
+    private(set) var isReconnecting = false
+    /// A lighter way to play the title, offered while its sound plays with no picture.
+    private(set) var pictureOffer: PictureOffer?
     /// Says it resumed, or skipped the intro, with the way back, for a few seconds.
     private(set) var chip: PlaybackChip?
     /// Titles like the one that ended, for its end screen when nothing comes after it.
@@ -310,9 +319,21 @@ final class PlayerModel: Identifiable {
     /// The audio and subtitles of the version playing, as last seen on.
     @ObservationIgnored private var playingTracks: TrackSelection?
     @ObservationIgnored private var connectionWatch = ConnectionWatch()
+    @ObservationIgnored private var recoveryWatch = RecoveryWatch()
+    @ObservationIgnored private var pictureWatch = PictureWatch()
+    @ObservationIgnored private var transcodeReconnect = TranscodeReconnect()
+    /// The way the title started, which a step up goes back toward and never past.
+    @ObservationIgnored private var ceilingPlan: PlaybackPlan?
+    /// Step ups followed by a step down before they proved themselves (`stepUpProving`).
+    @ObservationIgnored private var failedStepUps = 0
+    /// When the last step up was made, on a steady clock.
+    @ObservationIgnored private var lastStepUp: Double?
+    /// The stream playing has shown its picture.
+    @ObservationIgnored private var showedPicture = false
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
+    @ObservationIgnored private var hasStarted = false
     /// The streams the request asks to start with, until the playback it started has them.
     @ObservationIgnored private var askedStreams: PlaybackRequest.StartingPoint?
     /// The audio and subtitles the viewer picked this session, in the show they were picked in,
@@ -414,7 +435,11 @@ final class PlayerModel: Identifiable {
 
     // MARK: Starting
 
+    /// Starts the request, once: a player that comes back for the playback, as from Picture in
+    /// Picture, finds it under way.
     func start() async {
+        guard !hasStarted else { return }
+        hasStarted = true
         await load(request)
     }
 
@@ -497,6 +522,10 @@ final class PlayerModel: Identifiable {
                 let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
                                                             audioIndex: audioIndex, subtitleIndex: subtitleIndex, start: position)
                 guard loads.isCurrent(generation) else { return }
+                // A step up never goes back to what this device couldn't play.
+                ceilingPlan = resolved.plan
+                qualityPick = nil
+                qualityReason = .deviceCouldNotPlay
                 await begin(resolved, generation: generation)
             } catch {
                 guard loads.isCurrent(generation), !error.isCancellation else { return }
@@ -547,6 +576,7 @@ final class PlayerModel: Identifiable {
                 guard loads.isCurrent(generation) else { return }
                 // A download's own copy, until the server's arrive.
                 segments = resolved.segments
+                noteQualityAtStart(of: resolved, request: request)
                 await begin(resolved, carrying: tracks, generation: generation)
             } catch {
                 guard loads.isCurrent(generation), !error.isCancellation else { return }
@@ -596,6 +626,8 @@ final class PlayerModel: Identifiable {
         appliedSubtitlePreference = false
         isLoaded = false
         isPresenting = false
+        showedPicture = false
+        pictureOffer = nil
         startedReporting = false
         lastReportedPaused = nil
         watchTask?.cancel()
@@ -764,6 +796,7 @@ final class PlayerModel: Identifiable {
             Playback failed: \(String(describing: error), privacy: .public)\
             \(info.map { " (\($0.kind.rawValue), \($0.underlyingDomain ?? "-") \($0.underlyingCode ?? 0))" } ?? "", privacy: .public)
             """)
+        isReconnecting = false
         status = .failed(PlaybackFailureMessage.text(for: error, engine: info))
         finishSession(.interrupted)
     }
@@ -856,6 +889,7 @@ final class PlayerModel: Identifiable {
                 The engine failed (\(info?.kind.rawValue ?? "unclassified", privacy: .public), \
                 \(info?.underlyingDomain ?? "-", privacy: .public) \(info?.underlyingCode ?? 0)): \(message, privacy: .public)
                 """)
+            if reconnectsTranscode(after: info) { return }
             status = .failed(info.map { PlaybackFailureMessage.text(for: $0) } ?? PlaybackFailureMessage.unknown)
             finishSession(.interrupted)
         case .paused:
@@ -908,6 +942,7 @@ final class PlayerModel: Identifiable {
     /// A picture that comes up after the engine started playing turns loading into playing.
     private func startupChanged(_ progress: StartupProgress?) {
         isPresenting = progress?.isComplete == true
+        if isPresenting { pictureCameUp() }
         guard isPresenting, status == .loading, engine.state == .playing else { return }
         status = .playing
         phaseChanged(engine.playbackPhase)
@@ -1419,9 +1454,6 @@ final class PlayerModel: Identifiable {
         updateSubtitleRendering()
     }
 
-    /// The picture is in Picture in Picture.
-    var isInPictureInPicture: Bool { pictureOutside.contains(.pictureInPicture) }
-
     /// Hands the subtitles to the system while the picture is outside the app, and takes them
     /// back. Not a transcode's: AVPlayer draws those itself wherever the picture is, and handing
     /// them over, with no renditions of the engine's own to show, would turn them off.
@@ -1554,19 +1586,29 @@ final class PlayerModel: Identifiable {
 
     // MARK: Adaptive quality
 
-    /// Samples the playback once a second for `ConnectionWatch`, and moves to a cheaper stream of
-    /// the title when it says the connection can't keep up. The watch starts over with each
-    /// stream, and nothing moves back up: the next playback starts at the streaming limit again,
-    /// which is lower once enough of these teach this device a bitrate to stay under.
+    /// Samples the stream once a second. For `ConnectionWatch`, it moves to a cheaper stream of the
+    /// title when the connection can't keep up; for `RecoveryWatch`, back up toward the way the
+    /// title started once the connection has held well above it. Both only with Adaptive Quality
+    /// on and while no pick in the Quality panel holds, and never up on cellular data or a Personal
+    /// Hotspot. It also offers a lighter stream while sound plays with no picture (`PictureWatch`),
+    /// and counts what a reconnected transcode has played (`TranscodeReconnect`). The watches start
+    /// over with each stream; the next playback starts at the streaming limit again, which is lower
+    /// once enough step downs teach this device a bitrate to stay under.
     private func watchConnection() {
         connectionWatch = ConnectionWatch(isTranscode: current?.isTranscode ?? false)
-        ExpensiveNetwork.follow()
+        recoveryWatch = RecoveryWatch(failedStepUps: failedStepUps)
+        pictureWatch = PictureWatch()
         watchTask = Task { [weak self] in
+            var lastPosition: Double?
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
-                guard self.settings.adaptiveQuality else {
+                if self.status == .playing { self.transcodeReconnect.played(1) }
+                self.watchPicture()
+                guard self.settings.adaptiveQuality, self.qualityPick == nil else {
                     self.connectionWatch.restart()
+                    self.recoveryWatch = RecoveryWatch(failedStepUps: self.failedStepUps)
+                    lastPosition = nil
                     continue
                 }
                 let sample = self.connectionSample()
@@ -1576,6 +1618,12 @@ final class PlayerModel: Identifiable {
                     Task { await self.stepDown(because: reason) }
                     return
                 }
+                self.recoveryWatch.observe(sample)
+                if let target = self.stepUpTarget(from: lastPosition, to: sample.position) {
+                    Task { await self.stepUp(to: target) }
+                    return
+                }
+                lastPosition = sample.position
             }
         }
     }
@@ -1586,7 +1634,7 @@ final class PlayerModel: Identifiable {
         guard let playing = current, let item = playing.item, let plan = playing.plan,
               let incident = QualityLearning.Incident(reason, playing: plan, of: item, sample: sample,
                                                       throughput: connectionWatch.throughput,
-                                                      isExpensiveNetwork: ExpensiveNetwork.isActive)
+                                                      isExpensiveNetwork: StreamingNetwork.isExpensive)
         else { return }
         guard let limit = settings.learnedQuality.record(incident) else { return }
         Self.log.notice("""
@@ -1636,6 +1684,51 @@ final class PlayerModel: Identifiable {
             The connection can't keep up (\(String(describing: reason), privacy: .public), \(throughput ?? 0) b/s for \
             \(bitrate ?? 0) b/s): moving to \(kind, privacy: .public) at \(quality, privacy: .public)
             """)
+        if let lastStepUp, ProcessInfo.processInfo.systemUptime - lastStepUp < Self.stepUpProving { failedStepUps += 1 }
+        lastStepUp = nil
+        await switchStream(to: target, because: .connectionSlowed, announcing: "Switched to \(quality) to keep playing")
+    }
+
+    /// Step ups that don't hold before the title stops trying them.
+    private static let stepUpAttempts = 2
+    /// A step up followed by a step down within this many seconds didn't hold.
+    private static let stepUpProving: Double = 300
+    /// No step up this close to the end, where it would be over before it paid off.
+    private static let stepUpRunway: Double = 120
+
+    /// The dearer stream to move to now: when the connection has held well above what it asks
+    /// (`RecoveryWatch`, `VersionChooser.planStepUp`), the title started dearer than it plays, and
+    /// it's a moment to switch.
+    private func stepUpTarget(from previous: Double?, to position: Double) -> PlaybackPlan? {
+        guard !StreamingNetwork.isExpensive, failedStepUps < Self.stepUpAttempts, let playing = session, let item = playing.item,
+              let plan = playing.plan, let ceiling = ceilingPlan, plan != ceiling,
+              duration <= 0 || duration - position > Self.stepUpRunway,
+              let held = recoveryWatch.heldThroughput,
+              let target = VersionChooser.planStepUp(from: plan, toward: ceiling, throughput: Int(held),
+                                                     sources: item.mediaSources ?? [], allowTranscoding: settings.allowTranscoding),
+              recoveryWatch.isMoment(isPaused: engine.state == .paused, from: previous, to: position, chapters: chapters.map(\.start))
+        else { return nil }
+        return target
+    }
+
+    /// Moves back up toward the way the title started, the connection having recovered.
+    private func stepUp(to target: PlaybackPlan) async {
+        let quality = target.label ?? "a higher quality"
+        Self.log.notice("""
+            The connection has held \(Int(self.recoveryWatch.heldThroughput ?? 0)) b/s: moving back up to \(quality, privacy: .public)
+            """)
+        lastStepUp = ProcessInfo.processInfo.systemUptime
+        await switchStream(to: target, because: .connectionRecovered, announcing: "Back to \(quality), the connection recovered")
+    }
+
+    /// Moves to another way of playing the title on screen, from where it is and with the same
+    /// audio and subtitles, holding the picture until the new stream's first frame where the
+    /// engine can. `onSwitch` runs once the server has given the new stream, as it replaces the
+    /// one playing. When the server can't give it, the stream playing goes on as it is.
+    private func switchStream(to target: PlaybackPlan, because reason: QualityReason, announcing announcement: String? = nil,
+                              onSwitch: @escaping () -> Void = {}) async {
+        guard let playing = session, let item = playing.item else { return }
+        let quality = target.label ?? (target.isTranscode ? "a conversion" : "another version")
         let tracks = currentTrackSelection()
         await startLoad { [self] generation in
             var resolved: ResolvedPlayback
@@ -1646,7 +1739,7 @@ final class PlayerModel: Identifiable {
                 case .transcode(let source, let quality):
                     let streams = tracks.streamIndexes(in: source, settings: settings)
                     resolved = try await resolver.transcode(item: item, source: source, quality: quality, audioIndex: streams.audio,
-                                                            subtitleIndex: streams.subtitle, start: engine.clock.currentTime)
+                                                            subtitleIndex: streams.subtitle, start: switchPosition)
                 }
             } catch {
                 guard loads.isCurrent(generation), !error.isCancellation else { return }
@@ -1657,14 +1750,166 @@ final class PlayerModel: Identifiable {
             }
             guard loads.isCurrent(generation), !isClosed, session?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
             // Where the old stream got to while the new one was being asked for, and paused if it was.
-            resolved.startPosition = engine.clock.currentTime
+            resolved.startPosition = switchPosition
             if engine.state == .paused { startsPaused = true }
-            // Holds the picture until the new stream's first frame, where the engine can.
             engine.prepareForItemReplacement()
             finishSession(.interrupted)
+            qualityReason = reason
+            onSwitch()
             await begin(resolved, carrying: tracks, generation: generation)
-            if loads.isCurrent(generation), isLoaded { show("Switched to \(quality) to keep playing", .connection, for: 4) }
+            if let announcement, loads.isCurrent(generation), isLoaded { show(announcement, .connection, for: 4) }
         }
+    }
+
+    /// Where a new stream of the title starts: where the picture is, or where the stream playing
+    /// started while it has shown none.
+    private var switchPosition: Double {
+        isPresenting ? engine.clock.currentTime : clock.time
+    }
+
+    // MARK: Quality
+
+    /// Takes note of the way a title starts, within the streaming limit or as picked on its page:
+    /// what a step up goes back toward, and what the Quality panel says of it. A pick the panel
+    /// held is spent, as the title was asked for again.
+    private func noteQualityAtStart(of resolved: ResolvedPlayback, request: PlaybackRequest) {
+        qualityPick = nil
+        ceilingPlan = resolved.plan
+        failedStepUps = 0
+        lastStepUp = nil
+        transcodeReconnect = TranscodeReconnect()
+        guard let plan = resolved.plan else { return }
+        let pickedOnPage = if case .item(_, let version) = request.source { version != nil } else { false }
+        qualityReason = .started(plan, sources: resolved.item?.mediaSources ?? [], pickedOnPage: pickedOnPage,
+                                 limit: settings.streamingLimit)
+    }
+
+    /// What plays and why, as the Quality panel says it; nil before anything does.
+    var qualityStatus: QualityStatus? {
+        guard let current else { return nil }
+        if let plan = current.plan {
+            return QualityStatus(plan: plan, reason: qualityReason, sources: current.item?.mediaSources ?? [])
+        }
+        let what = current.isDownload ? "Downloaded" : "On this \(Device.name)"
+        return QualityStatus(summary: [what, qualityLabel].compactMap(\.self).joined(separator: " · "),
+                             detail: current.mediaSource?.videoStream?.displayTitle)
+    }
+
+    /// The picture size playing, as the quality settings name it: "4K", "720p"; nil when nothing says.
+    var qualityLabel: String? {
+        current?.plan?.label ?? current?.mediaSource.flatMap { PlaybackPlan.direct($0).label }
+    }
+
+    /// The ways the Quality panel offers to play the title on screen; none for a download or a
+    /// file, which play as they are.
+    var qualityOptions: [QualityOption] {
+        guard let current, current.isStream, let source = current.mediaSource else { return [] }
+        return QualityOption.all(sources: current.item?.mediaSources ?? [source], playing: source)
+    }
+
+    /// Plays the title on screen the way the viewer picked in the Quality panel, from where it is.
+    /// Auto plays what the streaming limit allows, as the title would start, and lets Adaptive
+    /// Quality move it again.
+    func chooseQuality(_ option: QualityOption) {
+        guard let playing = session, let item = playing.item, let plan = playing.plan else { return }
+        let sources = item.mediaSources ?? []
+        let target: PlaybackPlan
+        let reason: QualityReason
+        switch option {
+        case .auto:
+            let limit = settings.streamingLimit
+            guard let auto = VersionChooser.planStreaming(sources: sources, preferred: nil, limit: limit,
+                                                          allowTranscoding: settings.allowTranscoding) else { return }
+            target = auto
+            reason = .started(auto, sources: sources, pickedOnPage: false, limit: limit)
+            ceilingPlan = auto
+            failedStepUps = 0
+        case .version(let source):
+            target = .direct(source)
+            reason = .picked
+        case .converted(let quality):
+            target = .transcode(plan.source, quality)
+            reason = .picked
+        }
+        let pick: QualityOption? = option == .auto ? nil : option
+        guard target != plan else {
+            qualityPick = pick
+            qualityReason = reason
+            return
+        }
+        Task { await switchStream(to: target, because: reason) { self.qualityPick = pick } }
+    }
+
+    /// Plays the lighter stream offered while the sound played alone, which a step up then never
+    /// goes past.
+    func takePictureOffer() {
+        guard let offer = pictureOffer else { return }
+        pictureOffer = nil
+        ceilingPlan = offer.plan
+        Task { await switchStream(to: offer.plan, because: .pictureFellBehind) }
+    }
+
+    /// Keeps waiting for the picture of the stream playing.
+    func declinePictureOffer() {
+        pictureOffer = nil
+    }
+
+    /// Offers a lighter stream once the sound has played alone long enough (`PictureWatch`).
+    private func watchPicture() {
+        guard pictureOffer == nil, isLoaded else { return }
+        let soundAlone = pictureWatch.observe(clock: engine.clock.currentTime, isRunning: engine.state == .playing, hasPicture: isPresenting)
+        guard soundAlone, let playing = session, let item = playing.item, let plan = playing.plan,
+              let lighter = VersionChooser.lighter(than: plan, sources: item.mediaSources ?? [], limit: settings.streamingLimit)
+        else { return }
+        Self.log.notice("The sound has played \(PictureWatch.soundAlone) s with no picture: offering \(lighter.label ?? "a conversion", privacy: .public)")
+        pictureOffer = PictureOffer(plan: lighter)
+    }
+
+    /// The stream's first frame is up: what was said while there was none is done with.
+    private func pictureCameUp() {
+        showedPicture = true
+        pictureOffer = nil
+        guard isReconnecting else { return }
+        isReconnecting = false
+        if notice?.text == Self.reconnecting { notice = nil }
+    }
+
+    // MARK: Reconnecting
+
+    static let reconnecting = "Reconnecting…"
+
+    /// Asks the server again for a transcode that failed after showing its picture, from where it
+    /// got to and with the audio and subtitles it had, behind "Reconnecting…" rather than the
+    /// failure (`TranscodeReconnect`). Says whether it did.
+    private func reconnectsTranscode(after info: PlaybackErrorInfo?) -> Bool {
+        guard let playing = session, let item = playing.item, let source = playing.mediaSource, let transcode = playing.transcode,
+              transcodeReconnect.shouldReconnect(after: info, isTranscode: true, hadPicture: showedPicture) else { return false }
+        let position = clock.time
+        // The menus' choices, which are the server's stream numbers for a transcode.
+        let audioIndex = selectedAudio ?? transcode.audioIndex
+        let subtitleIndex = selectedSubtitle
+        let paused = status == .paused
+        Self.log.notice("Asking the server again for the transcode it lost, from \(position) s")
+        finishSession(.interrupted)
+        startsPaused = paused
+        status = paused ? .paused : .loading
+        isReconnecting = true
+        show(Self.reconnecting, .connection, for: 0)
+        Task {
+            await startLoad { [self] generation in
+                do {
+                    let resolved = try await resolver.transcode(item: item, source: source, quality: transcode.quality, audioIndex: audioIndex,
+                                                                subtitleIndex: subtitleIndex, start: position)
+                    guard loads.isCurrent(generation), !isClosed else { return }
+                    engine.prepareForItemReplacement()
+                    await begin(resolved, generation: generation)
+                } catch {
+                    guard loads.isCurrent(generation), !error.isCancellation else { return }
+                    fail(error)
+                }
+            }
+        }
+        return true
     }
 
     /// The audio and subtitles playing, described so another version can find its own: the

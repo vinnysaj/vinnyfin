@@ -134,3 +134,96 @@ nonisolated struct ConnectionWatch {
         return samplesFallingBehind >= Self.fallingBehindSamples && runsDrySoon ? .fallingBehind : nil
     }
 }
+
+/// Watches whether the connection has recovered from a step down, from the same samples as
+/// `ConnectionWatch`: how much the link has held for the last `window` seconds, once the stream has
+/// played `settle` seconds without freezing. A freeze starts it over; a pause, a seek or a gap in
+/// the samples neither counts nor starts it over.
+nonisolated struct RecoveryWatch {
+    /// The stream plays this long without freezing before a step up is looked at...
+    static let settle: Double = 120
+
+    /// ...and twice as long after each step up that didn't hold.
+    static func settle(afterFailedStepUps failed: Int) -> Double {
+        settle * pow(2, Double(max(0, failed)))
+    }
+
+    /// The link has to hold its rate this long.
+    static let window: Double = 60
+    /// A title without chapters, which has no seams to switch at, switches once the link has held
+    /// this much longer than it takes to look at a step up.
+    static let chapterlessWait: Double = 120
+
+    private let settle: Double
+    private var last: ConnectionWatch.Sample?
+    /// Seconds of wanted playback since the stream started or last froze.
+    private(set) var steady: Double = 0
+    /// The link's readings over the last ten seconds.
+    private var readings: [(time: Double, rate: Double)] = []
+    /// The best reading of each ten seconds, by the second that ends them, over `window`.
+    private var held: [(time: Double, rate: Double)] = []
+
+    init(failedStepUps: Int = 0) {
+        settle = Self.settle(afterFailedStepUps: failedStepUps)
+    }
+
+    mutating func observe(_ sample: ConnectionWatch.Sample) {
+        defer { last = sample }
+        if let rate = sample.throughput { readings.append((sample.time, rate)) }
+        readings.removeAll { sample.time - $0.time > 10 }
+        guard sample.isWanted, let last, last.isWanted else { return }
+        let elapsed = sample.time - last.time
+        let advanced = sample.position - last.position
+        guard elapsed > 0, elapsed < 5, advanced >= -0.25, advanced <= elapsed * sample.rate + 1 else { return }
+        let frozen = max(0, elapsed - max(0, advanced) / max(sample.rate, 0.1))
+        guard frozen <= elapsed / 2 else {
+            steady = 0
+            held.removeAll()
+            return
+        }
+        steady += elapsed
+        if let best = readings.map(\.rate).max() { held.append((sample.time, best)) }
+        held.removeAll { sample.time - $0.time >= Self.window }
+    }
+
+    /// What the link has held, in bits per second: the lowest of its best readings in each ten
+    /// seconds of the last minute. Nil until the stream has played steadily for `settle` and the
+    /// readings cover most of the minute.
+    var heldThroughput: Double? {
+        guard steady >= settle, let first = held.first, let latest = held.last,
+              latest.time - first.time >= Self.window - 5, Double(held.count) >= Self.window * 0.75 else { return nil }
+        return held.map(\.rate).min()
+    }
+
+    /// Whether now is a moment to switch up, where the moment the picture holds is least noticed:
+    /// paused, or as the playhead moving from `previous` to `position` crosses into one of the
+    /// `chapters` (their starts). A title without chapters switches once it has held long enough.
+    func isMoment(isPaused: Bool, from previous: Double?, to position: Double, chapters: [Double]) -> Bool {
+        if isPaused { return true }
+        if chapters.isEmpty { return steady >= settle + Self.chapterlessWait }
+        guard let previous, position > previous, position - previous < 3 else { return false }
+        return chapters.contains { $0 > previous && $0 <= position }
+    }
+}
+
+/// Watches for sound that plays on with no picture: a stream whose clock runs while its first
+/// frame hasn't come, as when this device can't decode its picture fast enough. Says so once,
+/// after `soundAlone` seconds of it.
+nonisolated struct PictureWatch {
+    static let soundAlone: Double = 8
+
+    private var lastClock: Double?
+    private var ranAlone: Double = 0
+    private var hasSaid = false
+
+    /// Takes the clock once a second. Returns true the once the sound has run alone long enough.
+    mutating func observe(clock: Double, isRunning: Bool, hasPicture: Bool) -> Bool {
+        defer { lastClock = isRunning && !hasPicture ? clock : nil }
+        guard !hasSaid, isRunning, !hasPicture else { return false }
+        // The clock jumps as the engine seeks to the start position: only steady running counts.
+        if let lastClock, clock > lastClock, clock - lastClock <= 2 { ranAlone += clock - lastClock }
+        guard ranAlone >= Self.soundAlone else { return false }
+        hasSaid = true
+        return true
+    }
+}

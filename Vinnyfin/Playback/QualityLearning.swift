@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 /// What this device learns about its connection from the streams that rebuffer on it: a bitrate
 /// to stay under. Each rebuffer the connection causes is an incident; once streams at or above
@@ -124,20 +123,4 @@ nonisolated extension QualityLearning.Incident {
         }
         self.init(date: date, bitrate: Int(demand), resolution: traits.resolutionClass, title: item.seriesId ?? item.id)
     }
-}
-
-/// Whether the device is on cellular data or a Personal Hotspot.
-enum ExpensiveNetwork {
-    private static let monitor: NWPathMonitor = {
-        let monitor = NWPathMonitor()
-        monitor.start(queue: DispatchQueue(label: "net.vinnysaj.vinnyfin.player.path"))
-        return monitor
-    }()
-
-    /// Starts following the network, so it's known by the time it's asked about.
-    static func follow() {
-        _ = monitor
-    }
-
-    static var isActive: Bool { monitor.currentPath.isExpensive }
 }

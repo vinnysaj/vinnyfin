@@ -4,11 +4,13 @@ import SwiftUI
 import UIKit
 #endif
 
-/// The player's choice panels. While one is open the controls stay up.
+/// The player's choice panels. While one is open the controls stay up. The track panels are
+/// `TrackPanel`'s, the quality `QualityPanel`'s, and the show's episodes `EpisodesPanel`'s; on
+/// Apple TV the episodes and the info are the tabs a swipe down from the buttons (`PlayerTabs`).
 enum PlayerPanel: Identifiable {
     /// The audio tracks when there's a choice, the subtitles and their timing, and the sound tools.
     case audioAndSubtitles
-    case speed, chapters
+    case speed, chapters, episodes, quality, info
 
     var id: Self { self }
 
@@ -17,6 +19,9 @@ enum PlayerPanel: Identifiable {
         case .audioAndSubtitles: "Audio & Subtitles"
         case .speed: "Speed"
         case .chapters: "Chapters"
+        case .episodes: "Episodes"
+        case .quality: "Quality"
+        case .info: "Info"
         }
     }
 
@@ -25,7 +30,27 @@ enum PlayerPanel: Identifiable {
         case .audioAndSubtitles: "captions.bubble"
         case .speed: "gauge.with.dots.needle.67percent"
         case .chapters: "list.bullet.rectangle"
+        case .episodes: "rectangle.stack"
+        case .quality: "sparkles.tv"
+        case .info: "info.circle"
         }
+    }
+
+    /// A list of `TrackPanel`'s.
+    var isTrackPanel: Bool {
+        switch self {
+        case .audioAndSubtitles, .speed, .chapters: true
+        case .episodes, .quality, .info: false
+        }
+    }
+
+    /// One of Apple TV's tabs below the buttons, which focus opens.
+    var isTab: Bool {
+        #if os(tvOS)
+        self == .episodes || self == .info
+        #else
+        false
+        #endif
     }
 
     /// Picking a choice closes it; the audio and subtitles panel, with more to set beside the
@@ -143,6 +168,7 @@ struct TrackPanel: View {
         case .audioAndSubtitles: subtitleRows.first(where: \.isSelected)?.id
         case .speed: speedRows.first(where: \.isSelected)?.id ?? speedRows.first?.id
         case .chapters: chapterRows.first(where: \.isSelected)?.id ?? chapterRows.first?.id
+        case .episodes, .quality, .info: nil
         }
     }
 
@@ -172,6 +198,8 @@ struct TrackPanel: View {
             case .audioAndSubtitles: tracks
             case .speed: speeds
             case .chapters: chapters
+            // Panels of their own (`PlayerPanel.isTrackPanel`).
+            case .episodes, .quality, .info: EmptyView()
             }
         }
         // The speeds' row sets the width of theirs.
@@ -563,7 +591,7 @@ private struct SpeedChipStyle: ButtonStyle {
 #if os(tvOS)
 /// A panel row with focus: on a rounded card inside the panel's glass, lifted a little, rather than
 /// the plain style's square lift from edge to edge over the rows beside it.
-private struct PanelRowStyle: ButtonStyle {
+struct PanelRowStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

@@ -8,7 +8,7 @@ import SwiftUI
 /// menu never sees these keys there: the player, which takes focus as it opens, handles them
 /// with `pressed(_:modifiers:)`, and the menu shows them and acts when clicked.
 enum PlayerCommand: CaseIterable {
-    case playPause, skipBack, skipForward, nextEpisode
+    case playPause, skipBack, skipForward, nextEpisode, episodes
     case volumeUp, volumeDown, mute, subtitles
     case fullScreen
     /// Closes an open panel, else leaves full screen, else closes the player.
@@ -20,6 +20,7 @@ enum PlayerCommand: CaseIterable {
         case .skipBack: KeyboardShortcut(.leftArrow, modifiers: [])
         case .skipForward: KeyboardShortcut(.rightArrow, modifiers: [])
         case .nextEpisode: KeyboardShortcut("n", modifiers: [])
+        case .episodes: KeyboardShortcut("e", modifiers: [])
         case .volumeUp: KeyboardShortcut(.upArrow, modifiers: [])
         case .volumeDown: KeyboardShortcut(.downArrow, modifiers: [])
         case .mute: KeyboardShortcut("m", modifiers: [])
@@ -110,6 +111,7 @@ struct AppCommands: Commands {
             button("Back \(Int(PlayerModel.skipInterval)) Seconds", .skipBack)
             button("Forward \(Int(PlayerModel.skipInterval)) Seconds", .skipForward)
             button("Next Episode", .nextEpisode, enabled: player?.model.nextEpisode != nil)
+            button("Episodes", .episodes, enabled: player?.model.item?.isEpisode == true)
             Divider()
             button("Volume Up", .volumeUp)
             button("Volume Down", .volumeDown)

@@ -359,7 +359,7 @@ struct MainTabs: View {
         .tabViewStyle(.sidebarAdaptable)
         #if !os(tvOS)
         // While the player covers the tabs, the Go menu waits for it to close.
-        .focusedSceneValue(\.tabs, player.coversScreens ? nil : TabCommandTarget(go: go))
+        .focusedSceneValue(\.tabs, player.coversScreens ? nil : TabCommandTarget(go: go, back: back))
         #endif
         .onChange(of: linkedItem, initial: true) {
             guard let linkedItem else { return }
@@ -373,6 +373,16 @@ struct MainTabs: View {
     private func go(_ command: TabCommand) {
         selection = command.destination
         if command == .search { searchFieldRequests += 1 }
+    }
+
+    /// The Go menu's Back: a page back in the tab showing, when it's past its first.
+    private var back: (() -> Void)? {
+        switch selection {
+        case .home: homePath.isEmpty ? nil : { homePath.removeLast() }
+        case .movies: moviesPath.isEmpty ? nil : { moviesPath.removeLast() }
+        case .shows: showsPath.isEmpty ? nil : { showsPath.removeLast() }
+        default: nil
+        }
     }
     #endif
 }

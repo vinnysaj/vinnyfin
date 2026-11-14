@@ -8,7 +8,18 @@ struct ContinueWatchingWidget: Widget {
     var body: some WidgetConfiguration { upNextConfiguration(.continueWatching) }
 }
 
-/// A widget for one of Home's rows: each title plays from where it was left.
+/// The movies and shows added to the signed-in server last.
+struct RecentlyAddedWidget: Widget {
+    var body: some WidgetConfiguration { upNextConfiguration(.recentlyAdded) }
+}
+
+/// The signed-in user's favorite movies and shows, as Home's Favorites row lists them.
+struct FavoritesWidget: Widget {
+    var body: some WidgetConfiguration { upNextConfiguration(.favorites) }
+}
+
+/// A widget for a list of titles: each plays from where it was left, or opens its page, as the
+/// row has it.
 private func upNextConfiguration(_ row: UpNextWidgets.Row) -> some WidgetConfiguration {
     StaticConfiguration(kind: row.kind, provider: UpNextProvider(row: row)) { entry in
         UpNextView(entry: entry)
@@ -41,7 +52,7 @@ nonisolated struct UpNextProvider: TimelineProvider {
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin.widgets", category: "UpNext")
 
     func placeholder(in context: Context) -> UpNextEntry {
-        UpNextEntry(row: row, content: .tiles(Self.samples(count: UpNextWidgets.Layout(context.family).count)))
+        UpNextEntry(row: row, content: .tiles(Self.samples(of: row, count: UpNextWidgets.Layout(context.family).count)))
     }
 
     func getSnapshot(in context: Context, completion: @escaping @Sendable (UpNextEntry) -> Void) {
@@ -93,7 +104,7 @@ nonisolated struct UpNextProvider: TimelineProvider {
         do {
             let items = try await session.client.page(of: request.row.source, userId: session.userId,
                                                       startIndex: 0, limit: request.layout.count).items
-            let tiles = UpNextWidgets.tiles(from: items, limit: request.layout.count)
+            let tiles = UpNextWidgets.tiles(from: items, limit: request.layout.count, for: request.row)
             guard let width = request.pictureWidth else { return UpNextEntry(row: request.row, content: .tiles(tiles)) }
             let shown = Set(tiles.map(\.itemId))
             let pictures = await pictures(of: items.filter { shown.contains($0.id) }, width: width, session: session)
@@ -140,9 +151,16 @@ nonisolated struct UpNextProvider: TimelineProvider {
         }
     }
 
-    /// Titles shaped like the row's, for the widget gallery and while the widget first loads.
-    private static func samples(count: Int) -> [UpNextWidgets.Tile] {
+    /// Titles shaped like the row's, for the widget gallery and while the widget first loads:
+    /// episodes partway through, or movies and shows.
+    private static func samples(of row: UpNextWidgets.Row, count: Int) -> [UpNextWidgets.Tile] {
         (1...count).map { number in
+            guard row.plays else {
+                var item = JellyfinItem(id: "placeholder-\(number)", name: number.isMultiple(of: 2) ? "A Show" : "A Movie",
+                                        type: number.isMultiple(of: 2) ? "Series" : "Movie")
+                item.productionYear = 2026
+                return UpNextWidgets.Tile(item, plays: false)
+            }
             var item = JellyfinItem(id: "placeholder-\(number)", name: "Episode \(number)", type: "Episode")
             item.seriesName = "A Show"
             item.parentIndexNumber = 1
@@ -165,7 +183,7 @@ private struct UpNextView: View {
         case .tiles:
             Notice(symbol: "checkmark.circle", message: entry.row.emptyMessage)
         case .signedOut:
-            Notice(symbol: "person.crop.circle", message: "Sign in to vinnyfin to see what's up next.", short: "Sign in to vinnyfin")
+            Notice(symbol: "person.crop.circle", message: entry.row.signInMessage, short: "Sign in to vinnyfin")
         case .signInProblem(let problem):
             Notice(symbol: "person.crop.circle.badge.exclamationmark", message: "\(problem) Open vinnyfin to sign in.",
                    short: "Open vinnyfin to sign in")
@@ -188,16 +206,16 @@ private struct TilesView: View {
     var body: some View {
         switch family {
         #if os(iOS)
-        case .accessoryCircular: CircularView(tile: tiles[0])
+        case .accessoryCircular: CircularView(row: row, tile: tiles[0])
         case .accessoryRectangular: RectangularView(row: row, tile: tiles[0])
         case .accessoryInline:
-            Label("\(tiles[0].title) · \(tiles[0].detail)", systemImage: "play.fill")
-                .widgetURL(tiles[0].playLink)
+            Label("\(tiles[0].title) · \(tiles[0].detail)", systemImage: row.symbol)
+                .widgetURL(tiles[0].link)
         #endif
         case .systemSmall:
             TileView(tile: tiles[0], isLarge: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .widgetURL(tiles[0].playLink)
+                .widgetURL(tiles[0].link)
         default:
             grid
         }
@@ -216,7 +234,7 @@ private struct TilesView: View {
                 HStack(alignment: .top, spacing: UpNextWidgets.Layout.spacing) {
                     ForEach(rows[index].indices, id: \.self) { column in
                         if let tile = rows[index][column] {
-                            Link(destination: tile.playLink) { TileView(tile: tile, isLarge: false) }
+                            Link(destination: tile.link) { TileView(tile: tile, isLarge: false) }
                                 .frame(maxWidth: .infinity)
                         } else {
                             Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
@@ -291,28 +309,29 @@ private struct Artwork: View {
 }
 
 #if os(iOS)
-/// How far through the first title is, around a play symbol.
+/// How far through the first title is, around the row's symbol.
 private struct CircularView: View {
+    let row: UpNextWidgets.Row
     let tile: UpNextWidgets.Tile
 
     var body: some View {
         Group {
             if let progress = tile.progress {
                 Gauge(value: progress) {
-                    Image(systemName: "play.fill")
+                    Image(systemName: row.symbol)
                 } currentValueLabel: {
-                    Image(systemName: "play.fill")
+                    Image(systemName: row.symbol)
                 }
                 .gaugeStyle(.accessoryCircularCapacity)
             } else {
                 ZStack {
                     AccessoryWidgetBackground()
-                    Image(systemName: "play.fill").font(.title3)
+                    Image(systemName: row.symbol).font(.title3)
                 }
             }
         }
-        .widgetURL(tile.playLink)
-        .accessibilityLabel("Play \(tile.title), \(tile.detail)")
+        .widgetURL(tile.link)
+        .accessibilityLabel("\(row.plays ? "Play" : "Open") \(tile.title), \(tile.detail)")
     }
 }
 
@@ -327,11 +346,11 @@ private struct RectangularView: View {
             if let progress = tile.progress {
                 ProgressView(value: progress).progressViewStyle(.linear)
             } else {
-                Label(row.title, systemImage: "play.fill").font(.caption2)
+                Label(row.title, systemImage: row.symbol).font(.caption2)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .widgetURL(tile.playLink)
+        .widgetURL(tile.link)
     }
 }
 #endif

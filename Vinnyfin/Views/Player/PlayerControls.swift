@@ -628,6 +628,9 @@ struct Scrubber: View {
         // The bar and its times take the drag together, a target a finger finds though the bar is
         // drawn thin.
         .timelineDragging(duration: duration, position: $scrubbing.position, onDrag: onInteraction) { model.seek(to: $0) }
+        .sensoryFeedback(Self.landmarkFeedback, trigger: landmark(at: position, duration: duration)) { old, new in
+            Self.ticks(from: old, to: new)
+        }
         #endif
         #if os(tvOS)
         .padding(.vertical, 8)
@@ -744,6 +747,39 @@ struct Scrubber: View {
         isFocused || model.scrubbing.isActive
         #else
         model.scrubbing.isActive
+        #endif
+    }
+
+    /// What a tick marks as the position being chosen moves: reaching either end of the title, or
+    /// crossing into another chapter.
+    private enum Landmark: Equatable {
+        case start, end
+        /// The chapter's index; nil without chapters.
+        case chapter(Int?)
+    }
+
+    private func landmark(at position: Double?, duration: Double) -> Landmark? {
+        guard let position else { return nil }
+        if position <= 0 { return .start }
+        if position >= duration { return .end }
+        return .chapter(ChapterMark.current(in: model.chapters, at: position)?.index)
+    }
+
+    /// Reaching an end ticks, and so does a move from one chapter to another; leaving an end, or
+    /// starting or ending a drag, doesn't.
+    private static func ticks(from old: Landmark?, to new: Landmark?) -> Bool {
+        guard let old, let new, old != new else { return false }
+        switch (old, new) {
+        case (_, .start), (_, .end), (.chapter, .chapter): return true
+        default: return false
+        }
+    }
+
+    private static var landmarkFeedback: SensoryFeedback {
+        #if os(macOS)
+        .alignment
+        #else
+        .selection
         #endif
     }
 

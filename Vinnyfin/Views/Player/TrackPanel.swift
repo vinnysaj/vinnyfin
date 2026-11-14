@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// The player's choice panels. While one is open the controls stay up.
 enum PlayerPanel: Identifiable {
@@ -244,9 +247,13 @@ struct TrackPanel: View {
         .accessibilityIdentifier("panel.\(row.id)")
     }
 
-    /// Makes a choice and closes the panel.
+    /// Makes a choice and closes the panel. The choice ticks on iPhone here, as it's made: the
+    /// panel closes with it, before a sensory feedback modifier on it could see the change.
     private func choose(_ choice: () -> Void) {
         choice()
+        #if os(iOS)
+        UISelectionFeedbackGenerator().selectionChanged()
+        #endif
         onClose()
     }
 

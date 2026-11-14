@@ -13,6 +13,7 @@ struct SeriesView: View {
     @Environment(\.openTitle) private var openTitle
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
+    @Environment(\.scenePhase) private var scenePhase
     #if !os(tvOS)
     @Environment(SmartDownloads.self) private var smartDownloads
     @Environment(DownloadManager.self) private var downloads
@@ -20,13 +21,24 @@ struct SeriesView: View {
     @State private var detail: JellyfinItem?
     @State private var seasons: [JellyfinItem] = []
     @State private var seasonId: String?
+    /// The episodes listed, of `episodesSeasonId`: while another season's load, the last one's.
     @State private var episodes: [JellyfinItem]?
+    @State private var episodesSeasonId: String?
+    /// The episodes of each season loaded so far, which show at once as their season is picked
+    /// again, while they load again.
+    @State private var loaded: [String: [JellyfinItem]] = [:]
     @State private var nextUp: JellyfinItem?
+    /// Up Next has answered, with an episode or with none.
+    @State private var nextUpLoaded = false
     @State private var similar: [JellyfinItem] = []
     @State private var loadError: LoadFailure?
+    /// The server answered that it doesn't have the show, which asking again won't change.
+    @State private var isGone = false
     @State private var isSelecting = false
     @State private var selection = Set<String>()
     @State private var batch: Batch?
+    /// On screen, rather than under a page pushed over it or in another tab.
+    @State private var isOnScreen = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var focusedEpisode: String?
     #if os(tvOS)
@@ -34,14 +46,9 @@ struct SeriesView: View {
     @State private var episodeWindow = FocusWindow()
     /// The episode at the top of the screen, kept there as the window moves.
     @State private var position = ScrollPosition(idType: String.self)
-    @FocusState private var focusedAction: Action?
-    /// Focus has been put on the page's buttons, as it first appeared.
-    @State private var placedFocus = false
-
-    /// The buttons over the artwork that focus starts on.
-    private enum Action {
-        case play, watched
-    }
+    @FocusState private var playFocused: Bool
+    /// Bounds the page's default focus.
+    @Namespace private var focusScope
     #endif
 
     struct Batch: Identifiable {
@@ -51,23 +58,53 @@ struct SeriesView: View {
 
     private var shown: JellyfinItem { detail ?? series }
 
+    /// The season shown's episodes, once they're the ones listed.
+    private var currentEpisodes: [JellyfinItem]? { episodesSeasonId == seasonId ? episodes : nil }
+
+    /// Another season's episodes are on their way, and the last one's stand dimmed in their place.
+    private var isSwitching: Bool { episodes != nil && episodesSeasonId != seasonId }
+
+    /// Play stands in place, unable to play, until it's known whether there's an episode next, so
+    /// the buttons don't move as it comes; and on Apple TV, so focus starts on it rather than on
+    /// a switch that would mark the whole show. With nothing next it goes once the episodes are
+    /// in, for focus to go to the first of them.
+    private var showsPlay: Bool {
+        guard !isGone else { return false }
+        return nextUp != nil || !nextUpLoaded || (episodes == nil && loadError == nil)
+    }
+
     var body: some View {
         EdgeToEdgeScrollView(underTopBars: true) {
             VStack(alignment: .leading, spacing: 24) {
                 DetailHero(item: shown) { actions }
                 VStack(alignment: .leading, spacing: 24) {
-                    if let loadError {
+                    if isGone {
+                        TitleGoneNotice()
+                            .padding(.horizontal, Metrics.edge)
+                    } else if let loadError {
                         LoadFailureNotice(loadError) { Task { await retry() } }
                             .padding(.horizontal, Metrics.edge)
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
-                    seasonPicker
-                    episodeList
+                    if !isGone {
+                        VStack(alignment: .leading, spacing: 12) {
+                            // Also over a single season's episodes, which have no chips.
+                            Text("Episodes")
+                                .font(.title3.weight(.semibold))
+                                .accessibilityAddTraits(.isHeader)
+                                .padding(.horizontal, Metrics.edge)
+                            seasonPicker
+                            episodeList
+                        }
+                    }
                     if let people = detail?.people { CastShelf(people: people) }
                     if !similar.isEmpty {
                         Shelf(title: "More Like This", seeAll: .moreLike(shown), items: similar, cardWidth: Metrics.posterWidth) { other in
                             NavigationLink(value: other) { PosterCard(item: other) }
                                 .buttonStyle(.artwork)
+                                .titleMenu(other) { updated in
+                                    if let index = similar.firstIndex(where: { $0.id == updated.id }) { similar[index] = updated }
+                                }
                         }
                     }
                 }
@@ -82,6 +119,7 @@ struct SeriesView: View {
             }
         }
         #endif
+        .refreshable { await refresh() }
         // The page color the hero artwork fades into.
         .background(Color.pageBackground.ignoresSafeArea())
         .screenTitle(series.name)
@@ -97,18 +135,16 @@ struct SeriesView: View {
             }
         }
         #else
-        // Focus starts on Play, or until the next episode is in, on Watched; also for a page
-        // opened from a link at launch, while focus is still in the sidebar. Play takes focus
-        // when it arrives unless focus has gone down to the episodes, wherever focus was then:
-        // a page still coming on screen hasn't got it yet. Coming back to the page leaves focus
-        // where it was.
-        .task {
-            guard !placedFocus else { return }
-            placedFocus = true
-            focusedAction = nextUp == nil ? .watched : .play
-        }
-        .onChange(of: nextUp?.id) {
-            if nextUp != nil, focusedEpisode == nil { focusedAction = .play }
+        // Focus starts on Play, also for a page opened from a link at launch, or with nothing
+        // next, on the first episode; never on a switch, which a reflexive press would flip for
+        // the whole show. Coming back to the page leaves focus where it was.
+        .focusScope(focusScope)
+        .defaultFocus($playFocused, true)
+        .defaultFocus($focusedEpisode, showsPlay ? nil : episodes?.first?.id)
+        // Nothing next after all: from Play's stand-in to the first episode, rather than to
+        // whatever is nearest as it goes.
+        .onChange(of: showsPlay) { _, shows in
+            if !shows, playFocused { focusedEpisode = episodes?.first?.id }
         }
         #endif
         // Siri knows which show the page is about: "continue watching this".
@@ -119,73 +155,80 @@ struct SeriesView: View {
             similar = player.endedPlayback.applied(to: similar)
             Task { await reloadWatchState() }
         }
+        .onAppear { isOnScreen = true }
+        .onDisappear { isOnScreen = false }
+        // Back in the app, what was watched elsewhere in the meantime.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active, isOnScreen, !isGone { Task { await reloadWatchState() } }
+        }
     }
 
     // MARK: Actions
 
-    /// One row, or on a narrow screen Play above the rest, or with text too large for even
-    /// that, one above the other.
-    @ViewBuilder private var actions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                playButton
-                secondaryButtons
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                playButton
-                HStack(spacing: 12) { secondaryButtons }
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                playButton
-                secondaryButtons
+    /// Play, then the rest: in one row, or where that doesn't fit, Play on a row above the rest.
+    private var actions: some View {
+        TitleActionsLayout {
+            if showsPlay { playButton }
+            if !isGone {
+                Group { secondaryButtons }
+                    .layoutValue(key: SecondaryTitleAction.self, value: true)
             }
         }
+        .focusCaptionRoom()
     }
 
-    @ViewBuilder private var playButton: some View {
-        if let nextUp {
-            Button {
-                player.play(.item(nextUp))
-            } label: {
-                Label(playLabel(for: nextUp), systemImage: "play.fill").frame(minWidth: 120)
-            }
-            .buttonStyle(.platformGlassProminent)
-            .controlSize(.large)
-            // Its title on one line: the row's other buttons would otherwise take width it needs. At
-            // the accessibility text sizes, where one line can be wider than the screen, it wraps.
-            .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
-            .accessibilityLabel(spokenPlayLabel(for: nextUp))
-            .accessibilityInputLabels([nextUp.resumeSeconds != nil ? "Resume" : "Play", playLabel(for: nextUp)])
-            .accessibilityIdentifier("series.play")
-            #if os(tvOS)
-            .focused($focusedAction, equals: .play)
-            #endif
+    /// The next episode's Play, or until it's known, Play standing in for it, which plays nothing.
+    /// It's the same button throughout, so focus stays on it as the episode comes.
+    private var playButton: some View {
+        Button {
+            if let nextUp { player.play(.item(nextUp)) }
+        } label: {
+            Label(nextUp.map(playLabel) ?? "Play", systemImage: "play.fill").frame(minWidth: 120)
         }
+        .buttonStyle(.platformGlassProminent)
+        .controlSize(.large)
+        #if os(tvOS)
+        // Still focusable, so focus can start on it.
+        .opacity(nextUp == nil ? 0.5 : 1)
+        #else
+        .disabled(nextUp == nil)
+        #endif
+        // Its title on one line: the row's other buttons would otherwise take width it needs. At
+        // the accessibility text sizes, where one line can be wider than the screen, it wraps.
+        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
+        .accessibilityLabel(nextUp.map(spokenPlayLabel) ?? "Play")
+        .accessibilityInputLabels(nextUp.map { [$0.resumeSeconds != nil ? "Resume" : "Play", playLabel(for: $0)] } ?? ["Play"])
+        .accessibilityIdentifier("series.play")
+        #if os(tvOS)
+        .focused($playFocused)
+        #endif
     }
 
     @ViewBuilder private var secondaryButtons: some View {
         #if !os(tvOS)
         smartDownloadMenu
         #endif
-        WatchedButton(item: shown) { detail = $0 }
-            #if os(tvOS)
-            .focused($focusedAction, equals: .watched)
-            #endif
+        // Marking the show marks every episode, which the list then shows.
+        WatchedButton(item: shown) { detail = $0 } afterChange: { await reloadWatchState() }
         FavoriteButton(item: shown) { detail = $0 }
         if let nextUp {
             PlayElsewhereButton(subject: .title(nextUp, mediaSourceId: nil))
+                .help(PlayElsewhereSheet.title)
         }
     }
 
+    /// "Play S1, E3", or "Resume S1, E2 · 31 min left".
     private func playLabel(for episode: JellyfinItem) -> String {
-        let code = episode.episodeCode ?? episode.name
-        return episode.resumeSeconds != nil ? "Resume \(code)" : "Play \(code)"
+        let code = episode.shortEpisodeCode ?? episode.name
+        guard episode.resumeSeconds != nil else { return "Play \(code)" }
+        return ["Resume \(code)", episode.timeLeftText].compactMap(\.self).joined(separator: " · ")
     }
 
-    /// "Play Season 1, Episode 2", which VoiceOver would otherwise spell out from "S01E02".
+    /// "Resume Season 1, Episode 2, 31 minutes left", which VoiceOver would otherwise spell out.
     private func spokenPlayLabel(for episode: JellyfinItem) -> String {
         let code = episode.spokenEpisodeCode ?? episode.name
-        return episode.resumeSeconds != nil ? "Resume \(code)" : "Play \(code)"
+        guard episode.resumeSeconds != nil else { return "Play \(code)" }
+        return ["Resume \(code)", episode.spokenTimeLeft].compactMap(\.self).joined(separator: ", ")
     }
 
     #if !os(tvOS)
@@ -193,11 +236,12 @@ struct SeriesView: View {
     /// versions and its size; and the ways to keep the show downloaded.
     private var smartDownloadMenu: some View {
         let rule = smartDownloads.rule(for: series.id)
+        let title = rule == nil ? "Download" : "Smart Download On"
         return SmartDownloadMenu(seriesId: series.id, seriesName: series.name) {
             Section("Download Now") {
                 if let season = seasons.first(where: { $0.id == seasonId }) {
-                    let missing = notDownloaded(episodes ?? [])
-                    Button(missing.isEmpty && episodes != nil ? "\(season.name) Is Downloaded" : "Download \(season.name)",
+                    let missing = notDownloaded(currentEpisodes ?? [])
+                    Button(missing.isEmpty && currentEpisodes != nil ? "\(season.name) Is Downloaded" : "Download \(season.name)",
                            systemImage: "arrow.down.circle") {
                         batch = Batch(episodes: missing)
                     }
@@ -210,7 +254,6 @@ struct SeriesView: View {
                 .accessibilityIdentifier("series.downloadSeries")
             }
         } label: {
-            let title = rule == nil ? "Download" : "Smart Download On"
             let symbol = rule == nil ? "arrow.down.circle" : "sparkles.rectangle.stack.fill"
             // Just the symbol in a row too narrow for the title, as on iPhone Duo's outer display.
             ViewThatFits(in: .horizontal) {
@@ -220,6 +263,7 @@ struct SeriesView: View {
         }
         .buttonStyle(.platformGlass)
         .controlSize(.large)
+        .help(title)
         .accessibilityIdentifier("series.smartDownload")
     }
 
@@ -250,13 +294,13 @@ struct SeriesView: View {
                 .accessibilityIdentifier("series.done")
             } else {
                 Button("Select", systemImage: "checklist") { isSelecting = true }
-                    .disabled(episodes?.isEmpty ?? true)
+                    .disabled(currentEpisodes?.isEmpty ?? true)
                     .accessibilityIdentifier("series.select")
             }
         }
         if isSelecting {
             ToolbarItem(placement: .barTrailing) {
-                let allIds = Set(episodes?.map(\.id) ?? [])
+                let allIds = Set(currentEpisodes?.map(\.id) ?? [])
                 if !allIds.isEmpty, selection == allIds {
                     Button("Deselect All") { selection.removeAll() }
                 } else {
@@ -267,7 +311,7 @@ struct SeriesView: View {
             ToolbarItem(placement: .barTrailing) {
                 // Text rather than an icon: bars show only the icon, and the count would be lost.
                 Button("Download \(selection.count)") {
-                    batch = Batch(episodes: (episodes ?? []).filter { selection.contains($0.id) })
+                    batch = Batch(episodes: (currentEpisodes ?? []).filter { selection.contains($0.id) })
                 }
                 .disabled(selection.isEmpty)
                 .accessibilityIdentifier("series.download")
@@ -301,6 +345,8 @@ struct SeriesView: View {
             .scrollTargetLayout()
             #endif
             .padding(.horizontal, Metrics.edge)
+            .opacity(isSwitching ? 0.4 : 1)
+            .animation(.easeInOut(duration: 0.2), value: isSwitching)
             #if os(tvOS)
             .focusSection()
             #endif
@@ -328,6 +374,9 @@ struct SeriesView: View {
             }
         } onChange: { updated in
             if let index = episodes?.firstIndex(where: { $0.id == updated.id }) { episodes?[index] = updated }
+            for key in loaded.keys {
+                if let index = loaded[key]?.firstIndex(where: { $0.id == updated.id }) { loaded[key]?[index] = updated }
+            }
         }
     }
 
@@ -345,9 +394,15 @@ struct SeriesView: View {
             self.seasons = found
             let next = try await nextUp
             self.nextUp = next
+            nextUpLoaded = true
+            isGone = false
             if seasonId == nil {
                 seasonId = initialSeasonId ?? next?.seasonId ?? found.first { ($0.indexNumber ?? 0) > 0 }?.id ?? found.first?.id
             }
+        } catch JellyfinError.http(let status, _) where status == 404 {
+            isGone = true
+            detail = nil
+            return
         } catch {
             guard !error.isCancellation else { return }
             loadError = LoadFailure("Couldn't Load the Show", error: error)
@@ -361,33 +416,48 @@ struct SeriesView: View {
         }
     }
 
+    /// The season picked's episodes: at once if they loaded before, then as they are now. Until
+    /// they come, the last season's stay listed, dimmed, so the page keeps its place.
     private func loadEpisodes() async {
         guard let session, let seasonId else { return }
-        episodes = nil
         selection.removeAll()
-        #if os(tvOS)
-        episodeWindow = FocusWindow()
-        #endif
+        if episodesSeasonId != seasonId, let known = loaded[seasonId] { show(known, of: seasonId) }
         do {
-            episodes = try await seasonEpisodes(seasonId, session: session)
+            let found = try await seasonEpisodes(seasonId, session: session)
+            guard seasonId == self.seasonId else { return }
+            show(found, of: seasonId)
         } catch {
             if !error.isCancellation { loadError = LoadFailure("Couldn't Load the Episodes", error: error) }
         }
     }
 
-    /// What a playback that ended changed: the show's watched state, where it goes on, and the
-    /// season's episodes, kept on screen and selected as they are while they load.
+    /// Puts a season's episodes in the list, fading from the last season's.
+    private func show(_ found: [JellyfinItem], of seasonId: String) {
+        loaded[seasonId] = found
+        guard found != episodes || episodesSeasonId != seasonId else { return }
+        #if os(tvOS)
+        if episodesSeasonId != seasonId { episodeWindow = FocusWindow() }
+        #endif
+        withAnimation(.easeInOut(duration: 0.25)) {
+            episodes = found
+            episodesSeasonId = seasonId
+        }
+    }
+
+    /// What a playback that ended, or a change to the whole show, changed: the show's watched
+    /// state, where it goes on, the seasons' watched states, and the season's episodes, kept on
+    /// screen and selected as they are while they load.
     private func reloadWatchState() async {
         guard let session else { return }
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
             async let nextUp = session.client.upNext(seriesId: series.id, userId: session.userId)
-            if let seasonId {
-                let loaded = try await seasonEpisodes(seasonId, session: session)
-                if seasonId == self.seasonId { episodes = loaded }
-            }
+            async let seasons = session.client.seasons(seriesId: series.id, userId: session.userId)
+            try await reloadSeason(session: session)
             self.detail = try await detail
             self.nextUp = try await nextUp
+            nextUpLoaded = true
+            self.seasons = try await seasons
         } catch {
             guard !error.isCancellation else { return }
             loadError = LoadFailure("Couldn't Load the Show", error: error)
@@ -406,7 +476,28 @@ struct SeriesView: View {
     /// Everything that didn't load, again: the show, and the season's episodes if they didn't come.
     private func retry() async {
         await load()
-        if episodes == nil { await loadEpisodes() }
+        if currentEpisodes == nil { await loadEpisodes() }
+    }
+
+    /// The season shown's episodes as they are now. The other seasons' load again as they're
+    /// picked: what changed may have changed them too, as marking a show watched does.
+    private func reloadSeason(session: ServerSession) async throws {
+        guard let seasonId else { return }
+        let found = try await seasonEpisodes(seasonId, session: session)
+        loaded = loaded.filter { $0.key == seasonId }
+        if seasonId == self.seasonId { show(found, of: seasonId) }
+    }
+
+    /// Pulled down: all of the page again, the season's episodes as they are now too.
+    private func refresh() async {
+        await load()
+        guard let session, !isGone else { return }
+        do {
+            try await reloadSeason(session: session)
+        } catch {
+            guard !error.isCancellation else { return }
+            loadError = loadError ?? LoadFailure("Couldn't Load the Episodes", error: error)
+        }
     }
 
     private func seasonEpisodes(_ seasonId: String, session: ServerSession) async throws -> [JellyfinItem] {
@@ -440,13 +531,19 @@ private struct EpisodeRow: View {
         HStack(alignment: .center, spacing: 8) {
             row
             if !isSelecting {
-                Button("Details", systemImage: "info.circle", action: openPage)
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.borderless)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Details of \(episode.name)")
-                    .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0).details")
+                Button(action: openPage) {
+                    Label("Details", systemImage: "info.circle")
+                        .labelStyle(.iconOnly)
+                        .font(.title3)
+                        // A whole fingertip's target, beside a row that plays the episode.
+                        .frame(width: 44, height: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Details")
+                .accessibilityLabel("Details of \(episode.name)")
+                .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0).details")
             }
         }
         #endif

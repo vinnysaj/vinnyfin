@@ -60,4 +60,19 @@ nonisolated enum PlayerLayout {
     static func coveredBelow(_ tops: CGFloat?...) -> CGFloat? {
         tops.compactMap(\.self).min()
     }
+
+    /// Between what the title's picture says and what the corner shows beside it.
+    static let gapBesideCorner: CGFloat = 16
+
+    /// Where what the title's picture says as it starts sits, along the bottom on the leading
+    /// side: above the controls' bottom bar, which starts at `bottomBarTop` while they show, and
+    /// above what the corner on the trailing side shows (the up-next card, its pill, the chip),
+    /// whose frame is `corner`. Where the band between the controls' bars is short (`isShort`),
+    /// above the corner would be in the transport, so the two share the row above the bar, the
+    /// caption keeping clear of the corner by `trailingInset`. Global coordinates.
+    static func caption(bottomBarTop: CGFloat?, corner: CGRect?, isShort: Bool) -> (coveredBelow: CGFloat?, trailingInset: CGFloat) {
+        guard let corner else { return (bottomBarTop, 0) }
+        if isShort { return (bottomBarTop, corner.width + gapBesideCorner) }
+        return (coveredBelow(bottomBarTop, corner.minY), 0)
+    }
 }

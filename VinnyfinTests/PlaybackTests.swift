@@ -508,21 +508,223 @@ struct LoadSequenceTests {
     @Test func aCountdownStartedBeforeAnotherLoadDoesNothingWhenItRunsOut() async {
         let loads = LoadSequence()
         await loads.start { _ in }
-        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: "e5", nextEpisodeId: "e6")
-        #expect(countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: true))
+        let countdown = UpNextCountdown(generation: loads.generation, episodeId: "e5", nextEpisodeId: "e6", startedInCredits: false)
+        #expect(countdown.isDue(loads: loads, onScreen: "e5", next: "e6", isEnding: true))
         // Play Again, or a move back on the timeline, during the countdown loads the episode again.
         await loads.start { _ in }
-        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: true))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", isEnding: true))
     }
 
-    @Test func aCountdownIsDueOnlyForTheEpisodeThatEndedAndTheOneItCountedTo() async {
+    @Test func aCountdownIsDueOnlyForTheEpisodeItStartedInAndTheOneItCountedTo() async {
         let loads = LoadSequence()
         await loads.start { _ in }
-        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: "e5", nextEpisodeId: "e6")
-        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", hasEnded: false))
-        #expect(!countdown.isDue(loads: loads, onScreen: "e4", next: "e6", hasEnded: true))
-        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e7", hasEnded: true))
-        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: nil, hasEnded: true))
+        let countdown = UpNextCountdown(generation: loads.generation, episodeId: "e5", nextEpisodeId: "e6", startedInCredits: true)
+        // Moved back out of the credits.
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e6", isEnding: false))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e4", next: "e6", isEnding: true))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: "e7", isEnding: true))
+        #expect(!countdown.isDue(loads: loads, onScreen: "e5", next: nil, isEnding: true))
+    }
+
+    @Test func theCreditsCountDownLongerThanTheEnd() {
+        var fromCredits = UpNextCountdown(generation: 1, episodeId: "e5", nextEpisodeId: "e6", startedInCredits: true)
+        #expect(fromCredits.length == 10)
+        #expect(fromCredits.remaining == 10)
+        #expect(fromCredits.progress == 0)
+        fromCredits.remaining = 4
+        #expect(abs(fromCredits.progress - 0.6) < 0.0001)
+        let fromEnd = UpNextCountdown(generation: 1, episodeId: "e5", nextEpisodeId: "e6", startedInCredits: false)
+        #expect(fromEnd.length == 5)
+    }
+}
+
+/// The end of an episode: when the up-next card offers the next one, and what it's about.
+struct TitleEndingTests {
+    private static func outro(from start: Double, to end: Double) -> MediaSegment {
+        MediaSegment(type: "Outro", startTicks: Int64(start * 10_000_000), endTicks: Int64(end * 10_000_000))
+    }
+
+    private let credits = TitleEnding(duration: 1500, segments: [Self.outro(from: 1380, to: 1500)])
+    private let unmarked = TitleEnding(duration: 1500, segments: [])
+
+    @Test func theCardComesWithTheCreditsTheServerMarks() {
+        #expect(credits.creditsStart == 1380)
+        #expect(credits.upNextPhase(at: 1379, hasEnded: false) == nil)
+        #expect(credits.upNextPhase(at: 1380, hasEnded: false) == .credits)
+        #expect(credits.upNextPhase(at: 1499, hasEnded: false) == .credits)
+        #expect(credits.upNextPhase(at: 1500, hasEnded: true) == .ended)
+    }
+
+    @Test func withoutCreditsMarkedTheCardOffersTheNextEpisodeForTheLastHalfMinute() {
+        #expect(unmarked.creditsStart == nil)
+        #expect(unmarked.upNextPhase(at: 1469, hasEnded: false) == nil)
+        #expect(unmarked.upNextPhase(at: 1470, hasEnded: false) == .nearEnd)
+        #expect(unmarked.upNextPhase(at: 1500, hasEnded: true) == .ended)
+    }
+
+    @Test func aShortTitleGetsNoCard() {
+        let extra = TitleEnding(duration: 90, segments: [Self.outro(from: 60, to: 90)])
+        #expect(extra.upNextPhase(at: 80, hasEnded: false) == nil)
+        #expect(extra.upNextPhase(at: 90, hasEnded: true) == nil)
+    }
+
+    @Test func leavingInTheCreditsFinishesTheTitle() {
+        // Closed, or moved on to any other episode, once the credits start.
+        #expect(credits.finishes(leavingAt: 1380, toNextEpisode: false))
+        #expect(credits.finishes(leavingAt: 1450, toNextEpisode: false))
+        #expect(!credits.finishes(leavingAt: 1379, toNextEpisode: false))
+        // A movie's credits count too.
+        let movie = TitleEnding(duration: 6000, segments: [Self.outro(from: 5700, to: 6000)])
+        #expect(movie.finishes(leavingAt: 5800, toNextEpisode: false))
+        #expect(!movie.finishes(leavingAt: 5000, toNextEpisode: false))
+    }
+
+    @Test func movingOnWhileTheCardOffersTheNextEpisodeFinishesTheTitle() {
+        // Play Now or Next in the last half minute, with no credits marked.
+        #expect(unmarked.finishes(leavingAt: 1480, toNextEpisode: true))
+        // Closing there leaves it where it got to, and so does moving on before the card.
+        #expect(!unmarked.finishes(leavingAt: 1480, toNextEpisode: false))
+        #expect(!unmarked.finishes(leavingAt: 1200, toNextEpisode: true))
+    }
+}
+
+/// After episodes that started by themselves with nobody doing anything, the player asks before
+/// starting another.
+struct UnattendedAutoplayTests {
+    @Test func asksAfterThreeEpisodesStartedByThemselves() {
+        var unattended = UnattendedAutoplay()
+        for _ in 0..<2 { unattended.episodeStartedByItself() }
+        #expect(!unattended.asksFirst)
+        unattended.episodeStartedByItself()
+        #expect(unattended.asksFirst)
+    }
+
+    @Test func anythingTheViewerDoesStartsTheCountOver() {
+        var unattended = UnattendedAutoplay()
+        for _ in 0..<2 { unattended.episodeStartedByItself() }
+        unattended.viewerActed()
+        for _ in 0..<2 { unattended.episodeStartedByItself() }
+        #expect(!unattended.asksFirst)
+        #expect(unattended.count == 2)
+    }
+}
+
+/// Closing the player after it moved on to later episodes lands on the page of the one watched
+/// last.
+struct ClosingBackToWhatPlayedTests {
+    private static func episode(_ id: String, show: String = "s") -> JellyfinItem {
+        var episode = JellyfinItem(id: id, name: id, type: "Episode")
+        episode.seriesId = show
+        return episode
+    }
+
+    @Test func theStartingEpisodesPageShowsTheEpisodeWatchedLast() {
+        let ended = EndedPlayback(count: 1, userData: ["e3": UserItemData(playbackPositionTicks: 600_000_000)],
+                                  startedItemId: "e1", lastItem: Self.episode("e3"))
+        let shown = ended.episodeToShow(onPageOf: Self.episode("e1"))
+        #expect(shown?.id == "e3")
+        // With the watch state the playback left it in.
+        #expect(shown?.resumeSeconds == 60)
+    }
+
+    @Test func otherPagesStayAsTheyAre() {
+        let ended = EndedPlayback(count: 1, startedItemId: "e1", lastItem: Self.episode("e3"))
+        // Another episode's page, or the episode that played last.
+        #expect(ended.episodeToShow(onPageOf: Self.episode("e2")) == nil)
+        #expect(ended.episodeToShow(onPageOf: Self.episode("e3")) == nil)
+        // Nothing moved on.
+        let same = EndedPlayback(count: 1, startedItemId: "e1", lastItem: Self.episode("e1"))
+        #expect(same.episodeToShow(onPageOf: Self.episode("e1")) == nil)
+        // Another show, as SharePlay can move to.
+        let elsewhere = EndedPlayback(count: 1, startedItemId: "e1", lastItem: Self.episode("x1", show: "other"))
+        #expect(elsewhere.episodeToShow(onPageOf: Self.episode("e1")) == nil)
+    }
+}
+
+/// Where the end screen of a movie or a show's last episode leads back to.
+struct EndScreenReturnTests {
+    @Test func aMovieGoesBackToItsDetails() {
+        let movie = JellyfinItem(id: "m", name: "Copperline", type: "Movie")
+        let way = EndScreenReturn(for: movie)
+        #expect(way.page.id == "m")
+        #expect(way.label == "Back to Details")
+    }
+
+    @Test func aShowsLastEpisodeGoesBackToTheShow() {
+        var finale = JellyfinItem(id: "e12", name: "Open Water", type: "Episode")
+        finale.seriesId = "s"
+        finale.seriesName = "Port Ellery"
+        let way = EndScreenReturn(for: finale)
+        #expect(way.page.id == "s")
+        #expect(way.page.isSeries)
+        #expect(way.label == "Back to Port Ellery")
+    }
+}
+
+/// Resuming a saved position backs up a moment; where another device, a link or the group asked
+/// to start stays exact.
+struct ResumeLeadInTests {
+    private let episode = PlaybackRequest(source: .item(id: "e5", mediaSourceId: nil), title: "Fog Signals")
+
+    @Test func aSavedPositionResumesAMomentBefore() {
+        #expect(episode.start(resuming: 2530) == 2530 - PlaybackRequest.resumeLeadIn)
+        #expect(episode.resumesSavedPosition(2530))
+        // Never before the start, which is then no resume.
+        #expect(episode.start(resuming: 3) == 0)
+        #expect(!episode.resumesSavedPosition(3))
+        #expect(!episode.resumesSavedPosition(nil))
+    }
+
+    @Test func anAskedStartingPointIsExact() {
+        var asked = episode
+        asked.startingPoint = .init(position: 600)
+        #expect(asked.start(resuming: 2530) == 600)
+        #expect(!asked.resumesSavedPosition(2530))
+        // Try Again and a move back after the end start exactly where they ask.
+        #expect(episode.retrying(from: 2400).start(resuming: 600) == 2400)
+        #expect(!episode.retrying(from: 2400).resumesSavedPosition(600))
+        #expect(!episode.replaying(from: 1800, title: "").resumesSavedPosition(600))
+    }
+}
+
+/// What the player starts with: the item as the screen had it, and as the title's page loaded it.
+struct ShownItemTests {
+    @Test func theRequestCarriesTheItemForItsPicture() {
+        var episode = JellyfinItem(id: "e5", name: "Fog Signals", type: "Episode")
+        episode.seriesName = "Port Ellery"
+        let request = PlaybackRequest.item(episode)
+        #expect(request.shownItem == episode)
+        #expect(request.loadedItem == nil)
+    }
+
+    @Test func onlyAnItemWithItsDetailsSavesTheFetch() {
+        var listed = JellyfinItem(id: "e5", name: "Fog Signals", type: "Episode")
+        listed.mediaSources = [MediaSource(id: "v1", name: "v1")]
+        // A list's episode, versions and all, but without its chapters and previews.
+        #expect(PlaybackRequest.item(listed, loaded: listed).loadedItem == nil)
+        var detailed = listed
+        detailed.chapters = []
+        #expect(PlaybackRequest.item(detailed, loaded: detailed).loadedItem == detailed)
+        // Another title's item is no use.
+        #expect(PlaybackRequest.item(JellyfinItem(id: "e6", name: "", type: "Episode"), loaded: detailed).loadedItem == nil)
+    }
+}
+
+/// Skip Intros: when an intro skips by itself.
+struct IntroSkippingTests {
+    @Test func skipsByTheSetting() {
+        #expect(!AppSettings.IntroSkipping.ask.skips(inARow: true))
+        #expect(AppSettings.IntroSkipping.inARow.skips(inARow: true))
+        #expect(!AppSettings.IntroSkipping.inARow.skips(inARow: false))
+        #expect(AppSettings.IntroSkipping.always.skips(inARow: false))
+    }
+
+    @Test func asksUnlessChosenAndIsKept() throws {
+        let defaults = try #require(UserDefaults(suiteName: "IntroSkippingTests-\(UUID().uuidString)"))
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.introSkipping == .ask)
+        settings.introSkipping = .inARow
+        #expect(AppSettings(defaults: defaults).introSkipping == .inARow)
     }
 }
 
@@ -665,6 +867,122 @@ struct CarriedTracksTests {
     }
 }
 
+/// The audio and subtitles the viewer picked in a show, which its other episodes start with: this
+/// session's picks, then those remembered from last time, then the language settings. What another
+/// device asked for, and the tracks a stream of the same title had, come first.
+@MainActor
+struct TrackPicksTests {
+    private let settings = AppSettings(defaults: UserDefaults(suiteName: "TrackPicksTests-\(UUID().uuidString)")!)
+
+    private func stream(_ type: String, _ index: Int, _ language: String, title: String? = nil, forced: Bool = false) -> MediaStream {
+        var stream = MediaStream(type: type)
+        stream.index = index
+        stream.language = language
+        stream.title = title
+        stream.isForced = forced
+        return stream
+    }
+
+    /// The next episode: English audio first, then Japanese; signs, then full English subtitles.
+    private var nextEpisode: MediaSource {
+        var source = MediaSource(id: "e6", name: "e6")
+        source.mediaStreams = [stream("Audio", 1, "eng"), stream("Audio", 2, "jpn"),
+                               stream("Subtitle", 3, "eng", title: "Signs", forced: true), stream("Subtitle", 4, "eng")]
+        return source
+    }
+
+    private func track(_ language: String, forced: Bool = false) -> TrackPicks.Track {
+        TrackPicks.Track(TrackChooser.Candidate(id: 9, language: language, isForced: forced, isHearingImpaired: false, isDefault: false))
+    }
+
+    private var japaneseWithSubtitles: TrackPicks {
+        TrackPicks(audio: track("jpn"), subtitles: .track(track("eng")))
+    }
+
+    @Test func theNextEpisodeKeepsTheAudioAndSubtitlesPicked() {
+        let indexes = PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: nil, picks: japaneseWithSubtitles,
+                                                     settings: settings)
+        #expect(indexes.audio == 2)
+        #expect(indexes.subtitle == 4)
+    }
+
+    @Test func withoutPicksTheSettingsDecide() {
+        // English audio, and Forced Only's signs.
+        let indexes = PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: nil, picks: nil, settings: settings)
+        #expect(indexes.audio == 1)
+        #expect(indexes.subtitle == 3)
+    }
+
+    @Test func whatWasntPickedStaysWithTheSettings() {
+        // Only the audio was picked: the subtitles are Forced Only's.
+        let audioOnly = TrackPicks(audio: track("jpn"))
+        let indexes = PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: nil, picks: audioOnly, settings: settings)
+        #expect(indexes.audio == 2)
+        #expect(indexes.subtitle == 3)
+        // Subtitles turned off stay off, forced ones too.
+        let off = TrackPicks(subtitles: .off)
+        #expect(PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: nil, picks: off, settings: settings).subtitle == nil)
+    }
+
+    @Test func aPickTheEpisodeHasntGotFallsBackToTheSettings() {
+        let german = TrackPicks(audio: track("ger"), subtitles: .track(track("ger")))
+        let indexes = PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: nil, picks: german, settings: settings)
+        #expect(indexes.audio == 1)
+        #expect(indexes.subtitle == 3)
+    }
+
+    @Test func anotherDevicesAskComesFirstThenTheTitlesOwnTracks() {
+        let asked = PlaybackRequest.StartingPoint(position: 0, audioStreamIndex: 1, subtitleStreamIndex: -1)
+        let fromAsked = PlaybackResolver.streamIndexes(in: nextEpisode, asked: asked, carrying: nil, picks: japaneseWithSubtitles,
+                                                       settings: settings)
+        #expect(fromAsked.audio == 1)
+        #expect(fromAsked.subtitle == nil)
+        // A stream of the same title standing in for another keeps that one's tracks.
+        let playing = TrackSelection(audio: track("eng").candidate, subtitle: nil)
+        let carried = PlaybackResolver.streamIndexes(in: nextEpisode, asked: nil, carrying: playing, picks: japaneseWithSubtitles,
+                                                     settings: settings)
+        #expect(carried.audio == 1)
+        #expect(carried.subtitle == nil)
+    }
+
+    @Test func thisSessionsPicksComeBeforeThoseRemembered() {
+        let remembered = TrackPicks(audio: track("eng"), subtitles: .off)
+        let session = TrackPicks(audio: track("jpn"))
+        let starting = TrackPicks.starting(session: session, remembered: remembered)
+        #expect(starting?.audio == track("jpn"))
+        // Subtitles weren't picked this session: last time's stand.
+        #expect(starting?.subtitles == .off)
+        #expect(TrackPicks.starting(session: nil, remembered: remembered) == remembered)
+        #expect(TrackPicks.starting(session: nil, remembered: nil) == nil)
+    }
+
+    @Test func eachShowRemembersItsLastPicks() {
+        var memory = TrackMemory()
+        memory.remember(TrackPicks(audio: track("jpn")), forShow: "anime")
+        memory.remember(TrackPicks(subtitles: .track(track("eng"))), forShow: "anime")
+        // Subtitles picked later keep the audio picked before.
+        #expect(memory.picks(forShow: "anime") == japaneseWithSubtitles)
+        #expect(memory.picks(forShow: "drama") == nil)
+        memory.remember(TrackPicks(audio: track("eng")), forShow: "anime")
+        #expect(memory.picks(forShow: "anime")?.audio == track("eng"))
+    }
+
+    @Test func memoryKeepsTheShowsPickedInMostRecently() {
+        var memory = TrackMemory()
+        for show in 0...TrackMemory.capacity { memory.remember(TrackPicks(audio: track("jpn")), forShow: "show \(show)") }
+        #expect(memory.picks(forShow: "show 0") == nil)
+        #expect(memory.picks(forShow: "show 1") != nil)
+        #expect(memory.picks(forShow: "show \(TrackMemory.capacity)") != nil)
+    }
+
+    @Test func memoryLastsFromOneLaunchToTheNext() throws {
+        let defaults = try #require(UserDefaults(suiteName: "TrackPicksTests-\(UUID().uuidString)"))
+        let before = AppSettings(defaults: defaults)
+        before.trackMemory.remember(japaneseWithSubtitles, forShow: "anime")
+        #expect(AppSettings(defaults: defaults).trackMemory.picks(forShow: "anime") == japaneseWithSubtitles)
+    }
+}
+
 struct PlayerDetailTests {
     @Test @MainActor func numbersEpisodesForNowPlaying() {
         var episode = JellyfinItem(id: "e", name: "Breakwater", type: "Episode")
@@ -755,17 +1073,41 @@ struct PlaybackEdgeTests {
 
     /// Two episodes downloaded, both `file`, the first playing.
     private func makeModel(playingEpisodesOf file: URL, engine: AetherEngine) throws -> PlayerModel {
-        let first = Self.episode("e1", 1)
-        let second = Self.episode("e2", 2)
+        try makeBinge(episodes: 2, of: file, engine: engine).model
+    }
+
+    /// A show's episodes, downloaded, each of them `file` with `segments` marked, the first playing.
+    private struct Binge {
+        let model: PlayerModel
+        let settings: AppSettings
+        let history: WatchHistory
+    }
+
+    private func makeBinge(episodes count: Int, of file: URL, segments: [MediaSegment] = [], engine: AetherEngine,
+                           firstResumesAt resume: Double? = nil, length: Double? = nil,
+                           settings configure: (AppSettings) -> Void = { _ in }) throws -> Binge {
+        var episodes = (1...count).map { Self.episode("e\($0)", $0) }
+        if let resume, let length {
+            episodes[0].runTimeTicks = Int64(length * 10_000_000)
+            episodes[0].userData = UserItemData(playbackPositionTicks: Int64(resume * 10_000_000))
+        }
         let defaults = try #require(UserDefaults(suiteName: "PlaybackEdgeTests-\(UUID().uuidString)"))
         let accounts = AccountStore(defaults: defaults)
         let settings = AppSettings(defaults: defaults)
+        configure(settings)
         let history = WatchHistory(file: FileManager.default.temporaryDirectory.appending(path: "Edges-\(UUID().uuidString).json"))
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { id, _ in
-            [first, second].first { $0.id == id }.map { PlaybackResolver.DownloadedCopy(url: file, item: $0, segments: []) }
+            episodes.first { $0.id == id }.map { PlaybackResolver.DownloadedCopy(url: file, item: $0, segments: segments) }
         }
-        return PlayerModel(request: .item(first), engine: engine, lease: EngineLease(),
-                           resolver: resolver, accounts: accounts, history: history, settings: settings) { $0.id == first.id ? second : nil }
+        let model = PlayerModel(request: .item(episodes[0]), engine: engine, lease: EngineLease(),
+                                resolver: resolver, accounts: accounts, history: history, settings: settings) { episode in
+            episodes.firstIndex { $0.id == episode.id }.flatMap { $0 + 1 < episodes.count ? episodes[$0 + 1] : nil }
+        }
+        return Binge(model: model, settings: settings, history: history)
+    }
+
+    private static func segment(_ type: String, from start: Double, to end: Double) -> MediaSegment {
+        MediaSegment(type: type, startTicks: Int64(start * 10_000_000), endTicks: Int64(end * 10_000_000))
     }
 
     private func waitUntil(seconds: Double = 30, _ condition: () -> Bool) async throws {
@@ -852,20 +1194,273 @@ struct PlaybackEdgeTests {
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
-    @Test func playAgainDuringTheCountdownStaysOnTheEpisode() async throws {
+    @Test func watchAgainDuringTheCountdownStaysOnTheEpisode() async throws {
         let file = try await GeneratedVideo.write(seconds: 4)
         let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
         try await playToTheEnd(model)
         try await waitUntil { model.upNextCountdown != nil }
         try #require(model.upNextCountdown != nil, "No countdown")
 
-        model.togglePlayPause()
+        model.watchAgain()
         try await waitUntil { model.status == .playing }
         #expect(model.upNextCountdown == nil)
         // Past the end of the countdown it was in.
         try await Task.sleep(for: .seconds(6))
         #expect(model.item?.id == "e1")
         #expect(model.requestedItemId == "e1")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func playPauseAtTheEndPlaysTheNextEpisode() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let binge = try makeBinge(episodes: 2, of: file, engine: try AetherEngine()) { $0.autoplayNextEpisode = false }
+        let model = binge.model
+        try await playToTheEnd(model)
+        try await waitUntil { model.nextEpisode != nil }
+        #expect(model.upNextCountdown == nil)
+        #expect(model.upNextPhase(at: model.clock.time) == nil, "A title this short gets no card")
+
+        // The one way on from the end, as a click on the timeline or Play/Pause on the remote.
+        model.togglePlayPause()
+        try await waitUntil { model.item?.id == "e2" && model.status == .playing }
+        #expect(model.item?.id == "e2")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func backDuringTheEndCountdownStopsItAndLeavesTheEpisodeEnded() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        try await playToTheEnd(model)
+        try await waitUntil { model.upNextCountdown != nil }
+        try #require(model.upNextCountdown != nil, "No countdown")
+
+        model.cancelUpNext()
+        #expect(model.upNextCountdown == nil)
+        try await Task.sleep(for: .seconds(6))
+        #expect(model.status == .ended)
+        #expect(model.item?.id == "e1")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func theCountdownStartsWithTheCreditsAndRunsOnPastTheEnd() async throws {
+        // Credits from 125 s of 130.
+        let file = try await GeneratedVideo.write(seconds: 130)
+        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 125, to: 130)],
+                                  engine: try AetherEngine()).model
+        await model.start()
+        try await waitUntil { model.status == .playing }
+        try await waitUntil { !model.segments.isEmpty }
+        model.seek(to: 123)
+        try await waitUntil { model.upNextCountdown != nil }
+        let countdown = try #require(model.upNextCountdown, "No countdown in the credits")
+        #expect(countdown.startedInCredits)
+        #expect(countdown.length == UpNextCountdown.fromCredits)
+        #expect(model.status != .ended)
+        #expect(model.upNextPhase(at: model.clock.time) == .credits)
+
+        // The file ends five seconds in, and the countdown goes on rather than starting over.
+        try await waitUntil { model.status == .ended }
+        let atEnd = try #require(model.upNextCountdown, "The countdown stopped at the end")
+        #expect(atEnd.startedInCredits)
+        #expect(atEnd.remaining < UpNextCountdown.fromCredits)
+
+        try await waitUntil(seconds: 20) { model.item?.id == "e2" && model.status == .playing }
+        #expect(model.item?.id == "e2")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func watchCreditsStopsTheCountdownAndTheEndOffersTheNextEpisode() async throws {
+        let file = try await GeneratedVideo.write(seconds: 130)
+        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 125, to: 130)],
+                                  engine: try AetherEngine()).model
+        await model.start()
+        try await waitUntil { model.status == .playing }
+        try await waitUntil { !model.segments.isEmpty }
+        model.seek(to: 124)
+        try await waitUntil { model.upNextCountdown != nil }
+        try #require(model.upNextCountdown != nil, "No countdown in the credits")
+
+        model.cancelUpNext()
+        #expect(model.upNextCountdown == nil)
+        #expect(model.upNextPhase(at: model.clock.time) == nil)
+        try await waitUntil { model.status == .ended }
+        try await Task.sleep(for: .seconds(2))
+        // Back as the way on, without counting down.
+        #expect(model.upNextPhase(at: model.clock.time) == .ended)
+        #expect(model.upNextCountdown == nil)
+        #expect(model.item?.id == "e1")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func movingBackOutOfTheCreditsStopsTheirCountdown() async throws {
+        let file = try await GeneratedVideo.write(seconds: 130)
+        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 120, to: 130)],
+                                  engine: try AetherEngine()).model
+        await model.start()
+        try await waitUntil { model.status == .playing }
+        try await waitUntil { !model.segments.isEmpty }
+        model.seek(to: 121)
+        try await waitUntil { model.upNextCountdown != nil }
+        try #require(model.upNextCountdown != nil, "No countdown in the credits")
+
+        model.seek(to: 60)
+        try await waitUntil { model.upNextCountdown == nil }
+        #expect(model.upNextCountdown == nil)
+        #expect(model.upNextPhase(at: model.clock.time) == nil)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func leavingInTheCreditsReportsTheEpisodeWatched() async throws {
+        let file = try await GeneratedVideo.write(seconds: 8)
+        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 3, to: 8)], engine: try AetherEngine())
+        let model = binge.model
+        await model.start()
+        try await waitUntil { model.status == .playing && model.clock.time > 3.5 }
+        try #require(model.clock.time < 7, "Played past the credits before the test caught it")
+
+        await model.close()
+        await model.stopReport?.value
+        #expect(binge.history.entry(for: "e1")?.played == true)
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func leavingBeforeTheCreditsKeepsWhereItGotTo() async throws {
+        let file = try await GeneratedVideo.write(seconds: 20)
+        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 15, to: 20)], engine: try AetherEngine())
+        let model = binge.model
+        await model.start()
+        try await waitUntil { model.status == .playing && model.clock.time > 1.5 }
+
+        await model.close()
+        await model.stopReport?.value
+        let entry = try #require(binge.history.entry(for: "e1"))
+        #expect(!entry.played)
+        #expect(entry.position < 15)
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func movingOnInTheCreditsReportsTheEpisodeWatched() async throws {
+        let file = try await GeneratedVideo.write(seconds: 8)
+        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 3, to: 8)], engine: try AetherEngine())
+        let model = binge.model
+        await model.start()
+        try await waitUntil { model.status == .playing && model.clock.time > 3.5 && model.nextEpisode != nil }
+        try #require(model.clock.time < 7, "Played past the credits before the test caught it")
+
+        await model.playNextEpisode()
+        try await waitUntil { model.item?.id == "e2" }
+        await model.stopReport?.value
+        #expect(binge.history.entry(for: "e1")?.played == true)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func afterThreeEpisodesThatStartedByThemselvesItAsksFirst() async throws {
+        let file = try await GeneratedVideo.write(seconds: 2)
+        let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
+        await model.start()
+        // Three countdowns run out with nobody doing anything.
+        try await waitUntil(seconds: 60) { model.item?.id == "e4" && model.status == .ended }
+        try #require(model.item?.id == "e4", "Got to \(model.item?.id ?? "nothing")")
+        try await waitUntil { model.asksStillWatching }
+        #expect(model.asksStillWatching)
+        #expect(model.upNextCountdown == nil)
+        try await Task.sleep(for: .seconds(UpNextCountdown.fromEnd + 1))
+        #expect(model.item?.id == "e4")
+
+        // Someone's there: the next one plays.
+        await model.continueWatching()
+        try await waitUntil { model.item?.id == "e5" && model.status == .playing }
+        #expect(!model.asksStillWatching)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func theViewerUsingThePlayerStartsTheCountOver() async throws {
+        let file = try await GeneratedVideo.write(seconds: 2)
+        let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
+        await model.start()
+        try await waitUntil(seconds: 30) { model.item?.id == "e3" && model.status == .playing }
+        model.noteViewerActivity()
+        try await waitUntil(seconds: 60) { model.item?.id == "e5" && model.status == .ended }
+        #expect(model.item?.id == "e5")
+        #expect(!model.asksStillWatching)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func skipIntrosAlwaysSkipsTheIntroAndOffersItBack() async throws {
+        let file = try await GeneratedVideo.write(seconds: 12)
+        let model = try makeBinge(episodes: 1, of: file, segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
+            $0.introSkipping = .always
+        }.model
+        await model.start()
+        try await waitUntil { model.clock.time >= 6 }
+        #expect(model.clock.time >= 6)
+        guard case .skippedIntro(let intro) = model.chip else {
+            Issue.record("No chip: \(String(describing: model.chip))")
+            return
+        }
+        #expect(intro.start == 1)
+
+        // Watch It goes back, and the intro then plays.
+        model.watchIntro()
+        #expect(model.chip == nil)
+        try await waitUntil { model.clock.time < 3 && model.status == .playing }
+        try await waitUntil { model.clock.time > 3 }
+        #expect(model.clock.time < 6, "Skipped again: \(model.clock.time)")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func skipIntrosInARowLeavesTheFirstEpisodesIntro() async throws {
+        let file = try await GeneratedVideo.write(seconds: 8)
+        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
+            $0.introSkipping = .inARow
+        }.model
+        await model.start()
+        try await waitUntil { model.clock.time > 2.5 }
+        #expect(model.clock.time < 6)
+        #expect(model.chip == nil)
+
+        // Moved on to the next one, its intro skips.
+        await model.playNextEpisode()
+        try await waitUntil { model.item?.id == "e2" && model.clock.time >= 6 }
+        #expect(model.clock.time >= 6)
+        #expect(model.chip != nil)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func aResumeBacksUpAndOffersToStartOver() async throws {
+        let file = try await GeneratedVideo.write(seconds: 20)
+        let model = try makeBinge(episodes: 1, of: file, engine: try AetherEngine(), firstResumesAt: 12, length: 20).model
+        await model.start()
+        try await waitUntil { model.status == .playing }
+        #expect(model.chip == .resumed(at: 12 - PlaybackRequest.resumeLeadIn))
+        #expect(model.clock.time >= 12 - PlaybackRequest.resumeLeadIn - 1 && model.clock.time < 12)
+
+        model.startOver()
+        #expect(model.chip == nil)
+        try await waitUntil { model.clock.time < 3 }
+        #expect(model.clock.time < 3)
 
         await model.close()
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())

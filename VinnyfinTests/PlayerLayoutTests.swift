@@ -110,6 +110,27 @@ struct PlayerLayoutTests {
         #expect(PlayerLayout.coveredBelow(nil, 640) == 640)
         #expect(PlayerLayout.coveredBelow(nil, nil) == nil)
     }
+
+    @Test func theStartingTitleSitsAboveTheUpNextCardOrTheChip() {
+        // Upright, the card above the bar: the title goes above the card.
+        let card = CGRect(x: 20, y: 600, width: 362, height: 110)
+        let upright = PlayerLayout.caption(bottomBarTop: 724, corner: card, isShort: false)
+        #expect(upright.coveredBelow == 600)
+        #expect(upright.trailingInset == 0)
+        // Nothing in the corner.
+        let alone = PlayerLayout.caption(bottomBarTop: 724, corner: nil, isShort: true)
+        #expect(alone.coveredBelow == 724)
+        #expect(alone.trailingInset == 0)
+    }
+
+    @Test func onAnIPhoneOnItsSideTheStartingTitleSharesTheRowWithThePill() {
+        // iPhone SE on its side: above the pill would be in the transport, so the title keeps to
+        // the pill's leading side, in the row above the bar.
+        let pill = CGRect(x: 380, y: 222, width: 267, height: 44)
+        let sideways = PlayerLayout.caption(bottomBarTop: 282, corner: pill, isShort: true)
+        #expect(sideways.coveredBelow == 282)
+        #expect(sideways.trailingInset == 267 + PlayerLayout.gapBesideCorner)
+    }
 }
 
 #if os(iOS)

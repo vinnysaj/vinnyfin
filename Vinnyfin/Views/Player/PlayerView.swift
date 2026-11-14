@@ -25,6 +25,7 @@ struct PlayerView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(PlayerCoordinator.self) private var coordinator
+    @Environment(IncomingLinks.self) private var links
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -42,15 +43,13 @@ struct PlayerView: View {
     @State private var bottomBarTop: CGFloat?
     /// Where the controls' top bar ends, in global coordinates.
     @State private var topBarBottom: CGFloat?
-    /// Where the up-next card starts while it shows, in global coordinates.
-    @State private var upNextCardTop: CGFloat?
+    /// Where the up-next card, its pill or the chip is while it shows, in global coordinates,
+    /// for the subtitles and the starting title to keep clear of.
+    @State private var cornerAction: CGRect?
     /// A title is starting: from asking for it until its first frame.
     @State private var isStartingTitle = true
-    /// Why the playback failed, last time it did.
-    @State private var failure = ""
-    /// Try Again was pressed a moment ago. The failure stays up meanwhile, saying so, rather than
-    /// flashing away and back when the new try fails at once.
-    @State private var isRetrying = false
+    /// The end screen was tapped beside, for the controls, until the title plays again.
+    @State private var endScreenSetAside = false
     #if os(iOS) || os(macOS)
     @State private var externalPlayback = ExternalPlayback()
     /// The AirPlay receiver that got only the sound, while that's being said.
@@ -108,8 +107,8 @@ struct PlayerView: View {
                     .accessibilityIgnoresInvertColors()
                 if let cover = pictureCover {
                     inPictureArea {
-                        PlayerBackdrop(item: model.item,
-                                       coveredBelow: PlayerLayout.coveredBelow(clearsControls ? bottomBarTop : nil, upNextCardTop)) {
+                        PlayerBackdrop(item: model.shownItem,
+                                       coveredBelow: captionPlace.coveredBelow) {
                             coverCaption(cover)
                         }
                     }
@@ -117,7 +116,7 @@ struct PlayerView: View {
                 }
             }
             #if os(tvOS)
-            if !controlsVisible {
+            if !controlsVisible, !showsEndScreen {
                 // Holds focus while the controls are hidden, so a click or a swipe up or down brings
                 // them back; sideways the remote scrubs (`RemoteInput`). It sits beside the controls
                 // rather than around them: a focused parent would keep focus from moving between
@@ -159,7 +158,8 @@ struct PlayerView: View {
             // The controls are in an ornament below the window (see `controlsOrnament`).
             #else
             #if os(tvOS)
-            if controlsVisible {
+            // The end screen stands in for them.
+            if controlsVisible, !showsEndScreen {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: nil,
@@ -175,7 +175,7 @@ struct PlayerView: View {
                                playElsewhere: playElsewhereAction, isBelowFold: true)
                     .padding(.top, fold.maxY)
                     .ignoresSafeArea(edges: .top)
-            } else if controlsVisible {
+            } else if controlsVisible, !showsEndScreen {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
@@ -205,12 +205,16 @@ struct PlayerView: View {
             // captions move up out of the way of the controls and the up-next card.
             if showsPicture {
                 SubtitleOverlay(model: model, videoSize: fillsScreen ? nil : model.videoSize,
-                                coveredBelow: PlayerLayout.coveredBelow(clearsControls ? bottomBarTop : nil, upNextCardTop))
+                                coveredBelow: PlayerLayout.coveredBelow(clearsControls ? bottomBarTop : nil, cornerAction?.minY))
                     .frame(height: fold?.minY)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea()
             }
             inPictureArea { extras }
+            if showsEndScreen, let item = model.item {
+                inPictureArea { endScreen(item) }
+                    .transition(.opacity)
+            }
             // Over the controls, which stay up around it with nothing in it to act on.
             inPictureArea { statusOverlay }
             if let notice = model.notice {
@@ -267,7 +271,7 @@ struct PlayerView: View {
         #if os(visionOS)
         // The window has no glass of its own; the picture takes its rounded shape.
         .clipShape(.rect(cornerRadius: 46))
-        .ornament(visibility: controlsVisible ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
+        .ornament(visibility: controlsVisible && !showsEndScreen ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
             controlsOrnament
         }
         .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
@@ -317,23 +321,35 @@ struct PlayerView: View {
                 scheduleHide()
             } else if panel != nil {
                 closePanel()
+            } else if model.upNextCountdown != nil || model.upNextPhase(at: model.clock.time).map({ $0 != .ended }) == true {
+                // The countdown stops, or the card goes, as its other button would, before the
+                // controls or the player: the next Back does those.
+                model.cancelUpNext()
+            } else if model.showsEndScreen {
+                onClose()
             } else if controlsVisible, model.isPlaying {
                 hideControls()
-            } else if !controlsVisible, model.showsUpNext(at: model.clock.time) {
-                // The up-next card goes first, as its Hide would.
-                model.cancelUpNext()
             } else {
                 onClose()
             }
         }
         // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline,
-        // or after a failure on Try Again.
+        // on what the card or the end screen offers, or after a failure on Try Again.
         .onChange(of: controlsVisible) { _, visible in
             if visible, case .failed = model.status {
                 retryFocused = true
+            } else if visible, !controlsCompact, offersAction {
+                moveFocus(to: .action)
             } else {
                 focus = visible ? .timeline : .picture
             }
+        }
+        // Asked whether anyone is still watching, or at the end, focus goes to what's offered.
+        .onChange(of: model.asksStillWatching) { _, asks in
+            if asks { moveFocus(to: .action) }
+        }
+        .onChange(of: showsEndScreen) { _, shows in
+            if shows { moveFocus(to: .action) }
         }
         // Skips and scans from elsewhere, as Siri's or a TV remote's, show on the timeline too.
         .onChange(of: model.scrubbing.skipRun?.id) { _, run in
@@ -387,13 +403,21 @@ struct PlayerView: View {
             case .loading, .paused, .failed: break
             }
             if case .failed(let message) = status {
-                failure = message
                 announce("Couldn't play this. \(message)")
                 #if os(tvOS)
                 // Once the card is up: focus can't go to a button that isn't there yet, and the
                 // controls would keep it on the timeline.
                 DispatchQueue.main.async { retryFocused = true }
                 #endif
+            }
+            if status == .ended {
+                #if os(tvOS)
+                // At the end the way on is the next episode, or the end screen, rather than the
+                // timeline, where a click would play the episode again.
+                if offersAction { moveFocus(to: .action) }
+                #endif
+            } else {
+                endScreenSetAside = false
             }
             #if os(iOS) || os(macOS)
             pictureInPicture.attach(to: model)
@@ -415,6 +439,12 @@ struct PlayerView: View {
         }
         // Portable TV's remote skipped, paused or asked for them.
         .onChange(of: controlsRequests) { showControls() }
+        // Brought up while it plays, by a tap, a click, the remote, the pointer or a key: someone
+        // is watching. Those the playback brings up itself, as it starts, pauses or ends, aren't.
+        .onChange(of: controlsVisible) { _, visible in
+            if visible, model.isPlaying { model.noteViewerActivity() }
+        }
+        .animation(.easeInOut(duration: 0.3), value: showsEndScreen)
         // Another device asked this one to stop.
         .onChange(of: coordinator.stopRequest) { _, request in
             guard request == model.id else { return }
@@ -492,7 +522,8 @@ struct PlayerView: View {
     }
 
     /// A click with the controls hidden takes the skip button's or up-next card's action when one
-    /// shows, as it can't take focus from the picture; else it brings the controls up.
+    /// shows, as it can't take focus from the picture (`performShownAction`); else it brings the
+    /// controls up.
     private func pictureClicked() {
         if let forward = touchSurface.clickedSide(), remoteDrivesTimeline {
             remote(.click(forward: forward))
@@ -553,25 +584,71 @@ struct PlayerView: View {
     #endif
 
     private enum ShownAction {
-        case upNext(JellyfinItem)
+        case stillWatching
+        case upNext(JellyfinItem, UpNextPhase)
         case skip(MediaSegment)
+        case chip(PlaybackChip)
     }
 
-    /// The up-next card in the credits, when there's a next episode, else the skip button.
+    /// What shows in the corner above the timeline, first to last: the question whether anyone is
+    /// still watching, the up-next card as an episode ends, the skip button, and the chip saying
+    /// the player resumed or skipped the intro.
     private func shownAction(at time: Double) -> ShownAction? {
-        if model.showsUpNext(at: time), let next = model.nextEpisode { return .upNext(next) }
+        if model.asksStillWatching { return .stillWatching }
+        if let phase = model.upNextPhase(at: time), let next = model.nextEpisode { return .upNext(next, phase) }
         if let segment = model.skippableSegment(at: time), segment.skipTitle != nil { return .skip(segment) }
+        if let chip = model.chip { return .chip(chip) }
         return nil
     }
 
+    /// A way on from the end of the title, which takes focus from the timeline as the controls come
+    /// up: the up-next card, the question whether anyone is still watching, or the end screen. The
+    /// skip button and the chip wait to be moved to, so a click meant for the timeline doesn't
+    /// skip or start over.
+    private var offersAction: Bool {
+        switch shownAction(at: model.clock.time) {
+        case .upNext, .stillWatching: true
+        case .skip, .chip, nil: showsEndScreen
+        }
+    }
+
+    /// A click on the picture with the controls hidden: the up-next card's Play Now in the credits
+    /// or at the end, or the skip button. The card in the last half minute, where a click may be
+    /// meant for the last scene, and the question whether anyone is still watching only bring up
+    /// the controls, with their buttons ready; the chip is no click's to take.
     @discardableResult
     private func performShownAction() -> Bool {
         switch shownAction(at: model.clock.time) {
-        case .upNext(let next): Task { await model.play(next) }
+        case .upNext(_, .nearEnd), .stillWatching: showControls()
+        case .upNext(let next, _): Task { await model.play(next) }
         case .skip(let segment): model.seek(to: segment.end)
-        case nil: return false
+        case .chip, nil: return false
         }
         return true
+    }
+
+    /// The end screen of a title with nothing after it, unless the viewer set it aside for the
+    /// controls.
+    private var showsEndScreen: Bool {
+        model.showsEndScreen && !endScreenSetAside && showsPicture
+    }
+
+    @ViewBuilder private func endScreen(_ item: JellyfinItem) -> some View {
+        #if os(tvOS)
+        EndScreen(model: model, item: item, onReturn: returnToPage, focus: $focus)
+        #else
+        EndScreen(model: model, item: item, onReturn: returnToPage, onClose: onClose) {
+            endScreenSetAside = true
+            showControls(autoHide: false)
+        }
+        #endif
+    }
+
+    /// Closes the player on `page`'s page: the one it covers when that's the one, else the page a
+    /// link to it opens.
+    private func returnToPage(_ page: JellyfinItem) {
+        if coordinator.pageUnderPlayer != page.id { links.open(AppLink(.open, page)) }
+        onClose()
     }
 
     /// Below the fold the controls stay, off the picture.
@@ -603,17 +680,26 @@ struct PlayerView: View {
     }
 
     @ViewBuilder private func coverCaption(_ cover: PictureCover) -> some View {
-        switch cover {
-        case .starting:
-            ZStack {
-                if let item = model.item { StartingTitle(item: item, isShort: controlsAreShort) }
+        Group {
+            switch cover {
+            case .starting:
+                ZStack {
+                    if let item = model.shownItem { StartingTitle(item: item, isShort: controlsAreShort) }
+                }
+                .animation(.easeOut(duration: 0.3), value: model.shownItem?.id)
+            case .airPlay(let receiver):
+                #if os(iOS) || os(macOS)
+                AirPlayCaption(receiverName: receiver)
+                #endif
             }
-            .animation(.easeOut(duration: 0.3), value: model.item?.id)
-        case .airPlay(let receiver):
-            #if os(iOS) || os(macOS)
-            AirPlayCaption(receiverName: receiver)
-            #endif
         }
+        .padding(.trailing, captionPlace.trailingInset)
+    }
+
+    /// Where what the title's picture says sits, clear of the controls and of what the corner
+    /// shows.
+    private var captionPlace: (coveredBelow: CGFloat?, trailingInset: CGFloat) {
+        PlayerLayout.caption(bottomBarTop: clearsControls ? bottomBarTop : nil, corner: cornerAction, isShort: controlsAreShort)
     }
 
     #if os(iOS) || os(macOS)
@@ -715,7 +801,7 @@ struct PlayerView: View {
     }
 
     @ViewBuilder private var statusOverlay: some View {
-        if let failure = shownFailure {
+        if let failure = model.shownFailure {
             failureCard(failure)
         } else {
             switch model.status {
@@ -733,29 +819,22 @@ struct PlayerView: View {
         }
     }
 
-    /// Why the playback failed, while it has, and through a try again's first moment.
-    private var shownFailure: String? {
-        switch model.status {
-        case .failed(let message): message
-        case .preparing, .loading: isRetrying ? failure : nil
-        default: nil
-        }
-    }
-
+    /// Why the playback failed, while it has; through a try again's first moment
+    /// (`PlayerModel.isRetrying`) it says it's trying again, with a spinner in place of its symbol.
     private func failureCard(_ message: String) -> some View {
         VStack(spacing: 14) {
             // The spinner takes the symbol's place, and its room, so the card keeps its size.
             Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
-                .opacity(isRetrying ? 0 : 1)
+                .opacity(model.isRetrying ? 0 : 1)
                 .overlay {
-                    if isRetrying {
+                    if model.isRetrying {
                         ProgressView()
                             .controlSize(.large)
                             .tint(.white)
                     }
                 }
                 .accessibilityHidden(true)
-            Text(isRetrying ? "Trying Again…" : "Couldn't Play This").font(.title3.weight(.semibold))
+            Text(model.isRetrying ? "Trying Again…" : "Couldn't Play This").font(.title3.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
             #if os(tvOS)
@@ -779,20 +858,11 @@ struct PlayerView: View {
         .accessibilityIdentifier("player.failure")
     }
 
-    /// Long enough for a try that fails at once to read as a try.
-    private static let retryHold: Duration = .seconds(0.8)
-
-    /// Tries to play again by `attempt`, the failure staying up meanwhile for `retryHold`, with
-    /// a spinner in place of its symbol.
+    /// Tries to play again by `attempt`, once at a time.
     private func retry(_ attempt: @escaping () async -> Void) {
-        guard !isRetrying else { return }
-        isRetrying = true
+        guard !model.isRetrying else { return }
         announce("Trying again")
         Task { await attempt() }
-        Task {
-            try? await Task.sleep(for: Self.retryHold)
-            isRetrying = false
-        }
     }
 
     /// The ways on from a failure besides Try Again.
@@ -805,16 +875,14 @@ struct PlayerView: View {
 
     @ViewBuilder private var extras: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-            // In the credits the up-next card is the way past them, when there's a next episode.
             let action = shownAction(at: model.clock.time)
-            let upNext: JellyfinItem? = if case .upNext(let next) = action { next } else { nil }
+            let upNext: JellyfinItem? = if case .upNext(let next, _) = action { next } else { nil }
             let skip: MediaSegment? = if case .skip(let segment) = action { segment } else { nil }
             // Clear of the controls' bottom bar, however tall the text makes it.
             GeometryReader { geometry in
                 let bottom = fold != nil ? 16 : PlayerLayout.bottomPadding(containerMaxY: geometry.frame(in: .global).maxY,
                                                                           bottomBarTop: clearsControls ? bottomBarTop : nil)
-                actionView(upNext: upNext, skip: skip,
-                           form: PlayerLayout.upNextForm(controlsVisible: clearsControls, isShort: controlsAreShort),
+                actionView(action, form: PlayerLayout.upNextForm(controlsVisible: clearsControls, isShort: controlsAreShort),
                            width: geometry.size.width)
                     #if os(tvOS)
                     // Focus stays in an open panel, as the controls' bottom bar leaves it there.
@@ -823,7 +891,7 @@ struct PlayerView: View {
                     .padding(.horizontal, Metrics.playerInset)
                     .padding(.bottom, bottom)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                    .animation(reduceMotion ? nil : .snappy, value: upNext?.id ?? skip?.skipTitle)
+                    .animation(reduceMotion ? nil : .snappy, value: action.map(Self.identity))
             }
             // They come and go over the picture, where VoiceOver wouldn't find them in time.
             .onChange(of: skip?.skipTitle) { _, title in
@@ -832,48 +900,80 @@ struct PlayerView: View {
             .onChange(of: upNext?.id) {
                 if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
             }
+            .onChange(of: model.asksStillWatching) { _, asks in
+                if asks { announce("Still watching? The next episode waits for an answer.") }
+            }
         }
     }
 
-    /// The up-next card or the skip button, sliding in from the side and back out. `width` is the
-    /// screen's, which a wide one sizes the card by.
-    @ViewBuilder private func actionView(upNext: JellyfinItem?, skip: MediaSegment?, form: PlayerLayout.UpNextForm,
-                                         width: CGFloat) -> some View {
-        if let upNext {
+    /// What the corner shows, as one value for its animation.
+    private static func identity(_ action: ShownAction) -> String {
+        switch action {
+        case .stillWatching: "stillWatching"
+        case .upNext(let next, _): "upNext \(next.id)"
+        case .skip(let segment): "skip \(segment.start)"
+        case .chip(let chip): "chip \(chip)"
+        }
+    }
+
+    /// What the corner shows (`shownAction`), sliding in from the side and back out. `width` is
+    /// the screen's, which a wide one sizes the up-next card by.
+    @ViewBuilder private func actionView(_ action: ShownAction?, form: PlayerLayout.UpNextForm, width: CGFloat) -> some View {
+        switch action {
+        case .stillWatching:
+            #if os(tvOS)
+            StillWatchingCard(model: model, onStop: onClose, focus: $focus)
+                .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
+            #else
+            StillWatchingCard(model: model, onStop: onClose)
+                .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
+            #endif
+        case .upNext(let next, let phase):
             ZStack {
                 switch form {
                 case .card:
                     #if os(tvOS)
-                    UpNextCard(model: model, episode: upNext, focus: $focus, isClickTarget: !controlsVisible)
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { upNextCardTop = $0 }
-                        .onDisappear { upNextCardTop = nil }
+                    UpNextCard(model: model, episode: next, phase: phase, focus: $focus, controlsHidden: !controlsVisible)
+                        .reportingFrame(to: $cornerAction)
                     #else
-                    UpNextCard(model: model, episode: upNext, width: PlayerLayout.upNextCardWidth(containerWidth: width))
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { upNextCardTop = $0 }
-                        .onDisappear { upNextCardTop = nil }
+                    UpNextCard(model: model, episode: next, phase: phase, width: PlayerLayout.upNextCardWidth(containerWidth: width))
+                        .reportingFrame(to: $cornerAction)
                     #endif
                 case .pill:
-                    UpNextPill(model: model, episode: upNext)
+                    UpNextPill(model: model, episode: next)
                         .frame(maxWidth: width * 0.6, alignment: .trailing)
+                        .reportingFrame(to: $cornerAction)
                 }
             }
-            .id(upNext.id)
+            .id(next.id)
             .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
-        } else if let segment = skip, let title = segment.skipTitle {
-            Button {
-                model.seek(to: segment.end)
-            } label: {
-                Label(title, systemImage: "forward.end.fill")
+        case .skip(let segment):
+            if let title = segment.skipTitle {
+                Button {
+                    model.seek(to: segment.end)
+                } label: {
+                    Label(title, systemImage: "forward.end.fill")
+                }
+                .buttonStyle(.platformGlassProminent)
+                .controlSize(.large)
+                #if os(tvOS)
+                .modifier(ClickTarget(isTarget: !controlsVisible))
+                .focused($focus, equals: .action)
+                #endif
+                .accessibilityIdentifier("player.skip")
+                .id(segment.start)
+                .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
             }
-            .buttonStyle(.platformGlassProminent)
-            .controlSize(.large)
-            #if os(tvOS)
-            .modifier(ClickTarget(isTarget: !controlsVisible))
-            .focused($focus, equals: .action)
-            #endif
-            .accessibilityIdentifier("player.skip")
-            .id(segment.start)
-            .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
+        case .chip(let chip):
+            PlaybackChipButton(model: model, chip: chip)
+                .controlSize(.large)
+                #if os(tvOS)
+                .focused($focus, equals: .action)
+                #endif
+                .reportingFrame(to: $cornerAction)
+                .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
+        case nil:
+            EmptyView()
         }
     }
 
@@ -999,24 +1099,6 @@ private struct WindowButtons: NSViewRepresentable {
 }
 #endif
 
-#if os(tvOS)
-/// The skip button or the up-next card's Play Now while a click on the picture takes it, with the
-/// controls hidden: white, as a button with focus is, though focus stays on the picture.
-private struct ClickTarget: ViewModifier {
-    let isTarget: Bool
-
-    func body(content: Content) -> some View {
-        if isTarget {
-            content
-                .tint(.white)
-                .foregroundStyle(.black)
-        } else {
-            content
-        }
-    }
-}
-#endif
-
 /// A brief word over the picture, such as a move to a lower quality, below the controls' top
 /// bar while they show, with a symbol for what it's about.
 private struct PlayerNotice: View {
@@ -1048,150 +1130,6 @@ private struct PlayerNotice: View {
         case .remoteRequest: "iphone.radiowaves.left.and.right"
         case .info: "info.circle"
         }
-    }
-}
-
-/// The card offering the next episode near the end, counting down when it plays by itself. On
-/// Apple TV a click on the picture plays it, while the controls are hidden; Back hides it then.
-private struct UpNextCard: View {
-    let model: PlayerModel
-    let episode: JellyfinItem
-    #if os(tvOS)
-    let focus: FocusState<PlayerFocus?>.Binding
-    /// A click on the picture plays it.
-    let isClickTarget: Bool
-    private let layout = Layout.tv
-    #else
-    /// From `PlayerLayout.upNextCardWidth(containerWidth:)`.
-    let width: CGFloat
-    private var layout: Layout { Layout(width: width) }
-    #endif
-    @Environment(\.session) private var session
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var body: some View {
-        AdaptiveStack(spacing: layout.spacing) {
-            // At the accessibility text sizes the words take the room.
-            if !dynamicTypeSize.isAccessibilitySize {
-                Artwork(url: session?.landscape(episode, width: layout.artworkPixels), aspectRatio: 16.0 / 9.0,
-                        cornerRadius: layout.artworkRadius, placeholder: "play.rectangle")
-                    .frame(width: layout.artworkWidth)
-            }
-            VStack(alignment: .leading, spacing: layout.lineSpacing) {
-                if let countdown = model.upNextCountdown {
-                    Text("Next episode in \(countdown)")
-                        .font(.title3.weight(.bold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText(countsDown: true))
-                } else {
-                    Text("Up Next")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · "))
-                    .font(layout.titleFont)
-                    .lineLimit(dynamicTypeSize.lineLimit(2))
-                AdaptiveStack {
-                    Button("Play Now") { Task { await model.play(episode) } }
-                        .buttonStyle(.platformGlassProminent)
-                        #if os(tvOS)
-                        .modifier(ClickTarget(isTarget: isClickTarget))
-                        .focused(focus, equals: .action)
-                        #endif
-                        .accessibilityIdentifier("player.playNext")
-                    #if os(tvOS)
-                    if isClickTarget {
-                        // Focus stays on the picture, where Hide can't be reached; Back hides it.
-                        Text("Press Back to Hide")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Button("Hide") { model.cancelUpNext() }
-                            .buttonStyle(.platformGlass)
-                            .focused(focus, equals: .hideUpNext)
-                    }
-                    #else
-                    Button("Hide") { model.cancelUpNext() }
-                        .buttonStyle(.platformGlass)
-                    #endif
-                }
-                .controlSize(layout.buttonSize)
-                #if os(tvOS)
-                // Each button's words on one line: squeezed, they'd wrap a word or a letter a line.
-                .lineLimit(1)
-                .fixedSize()
-                .padding(.top, 8)
-                #endif
-            }
-        }
-        .padding(layout.padding)
-        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? max(640, layout.width) : layout.width, alignment: .leading)
-        .platformGlass(in: .rect(cornerRadius: layout.radius))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("player.upNext")
-    }
-
-    /// The phone's card is 440 points wide; a wider screen's is larger in proportion, its title
-    /// and buttons too. Apple TV's text is about twice the size, seen from across the room, and
-    /// so is its card.
-    private struct Layout {
-        let width: CGFloat
-        let artworkWidth: CGFloat
-        let artworkRadius: CGFloat
-        let spacing: CGFloat
-        let lineSpacing: CGFloat
-        let padding: CGFloat
-        let radius: CGFloat
-        let buttonSize: ControlSize
-        let titleFont: Font
-
-        var artworkPixels: Int { Int(artworkWidth * 3) }
-
-        #if os(tvOS)
-        static let tv = Layout(width: 860, artworkWidth: 320, artworkRadius: 16, spacing: 28, lineSpacing: 6, padding: 24,
-                               radius: 36, buttonSize: .regular, titleFont: .subheadline.weight(.semibold))
-        #else
-        init(width: CGFloat) {
-            let isLarge = width >= 500
-            self.width = width
-            artworkWidth = (width * 0.34).rounded()
-            artworkRadius = isLarge ? 12 : 8
-            spacing = isLarge ? 18 : 14
-            lineSpacing = isLarge ? 6 : 4
-            padding = isLarge ? 16 : 12
-            radius = isLarge ? 26 : 20
-            buttonSize = isLarge ? .regular : .small
-            titleFont = (isLarge ? Font.headline : .subheadline).weight(.semibold)
-        }
-        #endif
-    }
-}
-
-/// The up-next card as a slim button just above the timeline, where the controls leave no room
-/// for the card under the transport: what's next and, counting down, how soon. It plays it; the
-/// card, with Hide, comes back as the controls go.
-private struct UpNextPill: View {
-    let model: PlayerModel
-    let episode: JellyfinItem
-
-    var body: some View {
-        Button {
-            Task { await model.play(episode) }
-        } label: {
-            Label {
-                let when = Text(model.upNextCountdown.map { "Next in \($0)" } ?? "Up Next").fontWeight(.bold).monospacedDigit()
-                let what = Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · ")).fontWeight(.regular)
-                Text("\(when)  \(what)")
-            } icon: {
-                Image(systemName: "play.fill")
-            }
-            .lineLimit(1)
-        }
-        .buttonStyle(.platformGlassProminent)
-        .accessibilityLabel("Play Next Episode")
-        .accessibilityValue([model.upNextCountdown.map { "Starts in \($0)" }, episode.episodeCode, episode.name]
-            .compactMap(\.self).joined(separator: ", "))
-        .accessibilityIdentifier("player.playNext")
     }
 }
 
@@ -1350,3 +1288,11 @@ struct RotateButton: View {
     }
 }
 #endif
+
+private extension View {
+    /// Keeps `frame` at where this view is, in global coordinates, while it shows.
+    func reportingFrame(to frame: Binding<CGRect?>) -> some View {
+        onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame.wrappedValue = $0 }
+            .onDisappear { frame.wrappedValue = nil }
+    }
+}

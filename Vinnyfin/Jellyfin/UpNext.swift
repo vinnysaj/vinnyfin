@@ -71,9 +71,7 @@ nonisolated enum UpNext {
 
     /// Aired, and with something to play.
     static func isAvailable(_ episode: JellyfinItem, now: Date) -> Bool {
-        guard episode.locationType != "Virtual" else { return false }
-        guard let premiere = episode.premiereDate.flatMap(JellyfinDate.parse) else { return true }
-        return premiere <= now
+        !episode.isNotYetAvailable(now: now)
     }
 
     /// The shows being watched, from what's partway through, the episodes finished last and the

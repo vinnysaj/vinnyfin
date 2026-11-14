@@ -107,6 +107,7 @@ struct ItemDetailView: View {
                         LoadFailureNotice(loadError) { Task { await load() } }
                             .padding(.horizontal, Metrics.edge)
                     }
+                    if shown.isNotYetAvailable() { notYetAvailableNote }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
                     if sources.count > 1 { versions }
                     if page.isEpisode {
@@ -168,21 +169,64 @@ struct ItemDetailView: View {
         }
     }
 
-    private var playButton: some View {
+    @ViewBuilder private var playButton: some View {
+        if shown.isNotYetAvailable() {
+            notYetAvailableButtons
+        } else {
+            #if os(tvOS)
+            PlayButton(item: shown, mediaSourceId: pickedSourceId, focus: $playFocused)
+            #else
+            PlayButton(item: shown, mediaSourceId: pickedSourceId)
+            #endif
+        }
+    }
+
+    /// In Play's place for a title with nothing to play yet: that it isn't out, and Check Again,
+    /// which has the server look for it once more, as it does each time the page loads.
+    @ViewBuilder private var notYetAvailableButtons: some View {
+        Label("Not Yet Available", systemImage: "clock")
+            .font(.headline)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .platformGlass(in: .capsule)
+            .fixedSize()
+            .accessibilityIdentifier("detail.notYetAvailable")
+        Button {
+            Task { await loadDetail() }
+        } label: {
+            Label("Check Again", systemImage: "arrow.clockwise")
+        }
+        .buttonStyle(.platformGlass)
+        .controlSize(.large)
         #if os(tvOS)
-        PlayButton(item: shown, mediaSourceId: pickedSourceId, focus: $playFocused)
-        #else
-        PlayButton(item: shown, mediaSourceId: pickedSourceId)
+        .focused($playFocused)
         #endif
+        .accessibilityIdentifier("detail.checkAgain")
     }
 
     @ViewBuilder private var secondaryButtons: some View {
+        let available = !shown.isNotYetAvailable()
         #if !os(tvOS)
-        DownloadButton(item: loaded, source: pickedSourceId.flatMap { id in sources.first { $0.id == id } })
+        if available {
+            DownloadButton(item: loaded, source: pickedSourceId.flatMap { id in sources.first { $0.id == id } })
+        }
         #endif
         WatchedButton(item: shown) { detail = $0 }
         FavoriteButton(item: shown) { detail = $0 }
-        PlayElsewhereButton(subject: .title(shown, mediaSourceId: pickedSourceId))
+        if available {
+            PlayElsewhereButton(subject: .title(shown, mediaSourceId: pickedSourceId))
+        }
+    }
+
+    /// Why there's no Play, under the buttons: when it comes out, or that nothing's out yet.
+    private var notYetAvailableNote: some View {
+        let when = NotYetAvailableOverlay.day(of: shown).map { "\(shown.isEpisode ? "Airs" : "Comes out") \($0). " }
+            ?? "Nothing of it is out yet. "
+        return Text(when + "It plays here as soon as any copy of it is out, even one filmed in a theater.")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: 640, alignment: .leading)
+            .padding(.horizontal, Metrics.edge)
     }
 
     private var versions: some View {

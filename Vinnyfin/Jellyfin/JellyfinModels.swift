@@ -195,6 +195,21 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
     }
 
     var lastPlayedDate: Date? { userData?.lastPlayedDate.flatMap(JellyfinDate.parse) }
+
+    var premiere: Date? { premiereDate.flatMap(JellyfinDate.parse) }
+
+    /// A movie or episode with nothing to play yet, as far as the item tells. The server lists it
+    /// from its metadata alone (Virtual): a missing episode, or with a plugin that finds remote
+    /// streams, one it looked for and found none of, not even a copy filmed in a theater. Such a
+    /// plugin looks only as the title's own page loads, and again each time until it finds one,
+    /// so an item from a list, without its versions, tells only when it premieres: after `now`,
+    /// without a file of its own, it isn't out.
+    func isNotYetAvailable(now: Date = .now) -> Bool {
+        guard isMovie || isEpisode else { return false }
+        if locationType == "Virtual" { return true }
+        guard mediaSources == nil, locationType != "FileSystem", let premiere else { return false }
+        return premiere > now
+    }
 }
 
 // MARK: Versions

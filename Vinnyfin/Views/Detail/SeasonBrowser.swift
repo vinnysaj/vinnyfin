@@ -217,6 +217,7 @@ private struct EpisodeCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Artwork(url: session?.client.imageURL(itemId: episode.id, tag: episode.primaryImageTag, maxWidth: 600),
                     aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
+                .overlay { NotYetAvailableOverlay(item: episode) }
                 .overlay(alignment: .bottom) {
                     if let progress = episode.progress { ProgressBar(fraction: progress).padding(8) }
                 }
@@ -249,7 +250,8 @@ private struct EpisodeCard: View {
         .contentShape(.rect)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(episode.name)
-        .accessibilityValue([episode.spokenEpisodeCode, isShown ? "viewing" : nil, WatchBadge.spokenState(of: episode),
+        .accessibilityValue([episode.spokenEpisodeCode, isShown ? "viewing" : nil, NotYetAvailableOverlay.spoken(episode),
+                             WatchBadge.spokenState(of: episode),
                              episode.progress.map(ProgressBar.spoken)].compactMap(\.self).joined(separator: ", "))
     }
 }

@@ -320,6 +320,9 @@ struct SeriesView: View {
         ) {
             if isSelecting {
                 if selection.contains(episode.id) { selection.remove(episode.id) } else { selection.insert(episode.id) }
+            } else if episode.isNotYetAvailable() {
+                // Nothing to play yet: its page says when it airs.
+                openTitle?(episode)
             } else {
                 player.play(.item(episode))
             }
@@ -462,6 +465,7 @@ private struct EpisodeRow: View {
                 Artwork(url: session?.client.imageURL(itemId: episode.id, tag: episode.primaryImageTag, maxWidth: 600),
                         aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
                     .frame(width: dynamicTypeSize.cardWidth(stillWidth))
+                    .overlay { NotYetAvailableOverlay(item: episode) }
                     .overlay(alignment: .bottom) {
                         if let progress = episode.progress { ProgressBar(fraction: progress).padding(6) }
                     }
@@ -502,7 +506,7 @@ private struct EpisodeRow: View {
             Button("Details", systemImage: "info.circle", action: openPage)
         }
         .accessibilityAddTraits(isSelecting && isSelected ? .isSelected : [])
-        .accessibilityHint(isSelecting ? "" : "Plays the episode")
+        .accessibilityHint(isSelecting ? "" : episode.isNotYetAvailable() ? "Not yet available. Opens the episode" : "Plays the episode")
         .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
         .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0)")
     }

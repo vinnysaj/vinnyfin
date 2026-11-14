@@ -106,3 +106,41 @@ struct UpNextTests {
         #expect(titles == [.show(recent), .movie(movie), .show(older), .show(unknown)])
     }
 }
+
+/// A title with nothing to play yet, from a list and from its own page.
+struct NotYetAvailableTests {
+    private static let now = JellyfinDate.parse("2026-11-14T12:00:00Z")!
+
+    private static func movie(premiere: String?, location: String? = "Remote", sources: [MediaSource]? = nil) -> JellyfinItem {
+        var movie = JellyfinItem(id: "m", name: "Movie", type: "Movie")
+        movie.premiereDate = premiere
+        movie.locationType = location
+        movie.mediaSources = sources
+        return movie
+    }
+
+    @Test func aListTellsOnlyByThePremiere() {
+        #expect(Self.movie(premiere: "2027-12-19T00:00:00.0000000Z").isNotYetAvailable(now: Self.now))
+        #expect(!Self.movie(premiere: "2026-10-01T00:00:00Z").isNotYetAvailable(now: Self.now))
+        #expect(!Self.movie(premiere: nil).isNotYetAvailable(now: Self.now))
+        // A file of its own plays, whatever its metadata says.
+        #expect(!Self.movie(premiere: "2027-12-19T00:00:00Z", location: "FileSystem").isNotYetAvailable(now: Self.now))
+    }
+
+    /// The server marks a title it found nothing to play of Virtual, in theaters or not.
+    @Test func itsOwnPageTellsByWhatTheServerFound() {
+        #expect(Self.movie(premiere: "2026-10-01T00:00:00Z", location: "Virtual").isNotYetAvailable(now: Self.now))
+        // Found, as a copy filmed in a theater, though another country's premiere is ahead.
+        let found = Self.movie(premiere: "2027-01-01T00:00:00Z", sources: [MediaSource(id: "v1", name: "1080p CAM")])
+        #expect(!found.isNotYetAvailable(now: Self.now))
+        var show = JellyfinItem(id: "s", name: "Show", type: "Series")
+        show.locationType = "Virtual"
+        #expect(!show.isNotYetAvailable(now: Self.now))
+    }
+
+    @Test func saysTheDayItComesOut() {
+        #expect(NotYetAvailableOverlay.day(of: Self.movie(premiere: "2027-12-19T00:00:00Z"), now: Self.now) == "Dec 19, 2027")
+        #expect(NotYetAvailableOverlay.day(of: Self.movie(premiere: "2026-11-15T00:00:00Z"), now: Self.now) == "Nov 15")
+        #expect(NotYetAvailableOverlay.day(of: Self.movie(premiere: "2026-10-01T00:00:00Z", location: "Virtual"), now: Self.now) == nil)
+    }
+}

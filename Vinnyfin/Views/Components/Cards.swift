@@ -49,6 +49,7 @@ struct PosterCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Artwork(url: session?.poster(item), aspectRatio: 2.0 / 3.0, placeholder: item.isSeries ? "tv" : "film")
+                .overlay { NotYetAvailableOverlay(item: item) }
                 .overlay(alignment: .topTrailing) { WatchBadge(item: item).padding(6) }
                 .overlay(alignment: .bottom) {
                     if let progress = item.progress {
@@ -87,7 +88,8 @@ struct PosterCard: View {
     }
 
     private var details: String {
-        var parts = [item.premiereYearText, WatchBadge.spokenState(of: item), item.progress.map(ProgressBar.spoken)]
+        var parts = [item.premiereYearText, NotYetAvailableOverlay.spoken(item), WatchBadge.spokenState(of: item),
+                     item.progress.map(ProgressBar.spoken)]
         #if !os(tvOS)
         if item.progress == nil, downloads.isDownloaded(item.id) { parts.append("downloaded") }
         #endif
@@ -166,6 +168,7 @@ struct LandscapeCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Artwork(url: session?.landscape(item), aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
+                .overlay { NotYetAvailableOverlay(item: item) }
                 .overlay(alignment: .bottom) {
                     if let progress = item.progress {
                         ProgressBar(fraction: progress).padding(8)
@@ -184,9 +187,60 @@ struct LandscapeCard: View {
         .contentShape(.rect)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.titleName)
-        .accessibilityValue([item.spokenCardDetail, item.progress.map(ProgressBar.spoken)].compactMap { $0?.isEmpty == false ? $0 : nil }
+        .accessibilityValue([item.spokenCardDetail, NotYetAvailableOverlay.spoken(item), item.progress.map(ProgressBar.spoken)]
+            .compactMap { $0?.isEmpty == false ? $0 : nil }
             .joined(separator: ", "))
         .accessibilityIdentifier("card.\(item.name)")
+    }
+}
+
+/// Over the artwork of a title that isn't out yet (`JellyfinItem.isNotYetAvailable`): the
+/// picture dimmed, and across it "Not Yet Available", with the day it comes out while that's ahead.
+struct NotYetAvailableOverlay: View {
+    let item: JellyfinItem
+
+    var body: some View {
+        if item.isNotYetAvailable() {
+            ZStack {
+                Rectangle().fill(.black.opacity(0.55))
+                VStack(spacing: 4) {
+                    Image(systemName: "clock").font(.caption.weight(.semibold))
+                    Text("Not Yet Available")
+                        .font(.caption2.weight(.heavy))
+                        .textCase(.uppercase)
+                    if let day = Self.day(of: item) {
+                        Text("\(item.isEpisode ? "Airs" : "Out") \(day)").font(.caption2.weight(.medium))
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.7)
+                .foregroundStyle(.white)
+                .padding(8)
+            }
+            .clipShape(.rect(cornerRadius: 10))
+            // The card says it, in `spoken(_:)`.
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// The day it comes out, "Dec 19, 2027", or this year "Nov 15"; nil once that has come, or
+    /// when it isn't known.
+    static func day(of item: JellyfinItem, now: Date = .now) -> String? {
+        guard let premiere = item.premiere, premiere > now else { return nil }
+        // Premieres are days, which the server gives as midnight in UTC.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        var style = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        if calendar.component(.year, from: premiere) != calendar.component(.year, from: now) { style = style.year() }
+        style.timeZone = .gmt
+        return premiere.formatted(style)
+    }
+
+    /// What the overlay shows, as VoiceOver says it; nil without one.
+    static func spoken(_ item: JellyfinItem) -> String? {
+        guard item.isNotYetAvailable() else { return nil }
+        return ["not yet available", day(of: item).map { "\(item.isEpisode ? "airs" : "out") \($0)" }]
+            .compactMap(\.self).joined(separator: ", ")
     }
 }
 

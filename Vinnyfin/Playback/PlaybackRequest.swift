@@ -114,6 +114,8 @@ nonisolated enum PlaybackError: LocalizedError {
     case noVersions
     case transcodeRefused(String?)
     case fileUnavailable(String)
+    /// The server has nothing to play of it yet (`JellyfinItem.isNotYetAvailable`).
+    case notYetAvailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -121,6 +123,7 @@ nonisolated enum PlaybackError: LocalizedError {
         case .noVersions: "The server lists no versions of this title."
         case .transcodeRefused(let code): "The server couldn't prepare a stream\(code.map { " (\($0))" } ?? "")."
         case .fileUnavailable(let name): "\(name) can't be opened. It may have been moved or deleted."
+        case .notYetAvailable(let name): "\(name) isn't out yet. It plays here as soon as any copy of it is out, even one filmed in a theater."
         }
     }
 }
@@ -258,6 +261,8 @@ struct PlaybackResolver {
     private func resolveStream(itemId: String, mediaSourceId: String?, request: PlaybackRequest) async throws -> ResolvedPlayback {
         guard let client = accounts.client, let account = accounts.account else { throw PlaybackError.notSignedIn }
         let item = try await client.item(id: itemId, userId: account.userId)
+        // The server offers such a title to play, with a placeholder version that fails once streamed.
+        if item.isNotYetAvailable() { throw PlaybackError.notYetAvailable(item.titleWithYear) }
         let sources = item.mediaSources ?? []
         let preferred = mediaSourceId.flatMap { id in sources.first { $0.id == id } }
         guard let plan = VersionChooser.planStreaming(

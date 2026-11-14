@@ -329,7 +329,7 @@ private struct HeroBanner: View {
             Text(overview).font(.subheadline).lineLimit(dynamicTypeSize.lineLimit(2)).frame(maxWidth: 640, alignment: .leading)
         }
         AdaptiveStack(spacing: 12) {
-            if item.isPlayable {
+            if item.isPlayable, !item.isNotYetAvailable() {
                 Button {
                     player.play(.item(item))
                 } label: {

@@ -23,6 +23,9 @@ struct HomeView: View {
     @State private var showingRemote = false
     #elseif os(macOS)
     @Environment(\.openWindow) private var openWindow
+    #elseif os(tvOS)
+    /// Where the banner and the rows are, for holding the focused one in place.
+    @State private var rowLayout = RowPageLayout()
     #endif
 
     var body: some View {
@@ -31,18 +34,36 @@ struct HomeView: View {
                 LazyVStack(alignment: .leading, spacing: 34) {
                     if !feed.featured.isEmpty {
                         HeroBanner(items: feed.featured) { path.append($0) }
+                            #if os(tvOS)
+                            .pageRow("hero", in: rowLayout)
+                            #endif
                     }
-                    if feed.sessionEnded {
-                        sessionEndedNotice
-                    } else if let loadError = feed.loadError {
-                        offlineNotice(loadError)
+                    Group {
+                        if feed.sessionEnded {
+                            sessionEndedNotice
+                        } else if let loadError = feed.loadError {
+                            offlineNotice(loadError)
+                        }
                     }
+                    #if os(tvOS)
+                    .pageRow("notice", in: rowLayout, holding: .whole)
+                    #endif
                     ForEach(feed.rows) { row in
                         HomeRowView(row: row, feed: feed) { path.append($0) }
+                            #if os(tvOS)
+                            // The first row under the banner leaves what fits of it in view.
+                            .pageRow(row.id, in: rowLayout, holding: row.id == leadRow ? .whole : .top)
+                            #endif
                     }
                 }
+                #if os(tvOS)
+                .rowPageContent(rowLayout)
+                #endif
                 .padding(.bottom, Metrics.edge)
             }
+            #if os(tvOS)
+            .rowPage(rowLayout)
+            #endif
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
             .overlay { if feed.hasNoTitles { noTitles } }
@@ -89,6 +110,13 @@ struct HomeView: View {
             .onChange(of: player.endedPlayback) { Task { await load() } }
         }
     }
+
+    #if os(tvOS)
+    /// The first row that shows, the one under the banner.
+    private var leadRow: HomeRow.ID? {
+        feed.rows.first { HomeRowView.isShown($0, in: feed) }?.id
+    }
+    #endif
 
     #if !os(tvOS)
     /// Moves while a sound plays.
@@ -180,24 +208,27 @@ struct HomeView: View {
 }
 
 /// One of Home's rows: its cards once they're in, their shapes until then, or why they couldn't
-/// load. A row with nothing in it isn't there at all.
+/// load. A row with nothing in it isn't there at all. The row is the same `Shelf` loading and
+/// loaded, so on Apple TV focus on a stand-in card stays in the row as the cards come in.
 private struct HomeRowView: View {
     let row: HomeRow
     let feed: HomeFeed
     let open: (JellyfinItem) -> Void
 
+    /// Whether a row shows at all: not once it has loaded with nothing in it.
+    static func isShown(_ row: HomeRow, in feed: HomeFeed) -> Bool {
+        feed.problems[row.id] != nil || feed.items[row.id]?.isEmpty != true
+    }
+
     var body: some View {
         Group {
             if let problem = feed.problems[row.id] {
                 problemRow(problem)
-            } else if let items = feed.items[row.id] {
-                if !items.isEmpty {
-                    Shelf(title: row.list.title, seeAll: row.list, items: items, cardWidth: row.list.style.cardWidth) { item in
-                        card(item)
-                    }
+            } else if Self.isShown(row, in: feed) {
+                Shelf(title: row.list.title, seeAll: row.list, items: feed.items[row.id], cardWidth: row.list.style.cardWidth,
+                      placeholderStyle: row.list.style) { item in
+                    card(item)
                 }
-            } else {
-                ShelfPlaceholder(title: row.list.title, style: row.list.style)
             }
         }
         .onAppear { feed.rowAppeared(row.id) }
@@ -261,6 +292,10 @@ private struct HeroBanner: View {
     @State private var index = 0
     @State private var isInteracting = false
     @FocusState private var focusedButton: HeroButton?
+    #if os(tvOS)
+    /// Bounds the banner's default focus, so it's the banner's to take when focus comes in.
+    @Namespace private var focusScope
+    #endif
 
     private enum HeroButton {
         case play, details
@@ -309,6 +344,10 @@ private struct HeroBanner: View {
         #endif
         #if os(tvOS)
         .focusSection()
+        .focusScope(focusScope)
+        // Up from the rows, focus goes to the title's main button, not whichever is above the
+        // card it leaves.
+        .defaultFocus($focusedButton, item.isPlayable ? .play : .details, priority: .userInitiated)
         #endif
         .task(id: items.map(\.id)) {
             while !Task.isCancelled {

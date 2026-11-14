@@ -364,6 +364,10 @@ struct MainTabs: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        #if os(iOS)
+        // On iPhone the bar shrinks as a page scrolls down, out of the way of the cards under it.
+        .tabBarMinimizeBehavior(.onScrollDown)
+        #endif
         #if !os(tvOS)
         // While the player covers the tabs, the Go menu waits for it to close.
         .focusedSceneValue(\.tabs, player.coversScreens ? nil : TabCommandTarget(go: go, back: back))

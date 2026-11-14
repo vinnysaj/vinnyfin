@@ -99,7 +99,7 @@ final class RowPageLayout {
 
     /// What has focus, on screen. The focus engine has moved focus by the time it asks a scroll
     /// view where to scroll, before SwiftUI's focus state hears of it.
-    fileprivate static func focusedFrame() -> CGRect? {
+    static func focusedFrame() -> CGRect? {
         let scene = UIApplication.shared.connectedScenes.lazy.compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive }
         guard let window = scene?.keyWindow, let item = UIFocusSystem.focusSystem(for: window)?.focusedItem,
               let space = item.parentFocusEnvironment?.focusItemContainer?.coordinateSpace else { return nil }

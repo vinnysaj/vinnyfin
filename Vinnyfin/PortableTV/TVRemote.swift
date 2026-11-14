@@ -45,6 +45,37 @@ final class TVRemote {
         self.accounts = accounts
         self.defaults = defaults
         chosenDeviceId = defaults.string(forKey: Self.chosenKey)
+        foundFor = Set(defaults.stringArray(forKey: Self.foundKey) ?? [])
+    }
+
+    /// The sign-ins, by server and user, a TV has been found for, now or before.
+    private var foundFor: Set<String> = []
+    private static let foundKey = "portableTV.foundFor"
+
+    /// A TV has been found for the sign-in in use, on this device, now or before: from then on
+    /// Home offers the remote, which serves only those with a Mac showing Portable TV, or another
+    /// app that takes a remote's presses.
+    var hasFoundTV: Bool {
+        guard let account = accounts.account else { return false }
+        return foundFor.contains(Self.key(for: account))
+    }
+
+    /// Asks the server once whether it lists a TV, while none has been found for the sign-in.
+    func lookForTV() async {
+        guard !hasFoundTV, let client = accounts.client, let account = accounts.account,
+              let sessions = try? await client.controllableSessions(userId: account.userId) else { return }
+        noteFound(PlayTarget.televisions(from: sessions, excludingDeviceId: accounts.deviceId), for: account)
+    }
+
+    private func noteFound(_ televisions: [PlayTarget], for account: AccountStore.Account) {
+        let key = Self.key(for: account)
+        guard !televisions.isEmpty, !foundFor.contains(key) else { return }
+        foundFor.insert(key)
+        defaults.set(foundFor.sorted(), forKey: Self.foundKey)
+    }
+
+    private static func key(for account: AccountStore.Account) -> String {
+        "\(account.serverId).\(account.userId)"
     }
 
     /// The TV the remote drives: the one picked, else the first listed.
@@ -76,6 +107,7 @@ final class TVRemote {
         do {
             let sessions = try await client.controllableSessions(userId: account.userId)
             televisions = PlayTarget.televisions(from: sessions, excludingDeviceId: accounts.deviceId)
+            noteFound(televisions, for: account)
             seenAt = .now
             if !isSending { problem = nil }
         } catch {

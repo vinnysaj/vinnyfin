@@ -1,9 +1,12 @@
 import SwiftUI
 
 /// The long-press menu for a title: play, its show for an episode, watched, favourite and, off
-/// Apple TV, download.
+/// Apple TV, download. For a card that plays on a tap, it leads with the title's page instead.
 struct ItemContextMenu: View {
     let item: JellyfinItem
+    /// The card plays the title on a tap, as Continue Watching's do, so the menu leads with
+    /// Details, Go to Show and Start Over rather than playing it again.
+    var playsOnTap = false
     /// Gets the item with its new watch state, to update the list it came from.
     var onChange: (JellyfinItem) -> Void = { _ in }
 
@@ -18,20 +21,20 @@ struct ItemContextMenu: View {
     #endif
 
     var body: some View {
-        if item.isPlayable {
-            Button(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill") {
-                player.play(.item(item))
+        if playsOnTap {
+            if let openTitle {
+                Button("Details", systemImage: "info.circle") { openTitle(item) }
             }
-            if item.resumeSeconds != nil {
-                Button("Play from Beginning", systemImage: "arrow.counterclockwise") {
-                    player.play(.item(item, fromBeginning: true))
+            goToShow
+            startOver
+        } else {
+            if item.isPlayable {
+                Button(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill") {
+                    player.play(.item(item))
                 }
             }
-        }
-        if item.isEpisode, let seriesId = item.seriesId, let openTitle {
-            Button("Go to Show", systemImage: "tv") {
-                openTitle(JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series"))
-            }
+            startOver
+            goToShow
         }
         // As the title's page has it.
         Button(item.isPlayed ? "Mark as Unwatched" : "Mark as Watched",
@@ -65,6 +68,23 @@ struct ItemContextMenu: View {
             }
         }
         #endif
+    }
+
+    /// As the title's page has it.
+    @ViewBuilder private var startOver: some View {
+        if item.isPlayable, item.resumeSeconds != nil {
+            Button("Start Over", systemImage: "arrow.counterclockwise") {
+                player.play(.item(item, fromBeginning: true))
+            }
+        }
+    }
+
+    @ViewBuilder private var goToShow: some View {
+        if item.isEpisode, let seriesId = item.seriesId, let openTitle {
+            Button("Go to Show", systemImage: "tv") {
+                openTitle(JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series"))
+            }
+        }
     }
 
     private func setPlayed(_ played: Bool) async {

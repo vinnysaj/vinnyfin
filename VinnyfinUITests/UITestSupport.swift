@@ -179,9 +179,8 @@ extension XCTestCase {
     }
     #endif
 
-    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone, iPad and Vision
-    /// Pro and in a tab of the sidebar on Apple TV, and in the General pane of the Mac's Settings
-    /// window.
+    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone and in a tab on
+    /// iPad, Vision Pro and Apple TV, and in the General pane of the Mac's Settings window.
     @MainActor
     func signOut(_ app: XCUIApplication) {
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign Out' AND identifier != 'settings.signOut'")).firstMatch

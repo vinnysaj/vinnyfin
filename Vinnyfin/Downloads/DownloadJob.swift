@@ -35,6 +35,10 @@ nonisolated struct DownloadJob: Codable, Identifiable, Sendable {
     /// The size Jellyfin listed for the source, shown until the server confirms the real one.
     let sizeHint: Int64?
     let createdAt: Date
+    /// The sign-in that queued it, the only one that fetches it and its extras and tells it how
+    /// it was watched: under any other it waits (`DownloadWait.account`), and nothing watched
+    /// there deletes it. Nil for one saved before downloads had one, until a sign-in is in use.
+    var owner: AccountStore.Account?
     /// The item as it was when queued or its extras last looked it up, with only the chosen
     /// version, for browsing and playing it offline.
     var item: JellyfinItem?
@@ -127,6 +131,18 @@ nonisolated struct DownloadJob: Codable, Identifiable, Sendable {
     }
 
     var seriesId: String? { item?.seriesId }
+
+    /// Whether it's the sign-in's, or saved before downloads had one.
+    func belongs(to account: AccountStore.Account?) -> Bool {
+        owner.map { $0.isSame(as: account) } ?? true
+    }
+
+    /// What it waits for while the sign-in in use isn't its owner: its owner signing in. Nil for
+    /// the sign-in in use's, and one saved before downloads had one.
+    func ownerWait(signedIn account: AccountStore.Account?) -> DownloadWait? {
+        guard let owner, !belongs(to: account) else { return nil }
+        return .account(owner)
+    }
     var isEpisode: Bool { item?.isEpisode ?? (subtitle != nil) }
     /// The version line: a transcode's says what the server made, once it has said.
     var versionLabel: String { transcode?.label ?? versionName }

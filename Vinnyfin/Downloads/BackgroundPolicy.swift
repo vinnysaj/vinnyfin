@@ -11,6 +11,7 @@ extension DownloadWait {
         case .lowDataMode: "They carry on once Low Data Mode is off"
         case .power: "They carry on once your \(Device.name) is charging"
         case .space: "They need more space: open vinnyfin"
+        case .account(let owner): "They carry on once you sign in to \(owner.serverTitle) as \(owner.userName)"
         }
     }
 }

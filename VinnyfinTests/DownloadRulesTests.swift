@@ -709,4 +709,53 @@ struct DownloadProgressTextTests {
         #expect(JobProgress.timeLeft(remaining: 0, bytesPerSecond: 1_000_000) == nil)
     }
 }
+
+struct DownloadOwnerTests {
+    private let alex = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "home", serverName: "Home",
+                                            userId: "u1", userName: "Alex")
+    private let sam = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "home", serverName: "Home",
+                                           userId: "u2", userName: "Sam")
+
+    @Test func aDownloadWaitsForTheSignInThatQueuedIt() {
+        var movie = job()
+        movie.owner = alex
+        #expect(movie.belongs(to: alex))
+        #expect(movie.ownerWait(signedIn: alex) == nil)
+        #expect(movie.ownerWait(signedIn: sam) == .account(alex))
+        #expect(movie.ownerWait(signedIn: nil) == .account(alex))
+        // The same sign-in, with the server at a new address.
+        var moved = alex
+        moved.serverURL = URL(string: "https://home.example.com")!
+        #expect(movie.ownerWait(signedIn: moved) == nil)
+    }
+
+    @Test func oneSavedBeforeDownloadsHadASignInIsTheSignInInUses() throws {
+        var saved = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(job())) as? [String: Any])
+        saved["owner"] = nil
+        let movie = try JSONDecoder().decode(DownloadJob.self, from: JSONSerialization.data(withJSONObject: saved))
+        #expect(movie.owner == nil)
+        #expect(movie.belongs(to: sam))
+        #expect(movie.ownerWait(signedIn: sam) == nil)
+    }
+
+    @Test func waitingForASignInIsntARuleDownloadNowLifts() {
+        let wait = DownloadWait.account(alex)
+        #expect(!wait.isRule)
+        #expect(!wait.isNetwork)
+        #expect(wait.status == "Paused: sign in to Home as Alex")
+    }
+
+    @Test func eachSignInKeepsItsOwnRuleForAShow() throws {
+        let alexs = SmartDownloads.Rule(seriesId: "show", seriesName: "Show", episodesAhead: 3, owner: alex)
+        let sams = SmartDownloads.Rule(seriesId: "show", seriesName: "Show", episodesAhead: nil, owner: sam)
+        #expect(alexs.id != sams.id)
+        #expect(alexs.belongs(to: alex))
+        #expect(!alexs.belongs(to: sam))
+        // A rule saved before rules had a sign-in is the one in use's.
+        let saved = try JSONDecoder().decode(SmartDownloads.Rule.self,
+                                             from: Data(#"{"seriesId":"show","seriesName":"Show","episodesAhead":3}"#.utf8))
+        #expect(saved.owner == nil)
+        #expect(saved.belongs(to: sam))
+    }
+}
 #endif

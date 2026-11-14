@@ -303,7 +303,7 @@ extension AccountStore {
     /// them. The server's copies of their transcodes are deleted before it's told, while the
     /// sign-in still works there.
     func signOut(cancelling downloads: DownloadManager) {
-        downloads.removeUnfinished()
+        if let account { downloads.removeUnfinished(of: account) }
         let transcodes = downloads.transcodes
         signOut { await transcodes.finishCleanups() }
     }

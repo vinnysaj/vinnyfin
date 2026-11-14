@@ -421,11 +421,14 @@ private struct DownloadedRow: View {
     }
 }
 
-/// A show kept downloaded, with its count and a way to change or stop it.
+/// A show kept downloaded, with its count and a way to change or stop it; another sign-in's
+/// says whose it is and can only be stopped.
 private struct SmartRuleRow: View {
     let rule: SmartDownloads.Rule
+    @Environment(SmartDownloads.self) private var smartDownloads
 
     var body: some View {
+        let pausedOwner = smartDownloads.pausedOwner(of: rule)
         HStack(spacing: 12) {
             OfflineArtwork(itemId: rule.seriesId, aspectRatio: 2.0 / 3.0).frame(width: 40)
             VStack(alignment: .leading, spacing: 2) {
@@ -433,14 +436,25 @@ private struct SmartRuleRow: View {
                 Text(rule.episodesAhead.map { "Next \($0) episodes" } ?? "Every unwatched episode")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let pausedOwner {
+                    Label(DownloadWait.account(pausedOwner).status, systemImage: DownloadWait.account(pausedOwner).systemImage)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
-            SmartDownloadMenu(seriesId: rule.seriesId, seriesName: rule.seriesName) {
-                EmptyView()
-            } label: {
-                Image(systemName: "ellipsis.circle").font(.title3)
+            if pausedOwner == nil {
+                SmartDownloadMenu(seriesId: rule.seriesId, seriesName: rule.seriesName) {
+                    EmptyView()
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3)
+                }
+                .accessibilityLabel("Change \(rule.seriesName)")
+            } else {
+                Button("Stop", role: .destructive) { smartDownloads.remove(rule) }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Stop Keeping \(rule.seriesName) Downloaded")
             }
-            .accessibilityLabel("Change \(rule.seriesName)")
         }
         .accessibilityIdentifier("rule.\(rule.seriesName)")
     }

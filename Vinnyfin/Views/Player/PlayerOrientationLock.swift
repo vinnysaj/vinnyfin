@@ -5,24 +5,22 @@ import UIKit
 
 /// Keeps the player in the orientation it's watched in once the picture is wide, so watching
 /// lying on your side doesn't turn it. Turning the phone the other way offers to rotate instead:
-/// the offer shows on its own for a moment, then waits with the controls, and goes away if the
-/// phone turns back. iPhone only; iPad windows can't be locked.
+/// the offer shows on its own for a few seconds, then waits with the controls, and goes away if
+/// the phone turns back. Rotated upright, the player turns with the phone again until the
+/// picture is next wide. iPhone only; iPad windows can't be locked.
 @Observable
 final class PlayerOrientationLock {
     /// What the app's windows may turn to, as the app delegate tells the system.
     private(set) static var allowed = UIInterfaceOrientationMask.all
-    static let announcement: Duration = .seconds(1.5)
+    /// Long enough to notice the offer and reach it, the phone just turned in the hand.
+    static let announcement: Duration = .seconds(4)
 
     /// The orientation the phone is turned to, which the player can rotate to.
     private(set) var offer: UIInterfaceOrientation?
     /// The offer is new and shows on its own, before it waits with the controls.
     private(set) var isAnnouncing = false
 
-    /// Nil turns with the phone, as until the picture is first wide.
-    @ObservationIgnored private var locked: UIInterfaceOrientationMask?
-    @ObservationIgnored private var isWide = false
-    /// iPhone Duo standing half open turns freely, into the folded layout and back.
-    @ObservationIgnored private var isHalfOpen = false
+    @ObservationIgnored private var rule = Rule()
     @ObservationIgnored private var observer: (any NSObjectProtocol)?
     @ObservationIgnored private var announcing: Task<Void, Never>?
 
@@ -36,7 +34,7 @@ final class PlayerOrientationLock {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.deviceTurned() }
         }
-        if let bounds = scene?.effectiveGeometry.coordinateSpace.bounds { isWide = bounds.width > bounds.height }
+        if let bounds = scene?.effectiveGeometry.coordinateSpace.bounds { rule.isWide = bounds.width > bounds.height }
         relock()
     }
 
@@ -47,46 +45,41 @@ final class PlayerOrientationLock {
         self.observer = nil
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         withdraw()
-        locked = nil
+        rule.unlock()
         apply(.all)
     }
 
     func windowChanged(isWide: Bool) {
-        self.isWide = isWide
+        rule.isWide = isWide
         relock()
     }
 
     func hingeChanged(isHalfOpen: Bool) {
-        self.isHalfOpen = isHalfOpen
+        rule.isHalfOpen = isHalfOpen
         relock()
     }
 
-    /// Turns the player the way the phone is turned, and keeps it there.
+    /// Turns the player the way the phone is turned (`Rule.rotate(to:)`).
     func rotate() {
         guard let offer else { return }
         withdraw()
-        locked = Self.mask(for: offer)
-        apply(Self.mask(for: offer), turning: true)
+        apply(rule.rotate(to: offer), turning: true)
     }
 
     // MARK: Following the phone
 
     private func relock() {
         guard observer != nil else { return }
-        if isHalfOpen {
-            locked = nil
-        } else if locked == nil, isWide, let current = scene?.effectiveGeometry.interfaceOrientation {
-            locked = Self.mask(for: current)
-        }
-        apply(locked ?? .all)
+        rule.relock(current: scene?.effectiveGeometry.interfaceOrientation)
+        apply(rule.allowed)
         deviceTurned()
     }
 
     private func deviceTurned() {
-        guard let locked else { return withdraw() }
+        guard rule.locked != nil else { return withdraw() }
         // Flat on a table, or unknown: nothing new about which way is up.
         guard let turned = Self.interfaceOrientation(facing: UIDevice.current.orientation) else { return }
-        if locked.contains(Self.mask(for: turned)) {
+        if !rule.isTurnedAgainst(turned) {
             withdraw()
         } else if offer != turned {
             announce(turned)
@@ -131,11 +124,6 @@ final class PlayerOrientationLock {
         return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
 
-    /// Both orientations of the same shape, so turning the phone end over end still follows.
-    private static func mask(for orientation: UIInterfaceOrientation) -> UIInterfaceOrientationMask {
-        orientation.isLandscape ? .landscape : .portrait
-    }
-
     /// The interface orientation that's upright with the device turned this way. Landscape is
     /// mirrored: a device turned left shows its interface turned right.
     private static func interfaceOrientation(facing device: UIDeviceOrientation) -> UIInterfaceOrientation? {
@@ -145,6 +133,52 @@ final class PlayerOrientationLock {
         case .landscapeLeft: .landscapeRight
         case .landscapeRight: .landscapeLeft
         default: nil
+        }
+    }
+
+    /// What the player is held to, apart from the system that's asked: nothing, so it turns with
+    /// the phone, until the window is first wide, then the shape it's in.
+    nonisolated struct Rule: Equatable {
+        /// Nil turns with the phone.
+        private(set) var locked: UIInterfaceOrientationMask?
+        var isWide = false
+        /// iPhone Duo standing half open turns freely, into the folded layout and back.
+        var isHalfOpen = false
+
+        /// What the windows may turn to.
+        var allowed: UIInterfaceOrientationMask { locked ?? .all }
+
+        /// Holds the window to the shape it's in, `current`, once it's wide.
+        mutating func relock(current: UIInterfaceOrientation?) {
+            if isHalfOpen {
+                locked = nil
+            } else if locked == nil, isWide, let current {
+                locked = Self.mask(for: current)
+            }
+        }
+
+        /// Whether the phone, turned to `turned`, is out of the shape the player is held to.
+        func isTurnedAgainst(_ turned: UIInterfaceOrientation) -> Bool {
+            guard let locked else { return false }
+            return !locked.contains(Self.mask(for: turned))
+        }
+
+        /// The shape to turn the window to, for the phone turned to `orientation`. Turned upright,
+        /// the player turns with the phone again until the window is next wide, as at the start:
+        /// held upright instead, turning the phone sideways for the picture would do nothing.
+        mutating func rotate(to orientation: UIInterfaceOrientation) -> UIInterfaceOrientationMask {
+            let mask = Self.mask(for: orientation)
+            locked = orientation.isPortrait ? nil : mask
+            return mask
+        }
+
+        mutating func unlock() {
+            locked = nil
+        }
+
+        /// Both orientations of the same shape, so turning the phone end over end still follows.
+        private static func mask(for orientation: UIInterfaceOrientation) -> UIInterfaceOrientationMask {
+            orientation.isLandscape ? .landscape : .portrait
         }
     }
 }

@@ -24,6 +24,9 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
     var indexNumber: Int?
     var indexNumberEnd: Int?
     var collectionType: String?
+    /// "FileSystem" or "Remote" for something to play; "Virtual" for an item the server lists from
+    /// its metadata alone, such as an episode with no file yet.
+    var locationType: String?
     var runTimeTicks: Int64?
     var childCount: Int?
     /// For a genre asked for with its item counts: how many movies and shows have it.
@@ -55,7 +58,7 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         case communityRating = "CommunityRating", criticRating = "CriticRating", status = "Status"
         case seriesName = "SeriesName", seriesId = "SeriesId", seasonId = "SeasonId", seasonName = "SeasonName"
         case parentIndexNumber = "ParentIndexNumber", indexNumber = "IndexNumber"
-        case indexNumberEnd = "IndexNumberEnd", collectionType = "CollectionType"
+        case indexNumberEnd = "IndexNumberEnd", collectionType = "CollectionType", locationType = "LocationType"
         case runTimeTicks = "RunTimeTicks", childCount = "ChildCount", movieCount = "MovieCount"
         case seriesCount = "SeriesCount", imageTags = "ImageTags"
         case backdropImageTags = "BackdropImageTags", parentBackdropItemId = "ParentBackdropItemId"

@@ -241,8 +241,8 @@ struct HomeRowsTests {
         #expect(picks.count > 1, "different seeds pick different favorites")
     }
 
-    @Test func startsWithWhatsInProgressAndNew() {
-        #expect(rows(inputs).prefix(4).map(\.id) == ["continueWatching", "nextUp", "recentMovies", "recentShows"])
+    @Test func startsWithWhatToWatchNextAndWhatsNew() {
+        #expect(rows(inputs).prefix(3).map(\.id) == ["continueWatching", "recentMovies", "recentShows"])
     }
 
     @Test func becauseYouWatchedTheLastFewTitles() {
@@ -279,7 +279,7 @@ struct HomeRowsTests {
 
     @Test func leavesOutRowsThereIsNothingFor() {
         let ids = rows(HomeRows.Inputs()).map(\.id)
-        #expect(ids == ["continueWatching", "nextUp", "recentMovies", "recentShows", "newMovies", "topMovies",
+        #expect(ids == ["continueWatching", "recentMovies", "recentShows", "newMovies", "topMovies",
                         "newShows", "topShows", "collections", "recentlyWatched"])
     }
 

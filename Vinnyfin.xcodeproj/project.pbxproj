@@ -89,6 +89,7 @@
 				Jellyfin/Keychain.swift,
 				Jellyfin/ServerSession.swift,
 				Jellyfin/SessionModels.swift,
+				Jellyfin/UpNext.swift,
 			);
 			target = C406F95571791F6DE04B8B0B /* TopShelf */;
 		};
@@ -122,6 +123,7 @@
 				Jellyfin/Keychain.swift,
 				Jellyfin/ServerSession.swift,
 				Jellyfin/SessionModels.swift,
+				Jellyfin/UpNext.swift,
 			);
 			target = D0A1D0A1D0A1D0A1D0A10001 /* DownloadsWidget */;
 		};

@@ -209,8 +209,9 @@ enum ShowEpisodes {
     /// The episode partway through and played last, else the next one to watch: what the show's
     /// page offers to play.
     static func upNext(of show: ShowEntity, session: ServerSession) async throws -> JellyfinItem {
-        let page = try await session.client.nextUp(userId: session.userId, seriesId: show.id, limit: 1)
-        guard let episode = page.items.first else { throw TitleIntentError.caughtUp(show.name) }
+        guard let episode = try await session.client.upNext(seriesId: show.id, userId: session.userId) else {
+            throw TitleIntentError.caughtUp(show.name)
+        }
         return episode
     }
 
@@ -250,7 +251,7 @@ nonisolated enum TitleMatch {
 
 /// Why a playback intent has nothing to play, for Siri to say.
 nonisolated enum TitleIntentError: LocalizedError {
-    /// Nothing comes after the last episode watched, which is how Jellyfin finds the next one.
+    /// Nothing to watch comes after the last episode watched (see `UpNext`).
     case caughtUp(String)
     case nothingAfter(show: String, episode: String)
     case notFound(String)

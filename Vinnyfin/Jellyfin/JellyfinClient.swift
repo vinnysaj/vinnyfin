@@ -186,10 +186,8 @@ nonisolated struct JellyfinClient: Sendable {
     enum ItemSource: Sendable, Hashable {
         /// The library, filtered and sorted.
         case items(ItemQuery)
-        /// What's partway through.
-        case resume
-        /// The next episode of every show in progress.
-        case nextUp
+        /// What to watch next, one entry for each movie or show (see `UpNext`).
+        case upNext
         /// The titles the server finds most like one, best first.
         case similar(toItemId: String)
     }
@@ -200,10 +198,10 @@ nonisolated struct JellyfinClient: Sendable {
             query.startIndex = startIndex
             query.limit = limit
             return try await items(userId: userId, query)
-        case .resume:
-            return try await resumeItems(userId: userId, startIndex: startIndex, limit: limit)
-        case .nextUp:
-            return try await nextUp(userId: userId, startIndex: startIndex, limit: limit)
+        case .upNext:
+            // Worked out whole from several lists, so the first page is the list.
+            guard startIndex == 0 else { return ItemsPage(items: [], totalRecordCount: 0) }
+            return try await upNext(userId: userId, limit: min(limit, UpNext.longestList))
         case .similar(let itemId):
             // The server ranks similar titles without paging them, so the first page is the list.
             guard startIndex == 0 else { return ItemsPage(items: [], totalRecordCount: 0) }
@@ -219,25 +217,53 @@ nonisolated struct JellyfinClient: Sendable {
         try await withOwnVersionFirst(get("Items/\(id)", query: ["userId": userId, "fields": Self.detailFields]), userId: userId)
     }
 
-    /// What's partway through, each as the item library lists show, at the position reached last.
-    func resumeItems(userId: String, startIndex: Int = 0, limit: Int = 20) async throws -> ItemsPage {
-        try await listedItems(in: get("UserItems/Resume", query: [
+    /// What's partway through, the one played last first, in the library or one show, each as
+    /// the item library lists show, at the position reached last.
+    func resumeItems(userId: String, parentId: String? = nil, startIndex: Int = 0, limit: Int = 20) async throws -> ItemsPage {
+        var query = [
             "userId": userId, "startIndex": String(startIndex), "limit": String(limit), "mediaTypes": "Video",
             "fields": Self.listFields + ",MediaSourceCount", "enableUserData": "true", "imageTypeLimit": "1",
             "enableImageTypes": "Primary,Backdrop,Thumb,Logo",
-        ]), userId: userId)
+        ]
+        if let parentId { query["parentId"] = parentId }
+        return try await listedItems(in: get("UserItems/Resume", query: query), userId: userId)
     }
 
-    /// The next episode to watch of every show in progress, or of one show, each as the item
-    /// library lists show, at the position reached last.
-    func nextUp(userId: String, seriesId: String? = nil, startIndex: Int = 0, limit: Int = 20) async throws -> ItemsPage {
+    /// The server's next episode of every show being watched, or of one show: the first not
+    /// watched after the furthest one watched, or for a show nothing of has been watched, its
+    /// first. Without `resumable`, an episode partway through isn't one. Each comes as the item
+    /// library lists show, at the position reached last. `UpNext` decides what's really next.
+    func nextUp(userId: String, seriesId: String? = nil, resumable: Bool = true, startIndex: Int = 0,
+                limit: Int = 20) async throws -> ItemsPage {
         var query = [
             "userId": userId, "startIndex": String(startIndex), "limit": String(limit),
             "fields": Self.listFields + ",MediaSourceCount", "enableUserData": "true", "imageTypeLimit": "1",
-            "enableImageTypes": "Primary,Backdrop,Thumb,Logo", "enableResumable": "true", "disableFirstEpisode": "false",
+            "enableImageTypes": "Primary,Backdrop,Thumb,Logo", "enableResumable": String(resumable), "disableFirstEpisode": "false",
         ]
         if let seriesId { query["seriesId"] = seriesId }
         return try await listedItems(in: get("Shows/NextUp", query: query), userId: userId)
+    }
+
+    /// The episodes finished last, in the library or one show, the latest first.
+    func finishedEpisodes(userId: String, seriesId: String? = nil, limit: Int) async throws -> [JellyfinItem] {
+        var query = ItemQuery(types: ["Episode"])
+        query.parentId = seriesId
+        query.isPlayed = true
+        query.sortBy = "DatePlayed"
+        query.ascending = false
+        query.fields = Self.cardFields
+        query.limit = limit
+        return try await items(userId: userId, query).items
+    }
+
+    /// A show's episodes in order from `episodeId` on, that one first, leaving out those the
+    /// server lists from its metadata without a file.
+    func episodes(from episodeId: String, seriesId: String, userId: String, limit: Int) async throws -> [JellyfinItem] {
+        let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: [
+            "userId": userId, "startItemId": episodeId, "limit": String(limit), "enableUserData": "true", "isMissing": "false",
+            "fields": Self.listFields + ",MediaSourceCount", "imageTypeLimit": "1", "enableImageTypes": "Primary,Backdrop,Thumb,Logo",
+        ])
+        return page.items
     }
 
     // MARK: Versions
@@ -253,7 +279,7 @@ nonisolated struct JellyfinClient: Sendable {
     /// at the position of its version played last. Resume names the version partway through, and
     /// Next Up can name the version of the next episode matching the one played, either of which
     /// can be an alternate version: an item of its own, whose page and playback are that version's.
-    private func listedItems(in page: ItemsPage, userId: String) async throws -> ItemsPage {
+    func listedItems(in page: ItemsPage, userId: String) async throws -> ItemsPage {
         let versioned = page.items.filter { ($0.mediaSourceCount ?? 0) > 1 }
         guard !versioned.isEmpty else { return page }
         let types = Array(Set(versioned.map(\.type)))

@@ -243,13 +243,12 @@ final class SpotlightTitles {
 
         let client = session.client
         let userId = session.userId
-        let resume = try await client.resumeItems(userId: userId, limit: SpotlightPlan.inProgressLimit).items
-        let nextUp = try await client.nextUp(userId: userId, limit: SpotlightPlan.inProgressLimit).items
+        let watching = try await client.upNext(userId: userId, limit: SpotlightPlan.inProgressLimit).items
         try ensureCurrent(key)
-        add(resume + nextUp, priority: SpotlightEntry.watchingPriority)
+        add(watching, priority: SpotlightEntry.watchingPriority)
         let jobs = downloads.jobs
         let downloadedIds = jobs.map(\.itemId)
-        let watchedShowIds = (resume + nextUp).compactMap(\.seriesId) + jobs.compactMap(\.seriesId)
+        let watchedShowIds = watching.compactMap(\.seriesId) + jobs.compactMap(\.seriesId)
 
         switch plan {
         case .everything:

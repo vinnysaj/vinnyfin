@@ -62,8 +62,7 @@ final class HomeFeed {
         }
         do {
             // The banner shows overviews, so the rows it picks from come with them.
-            async let resume = client.resumeItems(userId: userId, limit: HomeRows.rowLength)
-            async let nextUp = client.nextUp(userId: userId, limit: HomeRows.rowLength)
+            async let upNext = client.upNext(userId: userId, limit: HomeRows.rowLength)
             async let movies = seed(HomeRows.recentMovies, fields: JellyfinClient.listFields)
             async let shows = seed(HomeRows.recentShows, fields: JellyfinClient.listFields)
             async let favorites = seed(HomeRows.favorites, fields: JellyfinClient.cardFields)
@@ -71,8 +70,7 @@ final class HomeFeed {
             async let movieGenres = client.genres(userId: userId, types: ["Movie"], withCounts: true)
             async let showGenres = client.genres(userId: userId, types: ["Series"], withCounts: true)
             let seeded: [HomeRow.ID: [JellyfinItem]] = try await [
-                HomeRows.continueWatching.id: resume.items,
-                HomeRows.nextUp.id: nextUp.items,
+                HomeRows.continueWatching.id: upNext.items,
                 HomeRows.recentMovies.id: movies,
                 HomeRows.recentShows.id: shows,
                 HomeRows.favorites.id: favorites,
@@ -94,7 +92,7 @@ final class HomeFeed {
             items = items.filter { stale.contains($0.key) }.merging(seeded) { _, new in new }
             problems = [:]
             self.rows = rows
-            let inProgress = seeded[HomeRows.continueWatching.id, default: []].filter { !$0.isEpisode }
+            let inProgress = seeded[HomeRows.continueWatching.id, default: []].filter { !$0.isEpisode && $0.resumeSeconds != nil }
             featured = Self.featured(from: inProgress + seeded[HomeRows.recentMovies.id, default: []] + seeded[HomeRows.recentShows.id, default: []])
             loadError = nil
             sessionEnded = false

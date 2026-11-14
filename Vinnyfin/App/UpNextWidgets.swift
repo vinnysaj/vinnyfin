@@ -2,51 +2,30 @@
 import Foundation
 import WidgetKit
 
-/// The Continue Watching and Next Up widgets on iPhone, iPad and the Mac: the first titles of
-/// Home's rows of those names, each playing from where it was left. The widget extension asks the
-/// signed-in server for them, with their pictures, each time its timeline reloads; the app has it
-/// reload as a playback stops and as the app leaves the foreground, since what was watched and
-/// who is signed in may have changed.
+/// The Continue Watching widget on iPhone, iPad and the Mac: the first titles of Home's row of
+/// that name, each playing from where it was left. The widget extension asks the signed-in server
+/// for them, with their pictures, each time its timeline reloads; the app has it reload as a
+/// playback stops and as the app leaves the foreground, since what was watched and who is signed
+/// in may have changed.
 nonisolated enum UpNextWidgets {
     /// Which of Home's rows a widget shows.
     enum Row: String, CaseIterable, Sendable {
         case continueWatching
-        case nextUp
 
         /// The widget's kind, by which the app has it reload.
         var kind: String { "net.vinnysaj.vinnyfin.\(rawValue)" }
 
-        var title: String {
-            switch self {
-            case .continueWatching: "Continue Watching"
-            case .nextUp: "Next Up"
-            }
-        }
+        var title: String { "Continue Watching" }
 
-        var description: String {
-            switch self {
-            case .continueWatching: "What you're partway through, to pick up where you left off."
-            case .nextUp: "The next episode of each show you're watching."
-            }
-        }
+        var description: String { "Movies you're partway through and the next episode of each show you're watching." }
 
         /// What the widget says with nothing in the row.
-        var emptyMessage: String {
-            switch self {
-            case .continueWatching: "Nothing partway through."
-            case .nextUp: "No episodes up next."
-            }
-        }
+        var emptyMessage: String { "Nothing to continue." }
 
-        var source: JellyfinClient.ItemSource {
-            switch self {
-            case .continueWatching: .resume
-            case .nextUp: .nextUp
-            }
-        }
+        var source: JellyfinClient.ItemSource { .upNext }
     }
 
-    /// Has the system ask both widgets for their titles again.
+    /// Has the system ask the widgets for their titles again.
     static func reload() {
         for row in Row.allCases {
             WidgetCenter.shared.reloadTimelines(ofKind: row.kind)

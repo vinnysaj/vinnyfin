@@ -30,7 +30,7 @@ nonisolated struct GenreSize: Hashable, Sendable {
     let count: Int
 }
 
-/// Home's rows, in order: what's in progress and what's new first; then, mixed together, rows
+/// Home's rows, in order: what to watch next and what's new first; then, mixed together, rows
 /// from what was watched and liked, the best and newest, and the genres watched most; and at the
 /// end a row for each remaining genre big enough to fill one.
 nonisolated enum HomeRows {
@@ -41,8 +41,8 @@ nonisolated enum HomeRows {
     static let becauseYouWatchedCount = 3
     static let moreLikeFavoritesCount = 2
 
-    static let continueWatching = row("continueWatching", "Continue Watching", .resume, style: .landscape)
-    static let nextUp = row("nextUp", "Next Up", .nextUp, style: .landscape)
+    /// Each movie partway through and each show's next episode, together (see `UpNext`).
+    static let continueWatching = row("continueWatching", "Continue Watching", .upNext, style: .landscape)
     static let recentMovies = row("recentMovies", "Recently Added Movies", .items(.recentlyAddedMovies))
     static let recentShows = row("recentShows", "Recently Added Shows", .items(.recentlyAddedShows))
     static let newMovies = row("newMovies", "New Releases", .items(query(["Movie"], sortBy: "PremiereDate")))
@@ -62,7 +62,7 @@ nonisolated enum HomeRows {
     }), style: .landscape)
 
     /// The rows Home always starts with, filled by its first round of requests.
-    static let leading = [continueWatching, nextUp, recentMovies, recentShows]
+    static let leading = [continueWatching, recentMovies, recentShows]
 
     static func becauseYouWatched(_ title: JellyfinItem) -> HomeRow {
         row("becauseYouWatched.\(title.id)", "Because You Watched \(title.name)", .similar(toItemId: title.id))

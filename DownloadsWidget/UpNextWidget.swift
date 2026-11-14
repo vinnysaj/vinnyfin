@@ -3,14 +3,9 @@ import OSLog
 import SwiftUI
 import WidgetKit
 
-/// What's partway through on the signed-in server, as Home's Continue Watching row lists it.
+/// What to watch next on the signed-in server, as Home's Continue Watching row lists it.
 struct ContinueWatchingWidget: Widget {
     var body: some WidgetConfiguration { upNextConfiguration(.continueWatching) }
-}
-
-/// The next episode of each show in progress, as Home's Next Up row lists it.
-struct NextUpWidget: Widget {
-    var body: some WidgetConfiguration { upNextConfiguration(.nextUp) }
 }
 
 /// A widget for one of Home's rows: each title plays from where it was left.
@@ -46,7 +41,7 @@ nonisolated struct UpNextProvider: TimelineProvider {
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin.widgets", category: "UpNext")
 
     func placeholder(in context: Context) -> UpNextEntry {
-        UpNextEntry(row: row, content: .tiles(Self.samples(row, count: UpNextWidgets.Layout(context.family).count)))
+        UpNextEntry(row: row, content: .tiles(Self.samples(count: UpNextWidgets.Layout(context.family).count)))
     }
 
     func getSnapshot(in context: Context, completion: @escaping @Sendable (UpNextEntry) -> Void) {
@@ -146,13 +141,13 @@ nonisolated struct UpNextProvider: TimelineProvider {
     }
 
     /// Titles shaped like the row's, for the widget gallery and while the widget first loads.
-    private static func samples(_ row: UpNextWidgets.Row, count: Int) -> [UpNextWidgets.Tile] {
+    private static func samples(count: Int) -> [UpNextWidgets.Tile] {
         (1...count).map { number in
             var item = JellyfinItem(id: "placeholder-\(number)", name: "Episode \(number)", type: "Episode")
             item.seriesName = "A Show"
             item.parentIndexNumber = 1
             item.indexNumber = number
-            if row == .continueWatching { item.userData = UserItemData(playedPercentage: Double(20 + 15 * number)) }
+            if number.isMultiple(of: 2) { item.userData = UserItemData(playedPercentage: Double(20 + 15 * number)) }
             return UpNextWidgets.Tile(item)
         }
     }

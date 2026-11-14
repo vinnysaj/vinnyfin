@@ -73,27 +73,27 @@ struct TopShelfContentTests {
     private let newMovie = Samples.item(#"{"Id":"m2","Name":"New Movie","Type":"Movie","ImageTags":{"Primary":"p2"}}"#)
     private let newShow = Samples.item(#"{"Id":"s3","Name":"New Show","Type":"Series","ImageTags":{"Primary":"p3"}}"#)
 
-    @Test func putsWhatsInProgressFirstAndShowsEachTitleOnce() throws {
+    @Test func putsWhatToWatchNextFirstAndShowsEachTitleOnce() throws {
         let content = try #require(TopShelf.content(
-            resume: [movieInProgress, episodeInProgress], nextUp: [episodeInProgress, nextEpisode],
+            upNext: [movieInProgress, episodeInProgress, nextEpisode],
             latestMovies: [movieInProgress, newMovie], latestShows: [newShow], session: session
         ))
-        #expect(content.sections.map(\.title) == ["Up Next", "Recently Added Movies", "Recently Added Shows"])
+        #expect(content.sections.map(\.title) == ["Continue Watching", "Recently Added Movies", "Recently Added Shows"])
         #expect(content.sections.map { $0.items.map(\.identifier) } == [["m1", "e1", "e2"], ["m2"], ["s3"]])
         #expect(content.sections[0].items.allSatisfy { $0.imageShape == .hdtv })
         #expect(content.sections[1].items.allSatisfy { $0.imageShape == .poster })
     }
 
     @Test func namesEpisodesByTheirShowAndShowsHowFarAlongTheyAre() throws {
-        let content = try #require(TopShelf.content(resume: [episodeInProgress, movieInProgress], nextUp: [nextEpisode],
+        let content = try #require(TopShelf.content(upNext: [episodeInProgress, movieInProgress, nextEpisode],
                                                     latestMovies: [], latestShows: [], session: session))
         let items = try #require(content.sections.first?.items)
         #expect(items.map(\.title) == ["Test Show · S01E02", "Big Test Movie", "Other Show · S02E01"])
         #expect(items.map(\.playbackProgress) == [0.25, 0.4, 0])
     }
 
-    @Test func showsEpisodeStillsInUpNextAndPostersForWhatsNew() throws {
-        let content = try #require(TopShelf.content(resume: [episodeInProgress], nextUp: [], latestMovies: [newMovie],
+    @Test func showsEpisodeStillsInContinueWatchingAndPostersForWhatsNew() throws {
+        let content = try #require(TopShelf.content(upNext: [episodeInProgress], latestMovies: [newMovie],
                                                     latestShows: [], session: session))
         let width = Int(TVTopShelfSectionedContent.imageSize(for: .hdtv).width * 2)
         #expect(content.sections[0].items[0].imageURL(for: .screenScale2x)
@@ -104,7 +104,7 @@ struct TopShelfContentTests {
     }
 
     @Test func opensThePageOnSelectAndPlaysOnPlay() throws {
-        let content = try #require(TopShelf.content(resume: [movieInProgress], nextUp: [], latestMovies: [],
+        let content = try #require(TopShelf.content(upNext: [movieInProgress], latestMovies: [],
                                                     latestShows: [newShow], session: session))
         let movie = content.sections[0].items[0]
         #expect(movie.displayAction?.url == AppLink(.open, movieInProgress).url)
@@ -115,14 +115,14 @@ struct TopShelfContentTests {
     }
 
     @Test func leavesOutEmptyRowsAndHasNothingForAnEmptyLibrary() throws {
-        let content = try #require(TopShelf.content(resume: [], nextUp: [], latestMovies: [newMovie], latestShows: [], session: session))
+        let content = try #require(TopShelf.content(upNext: [], latestMovies: [newMovie], latestShows: [], session: session))
         #expect(content.sections.map(\.title) == ["Recently Added Movies"])
-        #expect(TopShelf.content(resume: [], nextUp: [], latestMovies: [], latestShows: [], session: session) == nil)
+        #expect(TopShelf.content(upNext: [], latestMovies: [], latestShows: [], session: session) == nil)
     }
 
     @Test func keepsEachRowToItsSize() throws {
         let movies = (0..<30).map { JellyfinItem(id: "m\($0)", name: "Movie \($0)", type: "Movie") }
-        let content = try #require(TopShelf.content(resume: [], nextUp: [], latestMovies: movies, latestShows: [], session: session))
+        let content = try #require(TopShelf.content(upNext: [], latestMovies: movies, latestShows: [], session: session))
         #expect(content.sections[0].items.count == TopShelf.itemsPerSection)
     }
 }

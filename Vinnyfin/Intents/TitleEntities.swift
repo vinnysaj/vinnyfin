@@ -159,7 +159,7 @@ struct ShowQuery: EntityStringQuery {
     func suggestedEntities() async throws -> [ShowEntity] {
         let session = try ServerTitles.session(accounts)
         var seriesIds: [String] = []
-        for episode in try await session.client.nextUp(userId: session.userId, limit: ServerTitles.suggestionLimit).items {
+        for episode in try await session.client.upNext(userId: session.userId, limit: ServerTitles.suggestionLimit).items {
             if let seriesId = episode.seriesId, !seriesIds.contains(seriesId) { seriesIds.append(seriesId) }
         }
         let shows = seriesIds.isEmpty
@@ -217,8 +217,8 @@ struct EpisodeQuery: EntityStringQuery {
     @MainActor
     func suggestedEntities() async throws -> [EpisodeEntity] {
         let session = try ServerTitles.session(accounts)
-        return try await session.client.nextUp(userId: session.userId, limit: ServerTitles.suggestionLimit).items
-            .map { EpisodeEntity($0, session: session) }
+        return try await session.client.upNext(userId: session.userId, limit: ServerTitles.suggestionLimit).items
+            .filter(\.isEpisode).map { EpisodeEntity($0, session: session) }
     }
 }
 

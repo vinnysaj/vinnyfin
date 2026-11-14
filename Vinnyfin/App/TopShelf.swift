@@ -2,8 +2,8 @@
 import Foundation
 import TVServices
 
-/// Apple TV's Top Shelf, the row above vinnyfin on the Home Screen while it's in the top row: what's
-/// up next, then what's new on the server. The Top Shelf extension asks the server for it whenever
+/// Apple TV's Top Shelf, the row above vinnyfin on the Home Screen while it's in the top row: what to
+/// watch next, then what's new on the server. The Top Shelf extension asks the server for it whenever
 /// the system asks; with nothing to show, the system shows the app's Top Shelf image instead.
 nonisolated enum TopShelf {
     /// How many titles each row holds, and so how many the extension asks the server for.
@@ -15,16 +15,16 @@ nonisolated enum TopShelf {
         TVTopShelfContentProvider.topShelfContentDidChange()
     }
 
-    /// Up Next is what's partway through, then the next episode of each show in progress; the
-    /// newest movies and shows follow. Each title shows once. Nil when there's nothing to show.
-    static func content(resume: [JellyfinItem], nextUp: [JellyfinItem], latestMovies: [JellyfinItem],
+    /// Continue Watching is Home's row of that name (see `UpNext`); the newest movies and shows
+    /// follow. Each title shows once. Nil when there's nothing to show.
+    static func content(upNext: [JellyfinItem], latestMovies: [JellyfinItem],
                         latestShows: [JellyfinItem], session: ServerSession) -> TVTopShelfSectionedContent? {
         var shown = Set<String>()
         func unshown(_ items: [JellyfinItem]) -> [JellyfinItem] {
             Array(items.filter { shown.insert($0.id).inserted }.prefix(itemsPerSection))
         }
         let sections = [
-            section("Up Next", unshown(resume + nextUp), shape: .hdtv, session: session),
+            section("Continue Watching", unshown(upNext), shape: .hdtv, session: session),
             section("Recently Added Movies", unshown(latestMovies), shape: .poster, session: session),
             section("Recently Added Shows", unshown(latestShows), shape: .poster, session: session),
         ].compactMap(\.self)

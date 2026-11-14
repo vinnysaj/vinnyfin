@@ -84,8 +84,7 @@ struct HomeView: View {
             .itemDestinations()
             .refreshable { await load(reshuffling: true) }
             .task { await load() }
-            // A playback started here, from the banner or a card's menu, moved Continue Watching
-            // and Next Up.
+            // A playback started here, from the banner or a card's menu, moved Continue Watching.
             .onChange(of: player.endedPlayback) { Task { await load() } }
         }
     }

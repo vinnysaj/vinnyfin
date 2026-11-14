@@ -379,11 +379,11 @@ final class TVPage: Identifiable {
             if isShow {
                 async let detail = client.item(id: titleId, userId: userId)
                 async let seasons = client.seasons(seriesId: titleId, userId: userId)
-                async let nextUp = client.nextUp(userId: userId, seriesId: titleId, limit: 1)
+                async let nextUp = client.upNext(seriesId: titleId, userId: userId)
                 title = try await detail
                 let found = try await seasons
                 self.seasons = found
-                let upNext = try await nextUp.items.first
+                let upNext = try await nextUp
                 if !picked.isEpisode { next = upNext }
                 if seasonId == nil {
                     seasonId = next?.seasonId ?? found.first { ($0.indexNumber ?? 0) > 0 }?.id ?? found.first?.id
@@ -435,9 +435,9 @@ final class TVPage: Identifiable {
         do {
             if isShow {
                 async let detail = client.item(id: picked.titleId, userId: userId)
-                async let nextUp = client.nextUp(userId: userId, seriesId: picked.titleId, limit: 1)
+                async let nextUp = client.upNext(seriesId: picked.titleId, userId: userId)
                 title = try await detail
-                if let upNext = try await nextUp.items.first { next = upNext }
+                if let upNext = try await nextUp { next = upNext }
                 if let seasonId {
                     let found = try await client.episodes(seriesId: picked.titleId, seasonId: seasonId, userId: userId,
                                                           fields: "Overview,PrimaryImageAspectRatio")

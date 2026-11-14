@@ -359,11 +359,11 @@ struct SeriesView: View {
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
             async let seasons = session.client.seasons(seriesId: series.id, userId: session.userId)
-            async let nextUp = session.client.nextUp(userId: session.userId, seriesId: series.id, limit: 1)
+            async let nextUp = session.client.upNext(seriesId: series.id, userId: session.userId)
             self.detail = try await detail
             let found = try await seasons
             self.seasons = found
-            let next = try await nextUp.items.first
+            let next = try await nextUp
             self.nextUp = next
             if seasonId == nil {
                 seasonId = initialSeasonId ?? next?.seasonId ?? found.first { ($0.indexNumber ?? 0) > 0 }?.id ?? found.first?.id
@@ -401,13 +401,13 @@ struct SeriesView: View {
         guard let session else { return }
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
-            async let nextUp = session.client.nextUp(userId: session.userId, seriesId: series.id, limit: 1)
+            async let nextUp = session.client.upNext(seriesId: series.id, userId: session.userId)
             if let seasonId {
                 let loaded = try await seasonEpisodes(seasonId, session: session)
                 if seasonId == self.seasonId { episodes = loaded }
             }
             self.detail = try await detail
-            self.nextUp = try await nextUp.items.first
+            self.nextUp = try await nextUp
         } catch {
             guard !error.isCancellation else { return }
             loadError = "Couldn't load the show: \(error.localizedDescription)"

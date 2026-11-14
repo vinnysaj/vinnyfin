@@ -190,7 +190,7 @@ final class SmartDownloads {
         -> (episodes: [JellyfinItem], states: [SmartDownloadPlanner.Episode], nextUpId: String?) {
         let episodes = try await client.episodes(seriesId: seriesId, seasonId: nil, userId: userId, fields: "MediaSources")
             .filter { $0.parentIndexNumber != 0 }
-        let nextUp = try await client.nextUp(userId: userId, seriesId: seriesId, limit: 1).items.first?.id
+        let nextUp = try await client.upNext(seriesId: seriesId, userId: userId)?.id
         let states = episodes.map { episode in
             SmartDownloadPlanner.Episode(
                 id: episode.id,

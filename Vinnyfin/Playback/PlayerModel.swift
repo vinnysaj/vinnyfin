@@ -172,6 +172,20 @@ final class PlayerModel: Identifiable {
     private(set) var nextEpisode: JellyfinItem?
     private(set) var segments: [MediaSegment] = []
     private(set) var rate: Float = 1
+    /// A press held on the picture plays at `holdSpeed` until it lets go, `rate` staying chosen.
+    private(set) var isHoldingSpeed = false
+    /// Seconds later than the file times them that this title's subtitles show, earlier when
+    /// negative, as the viewer set it (`SubtitleOffsets`).
+    private(set) var subtitleOffset: Double = 0
+    /// Boost Dialogue and Reduce Loud Sounds, for every playback on this device.
+    private(set) var sound = SoundOptions.saved()
+    /// Whether the stream playing carries `sound`: a stream whose sound AVPlayer decodes, as a
+    /// transcode's, can't.
+    private(set) var soundShapingState = AudioShapingState.off
+    /// How loud the player plays, under the system's volume, from its keys.
+    private(set) var volume: PlayerVolume
+    /// Counts the seeks another device or the group asked for, which the timeline shows.
+    private(set) var seeksFromElsewhere = 0
     /// Seconds left before the next episode starts by itself; nil when it isn't counting down.
     private(set) var upNextCountdown: Int?
     /// A word about the playback, such as a move to a lower quality, shown for a few seconds.
@@ -221,6 +235,11 @@ final class PlayerModel: Identifiable {
     /// The system draws the subtitles, into the picture outside the app, and the overlay none.
     @ObservationIgnored private var systemDrawsSubtitles = false
     @ObservationIgnored private var commandTargets: [(MPRemoteCommand, Any)] = []
+    /// The commands only the player serves, which no one else enables or disables.
+    @ObservationIgnored private var ownedCommands: [MPRemoteCommand] = []
+    @ObservationIgnored private let subtitleOffsets = SubtitleOffsets()
+    /// The subtitle track last shown, which the subtitle key turns back on.
+    @ObservationIgnored private var lastSubtitle: Int?
     @ObservationIgnored private var appliedSubtitlePreference = false
     /// The engine's load returned, so its track lists are complete.
     @ObservationIgnored private var isLoaded = false
@@ -270,6 +289,7 @@ final class PlayerModel: Identifiable {
         self.settings = settings
         self.downloadedEpisode = downloadedEpisode
         title = request.title
+        volume = PlayerVolume(level: engine.volume)
     }
 
     var isTranscoding: Bool { current?.isTranscode ?? false }
@@ -439,6 +459,9 @@ final class PlayerModel: Identifiable {
         selectedAudio = nil
         selectedSubtitle = nil
         cues = []
+        isHoldingSpeed = false
+        subtitleOffset = subtitleOffsets.offset(for: resolved.historyKey)
+        engine.setSoftwareSubtitleDelay(subtitleOffset)
         clock.time = resolved.startPosition ?? 0
         clock.sourceTime = resolved.startPosition ?? 0
         clock.buffered = 0
@@ -459,6 +482,7 @@ final class PlayerModel: Identifiable {
         var options = LoadOptions()
         options.externalSubtitles = resolved.externalSubtitles
         options.matchContentEnabled = settings.matchContent
+        options.audioShaping = sound.shaping
         let beganPaused = startsPaused
         options.autoplay = !beganPaused && (sharing?.startsByItself(resolved.item?.id) ?? true)
         #if os(iOS) || os(macOS)
@@ -663,6 +687,8 @@ final class PlayerModel: Identifiable {
         }
         .store(in: &subscriptions)
         engine.clock.$bufferedPosition.dropFirst().receive(on: RunLoop.main).sink { [weak self] position in self?.clock.buffered = position }
+            .store(in: &subscriptions)
+        engine.$audioShapingState.receive(on: RunLoop.main).sink { [weak self] state in self?.soundShapingState = state }
             .store(in: &subscriptions)
         #if os(iOS) || os(macOS)
         // AirPlay, or a screen plugged in, shows the picture where the overlay can't go.
@@ -976,6 +1002,13 @@ final class PlayerModel: Identifiable {
         seek(to: target)
     }
 
+    /// Seeks to where a scan was let go, or the chapter's start it was let go at
+    /// (`ScrubMotion.landing`).
+    func commitScan() {
+        guard let target = scrubbing.finishScan(chapterStarts: chapters.map(\.start)) else { return }
+        seek(to: target)
+    }
+
     /// Drops the position chosen, leaving playback where it is.
     func cancelScrub() {
         scrubbing.finish()
@@ -984,9 +1017,107 @@ final class PlayerModel: Identifiable {
     /// Paused, the speed waits for the next play, here and in a group.
     func setRate(_ newRate: Float) {
         rate = newRate
+        isHoldingSpeed = false
         if isPlaying, sharing?.share(.rate(newRate)) == true { return }
         engine.setRate(newRate)
         nowPlayingChanged()
+    }
+
+    // MARK: Speed held, subtitle timing, sound and volume
+
+    /// The speed a press held on the picture plays at.
+    static let holdSpeed: Float = 2
+
+    /// Plays at `holdSpeed` while a press is held on the picture, leaving the speed chosen as it
+    /// was. Not while paused, already as fast, or watched together, where the group keeps one
+    /// speed for everyone. Says whether it did.
+    @discardableResult
+    func beginHoldingSpeed() -> Bool {
+        guard status == .playing, sharing == nil, !isHoldingSpeed, rate < Self.holdSpeed else { return false }
+        isHoldingSpeed = true
+        engine.setRate(Self.holdSpeed)
+        return true
+    }
+
+    /// Back to the speed chosen, as the press lets go.
+    func endHoldingSpeed() {
+        guard isHoldingSpeed else { return }
+        isHoldingSpeed = false
+        engine.setRate(rate)
+    }
+
+    /// Shows this title's subtitles `seconds` later than the file times them, earlier when
+    /// negative, here and in software Picture in Picture, and keeps the timing for the title.
+    func setSubtitleOffset(_ seconds: Double) {
+        let offset = SubtitleOffsets.rounded(seconds)
+        subtitleOffset = offset
+        engine.setSoftwareSubtitleDelay(offset)
+        if let title = current?.historyKey { subtitleOffsets.set(offset, for: title) }
+    }
+
+    /// Moves the subtitles a step later, or earlier.
+    func shiftSubtitles(later: Bool) {
+        setSubtitleOffset(subtitleOffset + (later ? SubtitleOffsets.step : -SubtitleOffsets.step))
+    }
+
+    /// The time the subtitle overlay shows the cues of: the frame on screen's, less the offset.
+    var subtitleTime: Double { clock.sourceTime - subtitleOffset }
+
+    func setBoostsDialogue(_ on: Bool) {
+        var sound = sound
+        sound.boostsDialogue = on
+        applySound(sound)
+    }
+
+    func setReducesLoudSounds(_ on: Bool) {
+        var sound = sound
+        sound.reducesLoudSounds = on
+        applySound(sound)
+    }
+
+    /// Shapes the sound playing from here on, and every playback's after it. The engine rebuilds
+    /// the stream at the playhead to do it, holding the picture a moment.
+    private func applySound(_ options: SoundOptions) {
+        guard options != sound else { return }
+        sound = options
+        options.save()
+        engine.setAudioShaping(options.shaping)
+    }
+
+    /// A step louder or quieter.
+    func changeVolume(up: Bool) {
+        volume.change(up: up)
+        engine.volume = volume.output
+    }
+
+    func toggleMute() {
+        volume.toggleMute()
+        engine.volume = volume.output
+    }
+
+    /// Turns the subtitles off, or back on: the track last shown, else the one the subtitle
+    /// settings would choose, else the first that isn't only for foreign lines.
+    func toggleSubtitles() {
+        if let selectedSubtitle {
+            lastSubtitle = selectedSubtitle
+            chooseSubtitle(nil)
+            return
+        }
+        let ids = subtitleOptions.map(\.id)
+        if let last = lastSubtitle, ids.contains(last) {
+            chooseSubtitle(last)
+        } else if !isTranscoding, let preferred = preferredSubtitle(from: engine.subtitleTracks.map(TrackChooser.Candidate.init)) {
+            chooseSubtitle(preferred)
+        } else if let first = subtitleOptions.first(where: { !$0.title.contains("Forced") }) ?? subtitleOptions.first {
+            chooseSubtitle(first.id)
+        }
+    }
+
+    /// Moves to `seconds` as another device asks, through Jellyfin's remote control, and shows
+    /// it on the timeline.
+    func seekAsAskedElsewhere(to seconds: Double) {
+        seeksFromElsewhere += 1
+        seek(to: seconds)
     }
 
     // A transcode's choices are the menus' until its new stream starts, so a second choice made
@@ -1158,6 +1289,7 @@ final class PlayerModel: Identifiable {
         }
         let target = max(0, duration > 0 ? min(seconds, duration - 1) : seconds)
         clock.time = target
+        seeksFromElsewhere += 1
         connectionWatch.restart()
         nowPlayingChanged()
         await engine.seek(to: target, exact: true)
@@ -1425,6 +1557,8 @@ final class PlayerModel: Identifiable {
         if lease.holder == id {
             lease.holder = nil
             engine.stop()
+            // Muted here only: the next playback plays at the level it had.
+            if volume.isMuted { engine.volume = volume.level }
         }
         onClose?()
     }
@@ -1683,38 +1817,73 @@ final class PlayerModel: Identifiable {
         #endif
     }
 
+    /// Where the episode and speed commands go: beside the transport's, or on the software path,
+    /// whose transport the engine serves from the shared center itself, there beside it.
+    private var episodeCommandCenter: MPRemoteCommandCenter? {
+        #if os(iOS) || os(tvOS)
+        commandCenter ?? (engine.softwareNowPlayingActive ? MPRemoteCommandCenter.shared() : nil)
+        #else
+        commandCenter
+        #endif
+    }
+
     private func registerRemoteCommands() {
         unregisterRemoteCommands()
-        guard let center = commandCenter else { return }
         func add(_ command: MPRemoteCommand, _ handler: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
             command.isEnabled = true
             commandTargets.append((command, command.addTarget(handler: handler)))
         }
-        add(center.togglePlayPauseCommand) { [weak self] _ in self?.togglePlayPause(); return .success }
-        add(center.playCommand) { [weak self] _ in self?.play(); return .success }
-        add(center.pauseCommand) { [weak self] _ in self?.pause(); return .success }
-        center.skipForwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
-        center.skipBackwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
-        // Siri asks for its own interval ("skip ahead two minutes"); the buttons for the preferred one.
-        add(center.skipForwardCommand) { [weak self] event in
-            self?.skip(by: (event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval)
+        if let center = commandCenter {
+            add(center.togglePlayPauseCommand) { [weak self] _ in self?.togglePlayPause(); return .success }
+            add(center.playCommand) { [weak self] _ in self?.play(); return .success }
+            add(center.pauseCommand) { [weak self] _ in self?.pause(); return .success }
+            center.skipForwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
+            center.skipBackwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
+            // Siri asks for its own interval ("skip ahead two minutes"); the buttons for the preferred one.
+            add(center.skipForwardCommand) { [weak self] event in
+                self?.skip(by: (event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval)
+                return .success
+            }
+            add(center.skipBackwardCommand) { [weak self] event in
+                self?.skip(by: -((event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval))
+                return .success
+            }
+            #if os(tvOS)
+            // A TV remote's held fast-forward and rewind, through HDMI-CEC, scan as the Siri Remote's
+            // held clickpad does, and land where they're let go.
+            add(center.seekForwardCommand) { [weak self] event in self?.seekCommand(event, forward: true) ?? .commandFailed }
+            add(center.seekBackwardCommand) { [weak self] event in self?.seekCommand(event, forward: false) ?? .commandFailed }
+            #endif
+            add(center.changePlaybackPositionCommand) { [weak self] event in
+                guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+                self?.seekAsAskedElsewhere(to: event.positionTime)
+                return .success
+            }
+        }
+        guard let center = episodeCommandCenter else { return }
+        // The speeds the Speed panel offers, for Siri and the remotes that list them.
+        center.changePlaybackRateCommand.supportedPlaybackRates = PlaybackSpeed.choices.map { NSNumber(value: $0) }
+        add(center.changePlaybackRateCommand) { [weak self] event in
+            guard let event = event as? MPChangePlaybackRateCommandEvent else { return .commandFailed }
+            self?.setRate(PlaybackSpeed.nearest(to: event.playbackRate))
             return .success
         }
-        add(center.skipBackwardCommand) { [weak self] event in
-            self?.skip(by: -((event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval))
+        ownedCommands = [center.changePlaybackRateCommand]
+        // An episode's neighbours, for a headphone's double and triple press, Siri's "next
+        // episode" and Control Center. The episode after it is found once it plays, so the
+        // command asks for it when it comes.
+        guard item?.isEpisode == true else { return }
+        add(center.nextTrackCommand) { [weak self] _ in
+            guard let self, self.nextEpisode != nil else { return .noSuchContent }
+            Task { await self.playNextEpisode() }
             return .success
         }
-        #if os(tvOS)
-        // A TV remote's held fast-forward and rewind, through HDMI-CEC, scan as the Siri Remote's
-        // held clickpad does, and land where they're let go.
-        add(center.seekForwardCommand) { [weak self] event in self?.seekCommand(event, forward: true) ?? .commandFailed }
-        add(center.seekBackwardCommand) { [weak self] event in self?.seekCommand(event, forward: false) ?? .commandFailed }
-        #endif
-        add(center.changePlaybackPositionCommand) { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self?.seek(to: event.positionTime)
+        add(center.previousTrackCommand) { [weak self] _ in
+            guard let self else { return .commandFailed }
+            Task { await self.playPreviousEpisode() }
             return .success
         }
+        ownedCommands += [center.nextTrackCommand, center.previousTrackCommand]
     }
 
     #if os(tvOS)
@@ -1722,7 +1891,7 @@ final class PlayerModel: Identifiable {
         guard let event = event as? MPSeekCommandEvent else { return .commandFailed }
         switch event.type {
         case .beginSeeking: beginScan(forward: forward)
-        case .endSeeking: if scrubbing.isScanning { commitScrub() }
+        case .endSeeking: if scrubbing.isScanning { commitScan() }
         @unknown default: return .commandFailed
         }
         return .success
@@ -1732,6 +1901,10 @@ final class PlayerModel: Identifiable {
     private func unregisterRemoteCommands() {
         for (command, target) in commandTargets { command.removeTarget(target) }
         commandTargets.removeAll()
+        // Commands only the player serves go grey with nothing to serve them, as the engine
+        // leaves those it served.
+        for command in ownedCommands { command.isEnabled = false }
+        ownedCommands.removeAll()
     }
 
     // MARK: Helpers

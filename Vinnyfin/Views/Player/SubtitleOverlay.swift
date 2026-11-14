@@ -2,7 +2,8 @@ import AetherEngine
 import MediaAccessibility
 import SwiftUI
 
-/// Draws the cues showing at the frame on screen: styled text near the bottom (or where the
+/// Draws the cues showing at the frame on screen, as the title's subtitle timing moves them
+/// (`PlayerModel.subtitleOffset`): styled text near the bottom (or where the
 /// cue asks), and picture subtitles (Blu-ray, DVD, DVB) where they were authored. Lines showing
 /// at once stack rather than print over each other (`SubtitleLayout`). Text takes what the
 /// person chose in the system's caption style (Subtitles & Captioning › Style), on top of the
@@ -20,7 +21,7 @@ struct SubtitleOverlay: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let time = model.clock.sourceTime
+            let time = model.subtitleTime
             let active = model.cues.filter { $0.startTime <= time && time < $0.endTime }
             let videoRect = Self.fittedRect(content: videoSize ?? geometry.size, in: geometry.size)
             let clearAbove = coveredBelow.map { $0 - geometry.frame(in: .global).minY }

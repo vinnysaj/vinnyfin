@@ -125,7 +125,7 @@ final class PlayerCoordinator {
         case .unpause: model.play()
         case .togglePause: model.togglePlayPause()
         case .stop: stopRequest = model.id
-        case .seek(let seconds): model.seek(to: seconds)
+        case .seek(let seconds): model.seekAsAskedElsewhere(to: seconds)
         case .skip(let seconds): model.skip(by: seconds)
         case .nextEpisode: Task { await model.playNextEpisode() }
         case .previousEpisode: Task { await model.playPreviousEpisode() }

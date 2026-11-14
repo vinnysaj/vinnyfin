@@ -294,7 +294,7 @@ private struct FullOverview: View {
 }
 #endif
 
-/// The cast, with their pictures.
+/// The cast, with their pictures, each leading to the movies and shows they're in.
 struct CastShelf: View {
     let people: [Person]
     @Environment(\.session) private var session
@@ -304,18 +304,23 @@ struct CastShelf: View {
         let cast = people.filter { $0.type == "Actor" || $0.type == "GuestStar" }.prefix(20)
         if !cast.isEmpty {
             Shelf(title: "Cast", items: Array(cast), cardWidth: castWidth) { person in
-                VStack(spacing: 6) {
-                    Artwork(url: session?.person(person), aspectRatio: 1, cornerRadius: castWidth / 2, placeholder: "person.fill")
-                    Text(person.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
-                    if let role = person.role, !role.isEmpty {
-                        Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
+                NavigationLink(value: BrowseList.titles(with: person)) {
+                    VStack(spacing: 6) {
+                        Artwork(url: session?.person(person), aspectRatio: 1, cornerRadius: castWidth / 2, placeholder: "person.fill")
+                            .liftsUnderFocus()
+                        Text(person.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
+                        if let role = person.role, !role.isEmpty {
+                            Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
+                        }
                     }
+                    .multilineTextAlignment(.center)
+                    .contentShape(.rect)
                 }
-                .multilineTextAlignment(.center)
+                .buttonStyle(.artwork)
+                .foregroundStyle(.primary)
                 .accessibilityElement(children: .combine)
-                #if os(tvOS)
-                .focusable()
-                #endif
+                .accessibilityHint("Shows the movies and shows they're in")
+                .accessibilityIdentifier("cast.\(person.name)")
             }
         }
     }

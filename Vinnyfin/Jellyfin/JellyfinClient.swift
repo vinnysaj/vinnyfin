@@ -129,6 +129,8 @@ nonisolated struct JellyfinClient: Sendable {
         var isPlayed: Bool?
         var isFavorite: Bool?
         var genres: [String] = []
+        /// Only titles with these people in them.
+        var personIds: [String] = []
         /// Only titles whose sort name comes before this. The server keeps sort names lowercased,
         /// without accents or a leading article, and compares them without regard to case.
         var nameLessThan: String?
@@ -170,6 +172,7 @@ nonisolated struct JellyfinClient: Sendable {
         if let played = query.isPlayed { parameters["isPlayed"] = String(played) }
         if query.isFavorite == true { parameters["isFavorite"] = "true" }
         if !query.genres.isEmpty { parameters["genres"] = query.genres.joined(separator: "|") }
+        if !query.personIds.isEmpty { parameters["personIds"] = query.personIds.joined(separator: ",") }
         if let nameLessThan = query.nameLessThan { parameters["nameLessThan"] = nameLessThan }
         return try await get("Items", query: parameters)
     }

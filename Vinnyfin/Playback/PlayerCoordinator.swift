@@ -46,7 +46,8 @@ final class PlayerCoordinator {
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "player")
 
     /// The player covers the app's screens, as it does on iPhone, iPad and Apple TV while it's
-    /// presented. On the Mac and Vision Pro it plays in a window of its own.
+    /// presented, but for while it's put away in Picture in Picture. On the Mac and Vision Pro it
+    /// plays in a window of its own.
     var coversScreens: Bool {
         #if os(macOS) || os(visionOS)
         false

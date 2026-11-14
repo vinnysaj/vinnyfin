@@ -153,6 +153,17 @@ enum JobStatus: Equatable {
     }
 }
 
+/// An icon just before its words, as in a line of text. A list row's own labels set their icons in
+/// a column as wide as a row's leading icon, which leaves a gap in a caption under a title.
+struct InlineLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            configuration.icon
+            configuration.title
+        }
+    }
+}
+
 /// How a job is doing, in words, with the controls that apply to it. Looked at again as its
 /// retry comes due, and a second later, as the countdown to it ends then: an update can come a
 /// moment early, and a schedule's first update gives its first date, not the time.
@@ -169,6 +180,7 @@ struct JobStatusLine: View {
                               fileInHand: downloads.downloadingJobId,
                               waitsOn: downloads.jobs.filter { downloads.fileInHandWaitsOn.contains($0.id) }, now: .now))
         }
+        .labelStyle(InlineLabelStyle())
     }
 
     @ViewBuilder private func line(_ status: JobStatus) -> some View {
@@ -231,7 +243,8 @@ struct JobStatusLine: View {
     }
 }
 
-/// How far a download has got, and while its bytes arrive steadily, how long the rest will take.
+/// How far a download has got, in bytes, and while they arrive steadily, how long the rest will
+/// take. The ring beside it in Downloads draws the fraction.
 struct JobProgress: View {
     @Environment(DownloadManager.self) private var downloads
     let job: DownloadJob
@@ -251,21 +264,13 @@ struct JobProgress: View {
         let isEstimate = job.transcode != nil && job.totalBytes == nil
         let timeLeft = isEstimate || !isSteady(at: .now) ? nil
             : total.flatMap { Self.timeLeft(remaining: $0 - received, bytesPerSecond: speed) }
-        VStack(alignment: .leading, spacing: 4) {
-            if let total, total > 0 {
-                ProgressView(value: Double(min(received, total)), total: Double(total))
-            } else {
-                // The size is known once the server answers the first request.
-                ProgressView(value: 0)
+        Text([Self.amount(received: received, total: total, isEstimate: isEstimate), timeLeft].compactMap(\.self)
+            .joined(separator: " · "))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .onChange(of: isArriving, initial: true) { _, arriving in
+                arrivingSince = arriving ? .now : nil
             }
-            Text([Self.amount(received: received, total: total, isEstimate: isEstimate), timeLeft].compactMap(\.self)
-                .joined(separator: " · "))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-        }
-        .onChange(of: isArriving, initial: true) { _, arriving in
-            arrivingSince = arriving ? .now : nil
-        }
     }
 
     private func isSteady(at now: Date) -> Bool {

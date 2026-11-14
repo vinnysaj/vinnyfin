@@ -1,166 +1,223 @@
 import Combine
 import SwiftUI
 
+/// Settings: the account the app is signed in with, then a page for each kind of setting. On the
+/// Mac, a pane for each in the Settings window.
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AccountStore.self) private var accounts
-    @Environment(SessionSocket.self) private var socket
     @Environment(\.dismiss) private var dismiss
-    #if !os(tvOS)
-    @Environment(DownloadManager.self) private var downloads
-    @Environment(DownloadNotifications.self) private var downloadNotifications
-    @Environment(SpotlightTitles.self) private var spotlight
-    @Environment(\.openURL) private var openURL
-    #endif
-    @State private var confirmingSignOut = false
+    /// Opened as a sheet, which Done closes, rather than as a tab.
+    @Environment(\.isPresented) private var isPresented
 
     var body: some View {
-        @Bindable var settings = settings
+        #if os(macOS)
+        TabView {
+            Tab("General", systemImage: "gearshape") {
+                SettingsForm("General") {
+                    AccountSection()
+                    AppearanceSection()
+                }
+            }
+            ForEach(SettingsPage.allCases) { page in
+                Tab(page.paneTitle, systemImage: page.systemImage) { page.content }
+            }
+        }
+        .frame(width: 600)
+        .frame(minHeight: 460, idealHeight: 560)
+        // The Mac's Settings window is a window of its own, outside the root view.
+        .preferredColorScheme(settings.appearance.colorScheme)
+        #else
         NavigationStack {
-            Form {
-                account
+            SettingsForm("Settings", isFirstPage: true) {
+                if let account = accounts.account {
+                    Section {
+                        NavigationLink {
+                            SettingsForm("Account") { AccountSection() }
+                        } label: {
+                            AccountSummary(account: account)
+                        }
+                        .accessibilityIdentifier("settings.account")
+                    }
+                }
                 #if !os(visionOS)
-                Section {
-                    SettingPicker("Appearance", selection: $settings.appearance) {
-                        ForEach(AppSettings.Appearance.allCases) { Text($0.label).tag($0) }
-                    }
-                    .accessibilityIdentifier("settings.appearance")
-                }
+                AppearanceSection()
                 #endif
                 Section {
-                    SettingPicker("Streaming Quality", selection: $settings.streamingQuality) {
-                        ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
+                    ForEach(SettingsPage.allCases) { page in
+                        NavigationLink {
+                            page.content
+                        } label: {
+                            Label(page.title, systemImage: page.systemImage)
+                        }
+                        .accessibilityIdentifier("settings.\(page.rawValue)")
                     }
-                    .accessibilityIdentifier("settings.streamingQuality")
-                    learnedLimit
-                    Toggle("Transcode When No Version Fits", isOn: $settings.allowTranscoding)
-                    Toggle("Adaptive Quality", isOn: $settings.adaptiveQuality)
-                        .accessibilityIdentifier("settings.adaptiveQuality")
-                    Toggle("Play the Next Episode Automatically", isOn: $settings.autoplayNextEpisode)
-                    Toggle("Offer to Skip Intros and Credits", isOn: $settings.showSkipButtons)
-                    #if os(tvOS)
-                    Toggle("Match Frame Rate and Dynamic Range", isOn: $settings.matchContent)
-                    #endif
-                } header: {
-                    Text("Playback")
-                } footer: {
-                    Text("Plays the best version up to this quality\(displayNote) as it is, and with Adaptive Quality, a smaller one when the connection can't keep up.")
-                }
-                Section {
-                    SettingPicker("Audio Language", selection: $settings.audioLanguage) {
-                        Text("The Video's Default").tag("")
-                        ForEach(AppSettings.languages, id: \.code) { Text($0.name).tag($0.code) }
-                    }
-                    SettingPicker("Show Subtitles", selection: $settings.subtitleMode) {
-                        ForEach(AppSettings.SubtitleMode.allCases) { Text($0.label).tag($0) }
-                    }
-                    SettingPicker("Subtitle Language", selection: $settings.subtitleLanguage) {
-                        ForEach(AppSettings.languages, id: \.code) { Text($0.name).tag($0.code) }
-                    }
-                    SettingPicker("Subtitle Size", selection: $settings.subtitleScale) {
-                        Text("Small").tag(0.8)
-                        Text("Standard").tag(1.0)
-                        Text("Large").tag(1.25)
-                        Text("Extra Large").tag(1.5)
-                    }
-                } header: {
-                    Text("Audio and Subtitles")
-                } footer: {
-                    AccessibleMediaNote()
-                }
-                #if !os(tvOS)
-                Section {
-                    SettingPicker("Download Quality", selection: $settings.downloadQuality) {
-                        ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
-                    }
-                    .accessibilityIdentifier("settings.downloadQuality")
-                    Toggle("Transcode Downloads When No Version Fits", isOn: $settings.transcodeDownloads)
-                        .accessibilityIdentifier("settings.transcodeDownloads")
-                    Toggle("Delete Watched Episodes", isOn: $settings.deleteWatchedEpisodes)
-                        .accessibilityIdentifier("settings.deleteWatched")
-                    Stepper("Smart Downloads Keep \(settings.smartDownloadCount) Episodes", value: $settings.smartDownloadCount, in: 1...50)
-                    #if os(iOS) || os(visionOS)
-                    NavigationLink("Diagnostics") { DiagnosticsView() }
-                        .accessibilityIdentifier("settings.diagnostics")
-                    #endif
-                } header: {
-                    Text("Downloads")
-                } footer: {
-                    Text("Downloads take the best version up to this quality, or when every version is bigger, the smallest, unless the server is to make one at it, which takes longer.")
-                }
-                whenToDownload
-                storage
-                notifications
-                spotlightSection
-                #endif
-                Section("About") {
-                    LabeledContent("Version", value: Self.version)
-                    NavigationLink("Acknowledgements") { AcknowledgementsView() }
-                    Text("vinnyfin only talks to your Jellyfin server, and to your iCloud, which keeps your servers and most of these settings the same on all your devices. No analytics, no tracking, no accounts.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Text("vinnyfin isn't made by or affiliated with the Jellyfin project. Jellyfin is a trademark of its owners; Dolby, Dolby Atmos, Dolby Vision and DTS are trademarks of their owners.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("settings.notAffiliated")
                 }
             }
-            .formStyle(.grouped)
-            .screenTitle("Settings")
-            #if os(tvOS)
-            .toggleStyle(SettingToggleStyle())
-            // Rows fade out as they scroll up under the sidebar's tab in the top corner.
-            .mask {
-                VStack(spacing: 0) {
-                    Color.clear.frame(height: Self.tabBottom)
-                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                        .frame(height: Self.fadeHeight)
-                    Color.black
-                }
-                .ignoresSafeArea()
-            }
-            #endif
-            #if os(macOS)
-            // The Mac's Settings window is a window of its own, outside the root view.
-            .preferredColorScheme(settings.appearance.colorScheme)
-            #endif
             #if os(iOS) || os(visionOS)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                if isPresented {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                    }
                 }
             }
             #endif
+        }
+        #endif
+    }
+
+    static var version: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+}
+
+/// The kinds of setting, each a page of its own, or on the Mac a pane.
+private enum SettingsPage: String, CaseIterable, Identifiable {
+    case playback
+    case audioAndSubtitles
+    #if !os(tvOS)
+    case downloads
+    case notificationsAndSpotlight
+    #endif
+    case about
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .playback: "Playback"
+        case .audioAndSubtitles: "Audio and Subtitles"
+        #if !os(tvOS)
+        case .downloads: "Downloads and Storage"
+        case .notificationsAndSpotlight: "Notifications and Spotlight"
+        #endif
+        case .about: "About"
         }
     }
 
-    /// The bitrate Adaptive Quality learned this device's connection carries, while it holds
-    /// streams to it.
-    @ViewBuilder private var learnedLimit: some View {
-        if settings.adaptiveQuality, let limit = settings.learnedQuality.limit {
-            LabeledContent {
-                Button("Reset") { settings.learnedQuality.reset() }
-                    .accessibilityIdentifier("settings.resetLearnedQuality")
-            } label: {
-                Text("Limited to \(QualityLearning.label(forBitrate: limit)) after buffering on this \(Device.name)")
-            }
-            .accessibilityIdentifier("settings.learnedQuality")
+    /// The name on its pane's button in the Mac's Settings window, which has room for a word or two.
+    var paneTitle: String {
+        switch self {
+        #if !os(tvOS)
+        case .downloads: "Downloads"
+        case .notificationsAndSpotlight: "Notifications"
+        #endif
+        default: title
         }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .playback: "play.rectangle"
+        case .audioAndSubtitles: "captions.bubble"
+        #if !os(tvOS)
+        case .downloads: "arrow.down.circle"
+        case .notificationsAndSpotlight: "bell"
+        #endif
+        case .about: "info.circle"
+        }
+    }
+
+    @ViewBuilder var content: some View {
+        switch self {
+        case .playback: SettingsForm(title) { PlaybackSettings() }
+        case .audioAndSubtitles: SettingsForm(title) { AudioAndSubtitleSettings() }
+        #if !os(tvOS)
+        case .downloads: SettingsForm(title) { DownloadSettings() }
+        case .notificationsAndSpotlight: SettingsForm(title) { NotificationAndSpotlightSettings() }
+        #endif
+        case .about: SettingsForm(title) { AboutSettings() }
+        }
+    }
+}
+
+/// A page of settings. Apple TV heads it with its title, as its bar shows none; there the sidebar
+/// names the first page.
+private struct SettingsForm<Content: View>: View {
+    let title: String
+    var isFirstPage = false
+    @ViewBuilder let content: Content
+
+    init(_ title: String, isFirstPage: Bool = false, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.isFirstPage = isFirstPage
+        self.content = content()
+    }
+
+    var body: some View {
+        Form {
+            #if os(tvOS)
+            if !isFirstPage {
+                Section {} header: {
+                    Text(title).font(.title2.bold()).foregroundStyle(.primary).textCase(nil)
+                }
+            }
+            #endif
+            content
+        }
+        .formStyle(.grouped)
+        .screenTitle(title)
+        #if os(tvOS)
+        .toggleStyle(SettingToggleStyle())
+        // Rows fade out as they scroll up under the sidebar's tab in the top corner, which shows
+        // over the first page only.
+        .mask {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: isFirstPage ? Self.tabBottom : 0)
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                    .frame(height: isFirstPage ? Self.fadeHeight : 0)
+                Color.black
+            }
+            .ignoresSafeArea()
+        }
+        #endif
     }
 
     #if os(tvOS)
     /// How far down the screen the sidebar's tab, collapsed in the top corner, reaches.
-    private static let tabBottom: CGFloat = 100
+    private static var tabBottom: CGFloat { 100 }
     /// Below the tab, where rows fade in, ending above the first section's header.
-    private static let fadeHeight: CGFloat = 28
+    private static var fadeHeight: CGFloat { 28 }
     #endif
+}
 
-    /// On an Apple TV whose output makes use of no more than 1080p, that it streams no more.
-    private var displayNote: String {
-        DisplayOutput.streamingHeight == nil ? "" : " (1080p at most, as this Apple TV outputs 1080p)"
+// MARK: Account
+
+/// Who the app is signed in as, and where: the first row of Settings, which leads to the account.
+private struct AccountSummary: View {
+    let account: AccountStore.Account
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.system(size: 40))
+                .foregroundStyle(.tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.userName).font(.headline)
+                Text(account.serverName ?? account.serverURL.host() ?? "Jellyfin")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
     }
+}
 
-    @ViewBuilder private var account: some View {
+/// The server, the account and this device's remote control, and signing out, last: on Apple
+/// TV, where these rows take no focus, first would put focus on it.
+private struct AccountSection: View {
+    @Environment(AccountStore.self) private var accounts
+    @Environment(SessionSocket.self) private var socket
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    #endif
+    @State private var confirmingSignOut = false
+
+    var body: some View {
         if let account = accounts.account {
             Section {
                 LabeledContent("Server", value: account.serverName ?? account.serverURL.host() ?? "Jellyfin")
@@ -185,7 +242,6 @@ struct SettingsView: View {
                         #else
                         accounts.signOut(cancelling: downloads)
                         #endif
-                        dismiss()
                     }
                 } message: {
                     #if os(tvOS)
@@ -201,10 +257,160 @@ struct SettingsView: View {
             }
         }
     }
+}
 
-    #if !os(tvOS)
-    @ViewBuilder private var whenToDownload: some View {
+private struct AppearanceSection: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
         @Bindable var settings = settings
+        Section {
+            SettingPicker("Appearance", selection: $settings.appearance) {
+                ForEach(AppSettings.Appearance.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.appearance")
+        }
+    }
+}
+
+// MARK: Playback
+
+private struct PlaybackSettings: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Section {
+            SettingPicker("Streaming Quality", selection: $settings.streamingQuality) {
+                ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.streamingQuality")
+            #if !os(tvOS)
+            SettingPicker(Self.cellularLabel, selection: $settings.cellularStreamingQuality) {
+                ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.cellularStreamingQuality")
+            #endif
+        } footer: {
+            Text(qualityNote)
+        }
+        Section {
+            learnedLimit
+            Toggle("Transcode When No Version Fits", isOn: $settings.allowTranscoding)
+            Toggle("Adaptive Quality", isOn: $settings.adaptiveQuality)
+                .accessibilityIdentifier("settings.adaptiveQuality")
+        } footer: {
+            Text("With Adaptive Quality, a smaller version plays when the connection can't keep up.")
+        }
+        Section {
+            Toggle("Play the Next Episode Automatically", isOn: $settings.autoplayNextEpisode)
+            Toggle("Offer to Skip Intros and Credits", isOn: $settings.showSkipButtons)
+            #if os(tvOS)
+            Toggle("Match Frame Rate and Dynamic Range", isOn: $settings.matchContent)
+            #endif
+        }
+    }
+
+    /// The bitrate Adaptive Quality learned this device's connection carries, while it holds
+    /// streams to it.
+    @ViewBuilder private var learnedLimit: some View {
+        if settings.adaptiveQuality, let limit = settings.learnedQuality.limit {
+            LabeledContent {
+                Button("Reset") { settings.learnedQuality.reset() }
+                    .accessibilityIdentifier("settings.resetLearnedQuality")
+            } label: {
+                Text("Limited to \(QualityLearning.label(forBitrate: limit)) after buffering on this \(Device.name)")
+            }
+            .accessibilityIdentifier("settings.learnedQuality")
+        }
+    }
+
+    #if os(tvOS)
+    /// On an Apple TV whose output makes use of no more than 1080p, that it streams no more.
+    private var qualityNote: String {
+        let display = DisplayOutput.streamingHeight == nil ? "" : " (1080p at most, as this Apple TV outputs 1080p)"
+        return "Plays the best version up to this quality\(display) as it is."
+    }
+    #else
+    /// What streams go up to, and on networks that save data, about what an hour of them takes.
+    private var qualityNote: String {
+        let saving = settings.streamingQuality(on: .lowData)
+        guard saving != .original else {
+            return "Plays the best version up to this quality as it is, \(Self.savingNetworks) too, where the best can take tens of gigabytes an hour."
+        }
+        return "Plays the best version up to this quality as it is; \(Self.savingNetworks), up to \(saving.label), about \(Self.hourOfStreaming(at: saving)) an hour."
+    }
+
+    /// Roughly what an hour streamed at `quality` takes: what the server's transcodes to it are
+    /// asked for. A version played as it is can take more or less.
+    static func hourOfStreaming(at quality: VideoQuality) -> String {
+        (Int64(quality.transcodeBitrate) * 3600 / 8).formatted(.byteCount(style: .file))
+    }
+
+    #if os(iOS)
+    private static let cellularLabel: LocalizedStringKey = "Streaming on Cellular"
+    private static let savingNetworks = "on cellular data and in Low Data Mode"
+    #else
+    private static let cellularLabel: LocalizedStringKey = "Streaming on Personal Hotspot"
+    private static let savingNetworks = "on a Personal Hotspot and in Low Data Mode"
+    #endif
+    #endif
+}
+
+// MARK: Audio and subtitles
+
+private struct AudioAndSubtitleSettings: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Section {
+            SettingPicker("Audio Language", selection: $settings.audioLanguage) {
+                Text("The Video's Default").tag("")
+                ForEach(AppSettings.languages, id: \.code) { Text($0.name).tag($0.code) }
+            }
+        }
+        Section {
+            SettingPicker("Show Subtitles", selection: $settings.subtitleMode) {
+                ForEach(AppSettings.SubtitleMode.allCases) { Text($0.label).tag($0) }
+            }
+            SettingPicker("Subtitle Language", selection: $settings.subtitleLanguage) {
+                ForEach(AppSettings.languages, id: \.code) { Text($0.name).tag($0.code) }
+            }
+            SettingPicker("Subtitle Size", selection: $settings.subtitleScale) {
+                Text("Small").tag(0.8)
+                Text("Standard").tag(1.0)
+                Text("Large").tag(1.25)
+                Text("Extra Large").tag(1.5)
+            }
+        } footer: {
+            AccessibleMediaNote()
+        }
+    }
+}
+
+#if !os(tvOS)
+// MARK: Downloads and storage
+
+private struct DownloadSettings: View {
+    @Environment(AppSettings.self) private var settings
+
+    var body: some View {
+        @Bindable var settings = settings
+        Section {
+            SettingPicker("Download Quality", selection: $settings.downloadQuality) {
+                ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.downloadQuality")
+            Toggle("Transcode Downloads When No Version Fits", isOn: $settings.transcodeDownloads)
+                .accessibilityIdentifier("settings.transcodeDownloads")
+            Toggle("Delete Watched Episodes", isOn: $settings.deleteWatchedEpisodes)
+                .accessibilityIdentifier("settings.deleteWatched")
+        } header: {
+            Text("Downloads")
+        } footer: {
+            Text("Downloads take the best version up to this quality, or when every version is bigger, the smallest, unless the server is to make one at it, which takes longer.")
+        }
         Section {
             Toggle(Self.cellularLabel, isOn: $settings.downloadOverCellular)
                 .accessibilityIdentifier("settings.downloadOverCellular")
@@ -215,10 +421,6 @@ struct SettingsView: View {
         } footer: {
             Text("Downloads also wait while Low Data Mode is on, and Download Now on a waiting one starts it anyway.")
         }
-    }
-
-    @ViewBuilder private var storage: some View {
-        @Bindable var settings = settings
         Section {
             SettingPicker("Storage Limit", selection: $settings.downloadStorageLimit) {
                 ForEach(AppSettings.storageLimitChoices, id: \.self) { gigabytes in
@@ -234,7 +436,23 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder private var notifications: some View {
+    #if os(iOS)
+    private static let cellularLabel: LocalizedStringKey = "Download Over Cellular"
+    #else
+    private static let cellularLabel: LocalizedStringKey = "Download Over Personal Hotspot"
+    #endif
+}
+
+// MARK: Notifications and Spotlight
+
+private struct NotificationAndSpotlightSettings: View {
+    @Environment(AppSettings.self) private var settings
+    @Environment(AccountStore.self) private var accounts
+    @Environment(DownloadNotifications.self) private var downloadNotifications
+    @Environment(SpotlightTitles.self) private var spotlight
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
         @Bindable var settings = settings
         Section {
             Toggle("Download Notifications", isOn: $settings.downloadNotifications)
@@ -256,6 +474,7 @@ struct SettingsView: View {
             Text("Tells you when downloads are ready to watch offline, and when one fails or waits for room or for your server.")
         }
         .task { await downloadNotifications.refreshAuthorization() }
+        spotlightSection
     }
 
     /// What Spotlight holds of the server's titles, and why it couldn't be updated.
@@ -282,18 +501,30 @@ struct SettingsView: View {
             }
         }
     }
+}
+#endif
 
-    #if os(iOS)
-    private static let cellularLabel: LocalizedStringKey = "Download Over Cellular"
-    #else
-    private static let cellularLabel: LocalizedStringKey = "Download Over Personal Hotspot"
-    #endif
-    #endif
+// MARK: About
 
-    static var version: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(version) (\(build))"
+private struct AboutSettings: View {
+    var body: some View {
+        Section {
+            LabeledContent("Version", value: SettingsView.version)
+            NavigationLink("Acknowledgements") { AcknowledgementsView() }
+            #if os(iOS) || os(visionOS)
+            NavigationLink("Diagnostics") { DiagnosticsView() }
+                .accessibilityIdentifier("settings.diagnostics")
+            #endif
+        }
+        Section {
+            Text("vinnyfin only talks to your Jellyfin server, and to your iCloud, which keeps your servers and most of these settings the same on all your devices. No analytics, no tracking, no accounts.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text("vinnyfin isn't made by or affiliated with the Jellyfin project. Jellyfin is a trademark of its owners; Dolby, Dolby Atmos, Dolby Vision and DTS are trademarks of their owners.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("settings.notAffiliated")
+        }
     }
 }
 

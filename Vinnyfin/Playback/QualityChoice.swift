@@ -99,6 +99,8 @@ nonisolated struct QualityStatus: Equatable, Sendable {
         switch reason {
         case .streamingLimit(nil): nil
         case .streamingLimit(.setting(let quality)): "Streaming Quality is set to \(quality.label)"
+        case .streamingLimit(.network(.lowData)): "in Low Data Mode"
+        case .streamingLimit(.network): savingNetwork
         case .streamingLimit(.display(let lines)): "this TV shows \(VersionTraits.label(forResolution: lines))"
         case .streamingLimit(.learnedBitrate(let bitrate)): "the connection here carries about \(QualityLearning.label(forBitrate: bitrate))"
         case .pickedOnPage: "picked on the title's page"
@@ -108,6 +110,16 @@ nonisolated struct QualityStatus: Equatable, Sendable {
         case .deviceCouldNotPlay: "this device can't play the original"
         case .pictureFellBehind: "this device couldn't keep up with a larger picture"
         }
+    }
+
+    /// The network that costs data, as Settings' streaming quality for it calls it: a Mac's is a
+    /// Personal Hotspot.
+    private static var savingNetwork: String {
+        #if os(macOS)
+        "on a Personal Hotspot"
+        #else
+        "on cellular data"
+        #endif
     }
 
     /// The version with the largest picture, the first of equals.

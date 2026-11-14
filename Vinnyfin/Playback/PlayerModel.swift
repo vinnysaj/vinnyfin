@@ -1239,7 +1239,6 @@ final class PlayerModel: Identifiable {
         connectionWatch = ConnectionWatch(isTranscode: current?.isTranscode ?? false)
         recoveryWatch = RecoveryWatch(failedStepUps: failedStepUps)
         pictureWatch = PictureWatch()
-        ExpensiveNetwork.follow()
         watchTask = Task { [weak self] in
             var lastPosition: Double?
             while !Task.isCancelled {
@@ -1276,7 +1275,7 @@ final class PlayerModel: Identifiable {
         guard let playing = current, let item = playing.item, let plan = playing.plan,
               let incident = QualityLearning.Incident(reason, playing: plan, of: item, sample: sample,
                                                       throughput: connectionWatch.throughput,
-                                                      isExpensiveNetwork: ExpensiveNetwork.isActive)
+                                                      isExpensiveNetwork: StreamingNetwork.isExpensive)
         else { return }
         guard let limit = settings.learnedQuality.record(incident) else { return }
         Self.log.notice("""
@@ -1342,7 +1341,7 @@ final class PlayerModel: Identifiable {
     /// (`RecoveryWatch`, `VersionChooser.planStepUp`), the title started dearer than it plays, and
     /// it's a moment to switch.
     private func stepUpTarget(from previous: Double?, to position: Double) -> PlaybackPlan? {
-        guard !ExpensiveNetwork.isActive, failedStepUps < Self.stepUpAttempts, let playing = session, let item = playing.item,
+        guard !StreamingNetwork.isExpensive, failedStepUps < Self.stepUpAttempts, let playing = session, let item = playing.item,
               let plan = playing.plan, let ceiling = ceilingPlan, plan != ceiling,
               duration <= 0 || duration - position > Self.stepUpRunway,
               let held = recoveryWatch.heldThroughput,

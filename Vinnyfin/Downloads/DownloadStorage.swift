@@ -318,6 +318,20 @@ nonisolated struct DownloadStorage: Sendable {
         return values?.volumeAvailableCapacity.map(Int64.init)
     }
 
+    // MARK: Watched episodes deleted
+
+    /// The watched episodes Delete Watched Episodes deleted lately, by show, to say so.
+    var watchedRemovalsFile: URL { root.appending(path: "watched-removals.json") }
+
+    func loadWatchedRemovals() throws -> [String: WatchedRemoval] {
+        guard FileManager.default.fileExists(atPath: watchedRemovalsFile.path) else { return [:] }
+        return try JSONDecoder().decode([String: WatchedRemoval].self, from: Data(contentsOf: watchedRemovalsFile))
+    }
+
+    func saveWatchedRemovals(_ removals: [String: WatchedRemoval]) throws {
+        try JSONEncoder().encode(removals).write(to: watchedRemovalsFile, options: .atomic)
+    }
+
     // MARK: Room made
 
     /// The watched downloads last deleted to make room, to say so.

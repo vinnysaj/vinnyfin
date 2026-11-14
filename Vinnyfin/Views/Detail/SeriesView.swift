@@ -569,10 +569,19 @@ private struct EpisodeRow: View {
                     .liftsUnderFocus()
                 VStack(alignment: .leading, spacing: 4) {
                     if isNext {
-                        Text(episode.resumeSeconds != nil ? "Continue" : "Up Next")
-                            .font(.caption2.weight(.bold))
-                            .textCase(.uppercase)
-                            .foregroundStyle(.tint)
+                        // In the text's color, marked by a dot of the accent: the accent's green
+                        // as small text reads poorly.
+                        Label {
+                            Text(episode.resumeSeconds != nil ? "Continue" : "Up Next")
+                        } icon: {
+                            Image(systemName: "circle.fill")
+                                .imageScale(.small)
+                                .foregroundStyle(.tint)
+                                .accessibilityHidden(true)
+                        }
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption2.weight(.bold))
+                        .textCase(.uppercase)
                     }
                     HStack(spacing: 6) {
                         Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)

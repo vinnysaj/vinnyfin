@@ -196,8 +196,10 @@ final class SignInUITests: XCTestCase {
 
     #if os(iOS)
     /// Signing in with a password asks whether to save it in iCloud, over the library once the
-    /// sign-in screen has gone, and Not Now leaves the app signed in. The password is the demo
-    /// account's, on the demo server, which someone new reaches through the username first.
+    /// sign-in screen has gone, and Not Now leaves the app signed in. That's the only offer to
+    /// save it: iOS makes its own for a password still in its field as the field goes. The
+    /// password is the demo account's, on the demo server, which someone new reaches through the
+    /// username first.
     @MainActor
     func testAsksWhetherToSaveThePasswordSignedInWith() async throws {
         let info = try XCTUnwrap(URL(string: "https://jftest.vinnysaj.net/System/Info/Public"))
@@ -220,6 +222,12 @@ final class SignInUITests: XCTestCase {
         alert.buttons["Not Now"].tap()
         XCTAssertTrue(tabs(app).waitForExistence(timeout: uiTimeout), "Signing in never finished")
         XCTAssertFalse(alert.exists, "The question stayed after it was answered")
+        // Long enough for iOS's offer, which comes as the sign-in screen goes, to have come up.
+        try await Task.sleep(for: .seconds(3))
+        let offer = NSPredicate(format: "label CONTAINS[c] 'Save Password' OR label == 'Not Now'")
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCTAssertFalse(app.buttons.matching(offer).firstMatch.exists || springboard.buttons.matching(offer).firstMatch.exists,
+                       "iOS offered to save the password as well")
     }
     #endif
 

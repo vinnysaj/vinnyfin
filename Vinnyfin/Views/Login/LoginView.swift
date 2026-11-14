@@ -760,7 +760,13 @@ struct LoginView: View {
             case .server:
                 return
             case .password(let username, let password):
-                try await accounts.signIn(to: server, username: username, password: password)
+                try await accounts.signIn(to: server, username: username, password: password) {
+                    // Emptied on screen before the screen goes: iOS offers to save a password
+                    // still in its field as the field goes, over vinnyfin's own offer to save it
+                    // in iCloud.
+                    flow.password = ""
+                    try await Task.sleep(for: Self.fieldClearing)
+                }
                 if let account = accounts.account { knownServers.signedIn(as: account, with: password) }
             case .quickConnect:
                 let state = try await accounts.startQuickConnect(on: server)
@@ -772,6 +778,7 @@ struct LoginView: View {
                 }
             }
         } catch {
+            if case .password(_, let password) = going.goal, flow.password.isEmpty { flow.password = password }
             fail(going, while: .signingIn, with: error)
             return
         }
@@ -783,6 +790,8 @@ struct LoginView: View {
 
     /// How long the Quick Connect code says it's signed in before the screen goes.
     private static let signedInMoment = Duration.seconds(1)
+    /// Long enough for the screen to draw the password field emptied.
+    private static let fieldClearing = Duration.milliseconds(100)
 
     /// The first sign-in sets the audio and subtitle languages never chosen in vinnyfin to the
     /// Jellyfin user's own, or else this device's.

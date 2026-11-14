@@ -130,6 +130,10 @@ struct PlayerControls: View {
                 topBar
                     .opacity(showsOnlyTimeline ? 0 : 1)
                     .accessibilityHidden(showsOnlyTimeline)
+                    #if os(macOS)
+                    // The window's own buttons keep the corner, beside the bar.
+                    .containerCornerOffset(.leading, sizeToFit: true)
+                    #endif
                 Spacer()
                 if !isFailed {
                     #if !os(tvOS)
@@ -146,6 +150,10 @@ struct PlayerControls: View {
             .padding(.vertical, 12)
             // Taller than the window, it runs off the bottom rather than taking Close off the top.
             .frame(maxHeight: .infinity, alignment: .top)
+            #if os(macOS)
+            // Up in the band the hidden title bar leaves, as the window's buttons are.
+            .ignoresSafeArea(.container, edges: .top)
+            #endif
         }
         .animation(.easeInOut(duration: 0.2), value: hidesTransport)
     }

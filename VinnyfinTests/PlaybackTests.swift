@@ -871,19 +871,66 @@ struct PlaybackEdgeTests {
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
-    @Test func aPressWhileItStartsDoesntPauseIt() async throws {
+    /// Paused and staying so: the engine paused, its clock not moving, the model saying so.
+    private func expectHeldPaused(_ model: PlayerModel, _ engine: AetherEngine) async throws {
+        // Past the start, by when the picture is up, or would have been.
+        try await Task.sleep(for: .seconds(2))
+        #expect(model.status == .paused)
+        #expect(engine.state == .paused)
+        let held = engine.clock.currentTime
+        try await Task.sleep(for: .seconds(1))
+        #expect(engine.clock.currentTime == held)
+        #expect(model.status == .paused)
+    }
+
+    @Test func aPauseWhileItStartsHoldsThroughTheFirstPicture() async throws {
         let file = try await GeneratedVideo.write(seconds: 6)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let engine = try AetherEngine()
+        let model = try makeModel(playing: file, engine: engine)
         let starting = Task { await model.start() }
         await Task.yield()
         #expect(model.status == .preparing)
         model.togglePlayPause()
-        // Again once the engine has it, before the picture is up, when it can be caught there.
+        #expect(model.status == .paused)
+        await starting.value
+        try await expectHeldPaused(model, engine)
+
+        model.togglePlayPause()
+        try await waitUntil(seconds: 15) { model.status == .playing && model.clock.time > 0.5 }
+        #expect(model.status == .playing)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func aPauseWhileTheEngineLoadsHoldsOnceItHasLoaded() async throws {
+        let file = try await GeneratedVideo.write(seconds: 6)
+        let engine = try AetherEngine()
+        let model = try makeModel(playing: file, engine: engine)
+        let starting = Task { await model.start() }
         let deadline = ContinuousClock.now + .seconds(10)
         while model.status == .preparing, ContinuousClock.now < deadline { await Task.yield() }
-        if model.status == .loading { model.togglePlayPause() }
+        try #require(model.status == .loading)
+        // The engine's load is under way, and starts the stream as it returns.
+        model.togglePlayPause()
+        #expect(model.status == .paused)
         await starting.value
-        try await waitUntil(seconds: 15) { model.status == .playing }
+        try await expectHeldPaused(model, engine)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    @Test func playPressedAfterAPauseWhileItStartsPlaysIt() async throws {
+        let file = try await GeneratedVideo.write(seconds: 6)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let starting = Task { await model.start() }
+        await Task.yield()
+        model.togglePlayPause()
+        model.togglePlayPause()
+        #expect(model.status == .preparing)
+        await starting.value
+        try await waitUntil(seconds: 15) { model.status == .playing && model.clock.time > 0.5 }
         #expect(model.status == .playing)
 
         await model.close()

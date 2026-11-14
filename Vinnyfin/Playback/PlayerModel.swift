@@ -202,6 +202,9 @@ final class PlayerModel: Identifiable {
     /// `current` is playing, or getting ready to, as a session the server has been told of: from
     /// `begin` until `finishSession`.
     @ObservationIgnored private var sessionIsOpen = false
+    /// The viewer paused the playback while it started, or a stream of the title replaces one
+    /// paused: it starts paused, and stays so through its first picture until played.
+    @ObservationIgnored private var startsPaused = false
     @ObservationIgnored private var reportTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
     /// The next episode with its versions, fetched as the up-next card comes up so it starts
@@ -308,6 +311,7 @@ final class PlayerModel: Identifiable {
 
     private func switchTo(_ episode: JellyfinItem) async {
         finishSession(reachedEnd: status == .ended)
+        startsPaused = false
         var next = PlaybackRequest.item(episode)
         if preparedNext?.id == episode.id { next.loadedItem = preparedNext }
         // Holds the last picture until the episode's first, where the engine can.
@@ -318,6 +322,7 @@ final class PlayerModel: Identifiable {
     /// Tries the title again after a failure: from where it had got to, with the audio and
     /// subtitles it had, when it got that far.
     func retry() async {
+        startsPaused = false
         await load(request.retrying(from: current != nil ? clock.time : nil), carrying: tracksToCarry())
     }
 
@@ -350,6 +355,7 @@ final class PlayerModel: Identifiable {
         let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
         await startLoad { [self] generation in
             finishSession(reachedEnd: false)
+            startsPaused = false
             status = .loading
             do {
                 let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
@@ -385,7 +391,7 @@ final class PlayerModel: Identifiable {
         preparedNext = nil
         self.request = request
         askedStreams = request.startingPoint
-        status = .preparing
+        status = startsPaused ? .paused : .preparing
         nextEpisode = nil
         segments = []
         upNextDismissed = false
@@ -446,14 +452,15 @@ final class PlayerModel: Identifiable {
         startedReporting = false
         lastReportedPaused = nil
         watchTask?.cancel()
-        status = .loading
+        status = startsPaused ? .paused : .loading
         updateSubtitleRendering()
         observeEngine()
 
         var options = LoadOptions()
         options.externalSubtitles = resolved.externalSubtitles
         options.matchContentEnabled = settings.matchContent
-        options.autoplay = sharing?.startsByItself(resolved.item?.id) ?? true
+        let beganPaused = startsPaused
+        options.autoplay = !beganPaused && (sharing?.startsByItself(resolved.item?.id) ?? true)
         #if os(iOS) || os(macOS)
         // The text subtitles also as the system's own, for Picture in Picture and AirPlay, where
         // the overlay isn't drawn (`pictureLeavesApp`).
@@ -489,6 +496,12 @@ final class PlayerModel: Identifiable {
         }
         guard loads.isCurrent(generation), !isClosed else { return }
         isLoaded = true
+        // A pause or a play while it loaded, which the load's own start would otherwise undo or miss.
+        if startsPaused, engine.state != .paused {
+            engine.pause()
+        } else if beganPaused, !startsPaused {
+            engine.play()
+        }
         // The chapters marked in the file, for a playback the server gives none for.
         if current?.chapters.isEmpty == true, !engine.mediaChapters.isEmpty {
             current?.chapters = PlaybackResolver.chapters(from: engine.mediaChapters)
@@ -500,7 +513,7 @@ final class PlayerModel: Identifiable {
         notePlayingTracks()
         registerRemoteCommands()
         // A playback that waits to start, as one watched together can, is paused from the outset.
-        Self.keepScreenAwake(engine.state != .paused)
+        Self.keepScreenAwake(!startsPaused && engine.state != .paused)
         startReporting()
         if resolved.isStream { watchConnection() }
         let extras = ExtrasKey(title: resolved.historyKey, version: resolved.mediaSource?.versionItemId)
@@ -688,6 +701,9 @@ final class PlayerModel: Identifiable {
             // Paused, the screen dims and the screensaver comes on after the system's idle time.
             Self.keepScreenAwake(false)
         case .playing:
+            // A start the engine has taken back since, as `begin` does a load's paused while it ran.
+            guard engine.state != .paused else { return }
+            startsPaused = false
             status = isPresenting ? .playing : .loading
             reportPauseChange(paused: false)
             Self.keepScreenAwake(true)
@@ -856,8 +872,10 @@ final class PlayerModel: Identifiable {
         case .failed:
             return
         case .preparing, .loading:
-            // Starting, a press never pauses: there's no picture yet to show that it did.
-            if engine.state == .paused { play() }
+            // A playback on its way to playing: the press pauses what's coming.
+            pause()
+        case .paused where startsPaused:
+            play()
         default:
             if sharing?.share(.rate(isPlaying ? 0 : rate)) == true { return }
             engine.togglePlayPause()
@@ -867,12 +885,39 @@ final class PlayerModel: Identifiable {
     func play() {
         guard status != .ended else { return }
         if sharing?.share(.rate(rate)) == true { return }
-        engine.play()
+        playHere()
     }
 
     func pause() {
         if sharing?.share(.rate(0)) == true { return }
+        pauseHere()
+    }
+
+    /// Pauses, or while the playback starts, has it start paused (`startsPaused`).
+    private func pauseHere() {
+        guard status == .preparing || status == .loading else {
+            engine.pause()
+            return
+        }
+        startsPaused = true
+        status = .paused
+        // The stream starting, or the one it replaces; a load under way starts its stream as it
+        // returns, which `begin` pauses.
         engine.pause()
+    }
+
+    /// Plays, or lets a playback paused while it started start playing.
+    private func playHere() {
+        if startsPaused {
+            startsPaused = false
+            guard sessionIsOpen, isLoaded else {
+                // The engine has another stream, or none, until the load under way returns and
+                // `begin` plays this one.
+                status = sessionIsOpen ? .loading : .preparing
+                return
+            }
+        }
+        engine.play()
     }
 
     func seek(to seconds: Double) {
@@ -908,6 +953,7 @@ final class PlayerModel: Identifiable {
         guard duration <= 0 || position < duration - 1 else { return }
         let tracks = tracksToCarry()
         clock.time = position
+        startsPaused = false
         await load(request.replaying(from: position, title: title), carrying: tracks)
     }
 
@@ -1086,17 +1132,18 @@ final class PlayerModel: Identifiable {
     var handOverPosition: Double {
         status == .ended ? 0 : clock.time
     }
+
     /// Plays at `rate`, or pauses at 0, as the group watching together asks.
     func applyRate(_ newRate: Float) {
         guard newRate != 0 else {
-            engine.pause()
+            pauseHere()
             return
         }
         if rate != newRate {
             rate = newRate
             engine.setRate(newRate)
         }
-        engine.play()
+        playHere()
         nowPlayingChanged()
     }
 
@@ -1134,8 +1181,10 @@ final class PlayerModel: Identifiable {
                 return
             }
             guard loads.isCurrent(generation), !isClosed, session?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
-            // Where the stream playing got to while the new one was being asked for.
+            // Where the stream playing got to while the new one was being asked for, and paused
+            // if it was.
             resolved.startPosition = engine.clock.currentTime
+            if engine.state == .paused { startsPaused = true }
             engine.prepareForItemReplacement()
             await begin(resolved, generation: generation)
         }
@@ -1245,8 +1294,9 @@ final class PlayerModel: Identifiable {
                 return
             }
             guard loads.isCurrent(generation), !isClosed, session?.reporting?.playSessionId == playing.reporting?.playSessionId else { return }
-            // Where the old stream got to while the new one was being asked for.
+            // Where the old stream got to while the new one was being asked for, and paused if it was.
             resolved.startPosition = engine.clock.currentTime
+            if engine.state == .paused { startsPaused = true }
             // Holds the picture until the new stream's first frame, where the engine can.
             engine.prepareForItemReplacement()
             finishSession(reachedEnd: false)

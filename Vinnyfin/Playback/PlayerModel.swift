@@ -328,7 +328,8 @@ final class PlayerModel: Identifiable {
         applyAudioDescriptionPreference()
         applySubtitlePreference(engine.subtitleTracks)
         registerRemoteCommands()
-        Self.keepScreenAwake(true)
+        // A playback that waits to start, as one watched together can, is paused from the outset.
+        Self.keepScreenAwake(engine.state != .paused)
         startReporting()
         if resolved.isStream { watchConnection() }
         let extras = ExtrasKey(title: resolved.historyKey, version: resolved.mediaSource?.versionItemId)
@@ -485,9 +486,12 @@ final class PlayerModel: Identifiable {
         case .paused:
             if status != .ended { status = .paused }
             reportPauseChange(paused: true)
+            // Paused, the screen dims and the screensaver comes on after the system's idle time.
+            Self.keepScreenAwake(false)
         case .playing:
             status = isPresenting ? .playing : .loading
             reportPauseChange(paused: false)
+            Self.keepScreenAwake(true)
         case .loading, .seeking, .idle:
             break
         }

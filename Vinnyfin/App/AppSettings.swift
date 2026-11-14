@@ -72,8 +72,8 @@ final class AppSettings {
     var autoplayNextEpisode = true { didSet { store(autoplayNextEpisode, Keys.autoplayNextEpisode) } }
     /// Offers to skip intros, recaps, previews and credits the server has marked.
     var showSkipButtons = true { didSet { store(showSkipButtons, Keys.showSkipButtons) } }
-    /// ISO 639-2 code, such as "eng"; empty plays the file's default track.
-    var audioLanguage = "" { didSet { store(audioLanguage, Keys.audioLanguage) } }
+    /// ISO 639-2 code, such as "eng"; empty plays the file's default track. English unless chosen.
+    var audioLanguage = "eng" { didSet { store(audioLanguage, Keys.audioLanguage) } }
     var subtitleLanguage = "eng" { didSet { store(subtitleLanguage, Keys.subtitleLanguage) } }
     var subtitleMode = SubtitleMode.forcedOnly { didSet { store(subtitleMode.rawValue, Keys.subtitleMode) } }
     /// Relative to the standard size.

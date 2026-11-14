@@ -537,7 +537,7 @@ struct SignOutTests {
         let account = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "server-\(UUID().uuidString)",
                                            serverName: "Home", userId: "u", userName: "alex")
         defaults.set(try JSONEncoder().encode(account), forKey: "account")
-        let accounts = AccountStore(defaults: defaults, token: { _ in "token" }, endSession: endSession)
+        let accounts = AccountStore(defaults: defaults, tokens: MemoryTokens([account.tokenKey: "token"]).store, endSession: endSession)
         #expect(accounts.account == account)
         return (accounts, defaults)
     }
@@ -572,5 +572,331 @@ struct SignOutTests {
         let defaults = try #require(UserDefaults(suiteName: "SignOutTests-\(UUID().uuidString)"))
         defaults.set("Home", forKey: "lastServerName")
         #expect(AccountStore(defaults: defaults).lastServerName == "Home")
+    }
+}
+
+/// Tokens kept in memory, under the names the Keychain keeps them by.
+private nonisolated final class MemoryTokens: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: [String: String]
+
+    init(_ tokens: [String: String] = [:]) {
+        self.tokens = tokens
+    }
+
+    subscript(key: String) -> String? { lock.withLock { tokens[key] } }
+
+    var store: AccountStore.TokenStore {
+        AccountStore.TokenStore(
+            read: { key in self[key] },
+            write: { token, key in self.lock.withLock { self.tokens[key] = token } },
+            delete: { key in self.lock.withLock { self.tokens[key] = nil } }
+        )
+    }
+}
+
+private enum Kept {
+    static let alex = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "home", serverName: "Home",
+                                           userId: "u1", userName: "Alex")
+    static let sam = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "home", serverName: "Home",
+                                          userId: "u2", userName: "Sam")
+    static let work = AccountStore.Account(serverURL: URL(string: "https://jf.example.com")!, serverId: "work", serverName: "Work",
+                                           userId: "u1", userName: "Alex")
+
+    /// Defaults with the sign-in in use and, unless nil, the list of those kept.
+    static func defaults(inUse: AccountStore.Account?, kept: [AccountStore.Account]?) throws -> UserDefaults {
+        let defaults = try #require(UserDefaults(suiteName: "KeptSignInTests-\(UUID().uuidString)"))
+        if let inUse { defaults.set(try JSONEncoder().encode(inUse), forKey: "account") }
+        if let kept { defaults.set(try JSONEncoder().encode(kept), forKey: "accounts") }
+        return defaults
+    }
+}
+
+struct KeptSignInTests {
+    @Test func tokensAreKeptByServerAndUser() {
+        #expect(Kept.alex.tokenKey == "home/u1")
+        #expect(Kept.sam.tokenKey != Kept.alex.tokenKey)
+        #expect(Kept.work.tokenKey != Kept.alex.tokenKey)
+        // The same person on the same server, wherever it is and whatever it's called now.
+        var moved = Kept.alex
+        moved.serverURL = URL(string: "https://home.example.com")!
+        moved.serverName = "Renamed"
+        #expect(moved.isSame(as: Kept.alex))
+        #expect(!Kept.sam.isSame(as: Kept.alex))
+        #expect(!Kept.work.isSame(as: Kept.alex))
+        #expect(!Kept.alex.isSame(as: nil))
+    }
+
+    @Test func keepsEverySignInAndUsesTheOneInUseWithItsOwnToken() throws {
+        let tokens = MemoryTokens([Kept.alex.tokenKey: "alex", Kept.sam.tokenKey: "sam"])
+        let accounts = AccountStore(defaults: try Kept.defaults(inUse: Kept.sam, kept: [Kept.alex, Kept.sam]), tokens: tokens.store)
+        #expect(accounts.account == Kept.sam)
+        #expect(accounts.client?.token == "sam")
+        #expect(accounts.saved == [Kept.alex, Kept.sam])
+        #expect(accounts.others == [Kept.alex])
+    }
+
+    @Test func aDeviceThatKeptOneSignInKeepsItWithItsTokenUnderItsOwnName() throws {
+        let tokens = MemoryTokens(["home": "alex"])
+        let accounts = AccountStore(defaults: try Kept.defaults(inUse: Kept.alex, kept: nil), tokens: tokens.store)
+        #expect(accounts.account == Kept.alex)
+        #expect(accounts.client?.token == "alex")
+        #expect(accounts.saved == [Kept.alex])
+        #expect(accounts.others.isEmpty)
+        #expect(tokens[Kept.alex.tokenKey] == "alex")
+        #expect(tokens["home"] == nil)
+    }
+
+    @Test func switchesToAKeptSignInWithItsOwnToken() throws {
+        let defaults = try Kept.defaults(inUse: Kept.alex, kept: [Kept.alex, Kept.work])
+        let tokens = MemoryTokens([Kept.alex.tokenKey: "alex", Kept.work.tokenKey: "work"])
+        let accounts = AccountStore(defaults: defaults, tokens: tokens.store)
+        try accounts.switchTo(Kept.work)
+        #expect(accounts.account == Kept.work)
+        #expect(accounts.client?.token == "work")
+        #expect(accounts.client?.serverURL == Kept.work.serverURL)
+        #expect(accounts.others == [Kept.alex])
+        #expect(accounts.lastServerName == "Work")
+        // And it's the one in use the next time the app opens.
+        #expect(AccountStore(defaults: defaults, tokens: tokens.store).account == Kept.work)
+    }
+
+    @Test func aKeptSignInWhoseTokenIsGoneIsntKeptAnyMore() throws {
+        let tokens = MemoryTokens([Kept.alex.tokenKey: "alex"])
+        let accounts = AccountStore(defaults: try Kept.defaults(inUse: Kept.alex, kept: [Kept.alex, Kept.sam]), tokens: tokens.store)
+        #expect(throws: AccountError.tokenMissing(Kept.sam)) { try accounts.switchTo(Kept.sam) }
+        #expect(accounts.account == Kept.alex)
+        #expect(accounts.saved == [Kept.alex])
+        #expect(throws: AccountError.notKept(Kept.sam)) { try accounts.switchTo(Kept.sam) }
+    }
+
+    @Test func signingOutOfAnotherKeepsTheOneInUse() async throws {
+        let (told, telling) = AsyncStream.makeStream(of: String?.self)
+        let tokens = MemoryTokens([Kept.alex.tokenKey: "alex", Kept.sam.tokenKey: "sam"])
+        let accounts = AccountStore(defaults: try Kept.defaults(inUse: Kept.alex, kept: [Kept.alex, Kept.sam]), tokens: tokens.store) {
+            _ = telling.yield($0.token)
+        }
+        accounts.signOut(of: Kept.sam)
+        #expect(accounts.account == Kept.alex)
+        #expect(accounts.client?.token == "alex")
+        #expect(accounts.saved == [Kept.alex])
+        #expect(tokens[Kept.sam.tokenKey] == nil)
+        #expect(tokens[Kept.alex.tokenKey] == "alex")
+        // The server hears from the sign-in that ended.
+        var heard = told.makeAsyncIterator()
+        #expect(await heard.next() == "sam")
+    }
+
+    @Test func signingOutOfTheOneInUseLeavesNoneInUseAndKeepsTheOthers() throws {
+        let defaults = try Kept.defaults(inUse: Kept.alex, kept: [Kept.alex, Kept.sam])
+        let tokens = MemoryTokens([Kept.alex.tokenKey: "alex", Kept.sam.tokenKey: "sam"])
+        let accounts = AccountStore(defaults: defaults, tokens: tokens.store) { _ in }
+        accounts.signOut()
+        #expect(accounts.account == nil)
+        #expect(accounts.client == nil)
+        #expect(accounts.saved == [Kept.sam])
+        #expect(tokens[Kept.alex.tokenKey] == nil)
+        #expect(tokens[Kept.sam.tokenKey] == "sam")
+        let reopened = AccountStore(defaults: defaults, tokens: tokens.store)
+        #expect(reopened.account == nil)
+        #expect(reopened.others == [Kept.sam])
+    }
+
+    @Test func readsThePeopleAServerLists() throws {
+        let listed = #"[{"Name":"Alex","Id":"u1","PrimaryImageTag":"abc","HasPassword":false},{"Name":"Sam","Id":"u2"}]"#
+        let users = try JSONDecoder().decode([PublicUser].self, from: Data(listed.utf8))
+        #expect(users == [PublicUser(id: "u1", name: "Alex", primaryImageTag: "abc", hasPassword: false), PublicUser(id: "u2", name: "Sam")])
+    }
+}
+
+struct ServerFirstTests {
+    private static let home = DiscoveredServer(id: "home", name: "Home", address: URL(string: "http://192.168.1.10:8096")!)
+
+    /// The flow as someone new opens it.
+    private static func someoneNew() -> SignInFlow {
+        var flow = SignInFlow(deviceName: "iPhone")
+        _ = flow.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: nil, knowsServers: false)
+        return flow
+    }
+
+    @Test func someoneNewStartsOnTheServerStep() {
+        let flow = Self.someoneNew()
+        #expect(flow.step == .server)
+        #expect(flow.root == .server)
+        #expect(flow.pickedServer == nil)
+    }
+
+    @Test func anyoneWhoHasSignedInBeforeStartsOnTheAccountStep() {
+        // On another of their devices.
+        var elsewhere = SignInFlow(deviceName: "iPhone")
+        _ = elsewhere.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: nil, knowsServers: true)
+        #expect(elsewhere.step == .account)
+        #expect(elsewhere.root == .account)
+        // On this one.
+        var here = SignInFlow(deviceName: "iPhone")
+        _ = here.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: "Alex", knowsServers: false)
+        #expect(here.step == .account)
+    }
+
+    @Test func addingASignInStartsOnTheAccountStepOfTheServerInUse() {
+        var flow = SignInFlow(deviceName: "iPhone")
+        #expect(flow.start(offer: nil, password: nil, adding: Kept.alex, lastServerURL: Kept.alex.serverURL, lastServerName: "Home",
+                           lastUserName: "Alex") == nil)
+        #expect(flow.step == .account)
+        #expect(flow.pickedServer == SignInFlow.PickedServer(address: SignIn.homeAddress, url: Kept.alex.serverURL, title: "Home"))
+        #expect(flow.username.isEmpty)
+    }
+
+    @Test func pickingAServerOnTheNetworkConnectsToItsAddress() throws {
+        var flow = Self.someoneNew()
+        let attempt = try SignIn.attempt(flow.pick(Self.home))
+        let address = ServerAddress(scheme: .http, host: "192.168.1.10", port: "8096")
+        #expect(attempt == SignInFlow.Attempt(address: address, goal: .server))
+        #expect(flow.addressText == "http://192.168.1.10:8096")
+        #expect(flow.found(SignIn.server("http://192.168.1.10:8096"), at: address, for: attempt) == .picked(.username))
+        #expect(flow.step == .account)
+        #expect(flow.pickedServer?.title == "Home")
+        flow.back()
+        #expect(flow.step == .server)
+    }
+
+    @Test func theUsernameFirstLeadsToTheAccountStepAndBack() {
+        var flow = Self.someoneNew()
+        #expect(flow.useUsernameFirst() == .username)
+        #expect(flow.step == .account)
+        flow.back()
+        #expect(flow.step == .server)
+    }
+
+    @Test func theAddressFieldTakesTheWholeAddressAndAdvancedChangesItsParts() {
+        var flow = Self.someoneNew()
+        flow.typeAddress("nas.local:8096")
+        #expect(flow.address == ServerAddress(host: "nas.local", port: "8096"))
+        #expect(flow.address.givenScheme == nil)
+        #expect(flow.addressText == "nas.local:8096")
+        flow.typeAddress("https://jf.example.com/jellyfin")
+        #expect(flow.address == ServerAddress(scheme: .https, host: "jf.example.com", path: "/jellyfin"))
+        flow.editAddress { $0.choose(.http) }
+        #expect(flow.addressText == "http://jf.example.com/jellyfin")
+        flow.editAddress { $0.port = "8096" }
+        #expect(flow.addressText == "http://jf.example.com:8096/jellyfin")
+        flow.editAddress { $0.choose(nil) }
+        #expect(flow.address.givenScheme == nil)
+        #expect(flow.addressText == "jf.example.com:8096/jellyfin")
+    }
+
+    @Test func choosingSomeoneTheServerListsFillsInTheirName() throws {
+        var flow = SignIn.pickedHome()
+        flow.password = "typed"
+        #expect(flow.chooseUser(PublicUser(id: "u2", name: "Sam")) == .focus(.password))
+        #expect(flow.username == "Sam")
+        #expect(flow.password.isEmpty)
+        // Someone without a password signs in straight away.
+        let attempt = try SignIn.attempt(flow.chooseUser(PublicUser(id: "u3", name: "Robin", hasPassword: false)))
+        #expect(attempt == SignInFlow.Attempt(address: SignIn.homeAddress, goal: .password(username: "Robin", password: "")))
+    }
+}
+
+struct DiscoveryTests {
+    @Test func readsAServersAnswer() throws {
+        let reply = #"{"Address":"http://192.168.1.10:8096","Id":"a1b2","Name":"Home","EndpointAddress":null}"#
+        let server = try #require(DiscoveredServer(reply: Data(reply.utf8)))
+        #expect(server == DiscoveredServer(id: "a1b2", name: "Home", address: URL(string: "http://192.168.1.10:8096")!))
+    }
+
+    @Test func keepsABasePathAndNamesAServerWithoutANameByItsHost() throws {
+        let reply = #"{"Address":"https://jf.example.com/jellyfin/","Id":"a1b2","Name":" "}"#
+        let server = try #require(DiscoveredServer(reply: Data(reply.utf8)))
+        #expect(server.address == URL(string: "https://jf.example.com/jellyfin")!)
+        #expect(server.name == "jf.example.com")
+    }
+
+    @Test func ignoresAnythingElse() {
+        let replies = [
+            "who is JellyfinServer?",
+            "{}",
+            #"{"Address":"http://nas.local:8096","Id":""}"#,
+            #"{"Address":"ftp://nas.local","Id":"a1b2"}"#,
+            #"{"Address":"nas.local:8096","Id":"a1b2"}"#,
+            #"{"Id":"a1b2","Name":"Home"}"#,
+        ]
+        for reply in replies {
+            #expect(DiscoveredServer(reply: Data(reply.utf8)) == nil, "\(reply)")
+        }
+    }
+
+    @Test func listsEachServerOnceByName() {
+        let discovery = ServerDiscovery()
+        discovery.take(DiscoveredServer(id: "2", name: "work", address: URL(string: "https://jf.example.com")!))
+        discovery.take(DiscoveredServer(id: "1", name: "Home", address: URL(string: "http://192.168.1.10:8096")!))
+        // The same server answering from another of its addresses.
+        discovery.take(DiscoveredServer(id: "1", name: "Home", address: URL(string: "http://192.168.1.11:8096")!))
+        #expect(discovery.servers.map(\.id) == ["1", "2"])
+        #expect(discovery.servers.first?.address.host() == "192.168.1.11")
+    }
+}
+
+/// iCloud's key-value store as a dictionary.
+private final class LanguageCloud: CloudKeyValues {
+    var values: [String: Any]
+
+    init(_ values: [String: Any]) {
+        self.values = values
+    }
+
+    func object(forKey key: String) -> Any? { values[key] }
+    func set(_ value: Any?, forKey key: String) { values[key] = value }
+    func removeObject(forKey key: String) { values[key] = nil }
+    var dictionaryRepresentation: [String: Any] { values }
+}
+
+struct FirstSignInLanguageTests {
+    private func freshDefaults() throws -> UserDefaults {
+        try #require(UserDefaults(suiteName: "FirstSignInLanguageTests-\(UUID().uuidString)"))
+    }
+
+    @Test func aChoiceComesFirstThenTheServersLanguageThenTheDevices() {
+        #expect(AppSettings.languageDefault(chosen: false, server: "jpn", device: "fr-FR") == "jpn")
+        #expect(AppSettings.languageDefault(chosen: false, server: nil, device: "fr-FR") == "fre")
+        #expect(AppSettings.languageDefault(chosen: false, server: "", device: "de-AT") == "ger")
+        // One vinnyfin doesn't offer is passed over.
+        #expect(AppSettings.languageDefault(chosen: false, server: "tlh", device: "es-MX") == "spa")
+        #expect(AppSettings.languageDefault(chosen: false, server: "tlh", device: "eo") == nil)
+        #expect(AppSettings.languageDefault(chosen: true, server: "jpn", device: "fr-FR") == nil)
+    }
+
+    @Test func readsTheLanguagesAJellyfinUserPrefers() throws {
+        let user = #"{"Id":"u1","Name":"Alex","Configuration":{"AudioLanguagePreference":"jpn","SubtitleLanguagePreference":"eng","PlayDefaultAudioTrack":true}}"#
+        let languages = try JSONDecoder().decode(UserLanguages.self, from: Data(user.utf8))
+        #expect(languages.audio == "jpn")
+        #expect(languages.subtitle == "eng")
+        let unsaid = try JSONDecoder().decode(UserLanguages.self, from: Data(#"{"Id":"u1","Configuration":{}}"#.utf8))
+        #expect(unsaid.audio == nil && unsaid.subtitle == nil)
+        let unconfigured = try JSONDecoder().decode(UserLanguages.self, from: Data(#"{"Id":"u1"}"#.utf8))
+        #expect(unconfigured.audio == nil && unconfigured.subtitle == nil)
+    }
+
+    @Test func aFirstSignInDefaultsOnlyTheLanguagesNeverChosen() throws {
+        let defaults = try freshDefaults()
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.needsLanguageDefaults)
+        settings.subtitleLanguage = "spa"
+        settings.defaultLanguages(audio: "jpn", subtitle: "eng", device: "fr-FR")
+        #expect(settings.audioLanguage == "jpn")
+        #expect(settings.subtitleLanguage == "spa")
+        #expect(!settings.needsLanguageDefaults)
+        // The next sign-in leaves them as they are.
+        settings.defaultLanguages(audio: "kor", subtitle: "kor", device: nil)
+        #expect(settings.audioLanguage == "jpn")
+        #expect(AppSettings(defaults: defaults).audioLanguage == "jpn")
+    }
+
+    @Test func aLanguageChosenOnAnotherDeviceIsntDefaultedAndTheDefaultStaysHere() throws {
+        let cloud = LanguageCloud(["settings.audioLanguage": "ger"])
+        let settings = AppSettings(defaults: try freshDefaults(), cloud: cloud)
+        settings.defaultLanguages(audio: "jpn", subtitle: "jpn", device: nil)
+        #expect(settings.audioLanguage != "jpn")
+        #expect(settings.subtitleLanguage == "jpn")
+        #expect(cloud.values["settings.subtitleLanguage"] == nil)
     }
 }

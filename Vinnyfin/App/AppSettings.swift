@@ -45,6 +45,35 @@ final class AppSettings {
         }
     }
 
+    nonisolated enum IntroSkipping: String, CaseIterable, Identifiable, Sendable {
+        /// The Skip Intro button offers it.
+        case ask
+        /// By itself in an episode that started by moving on from the one before, as the credits'
+        /// Play Now, Next or the countdown do; otherwise the button offers it.
+        case inARow
+        case always
+
+        var id: Self { self }
+
+        var label: String {
+            switch self {
+            case .ask: "Ask"
+            case .inARow: "When Watching in a Row"
+            case .always: "Always"
+            }
+        }
+
+        /// Whether an intro skips by itself in an episode that started by moving on from the one
+        /// before (`inARow`), or in one that didn't.
+        func skips(inARow: Bool) -> Bool {
+            switch self {
+            case .ask: false
+            case .inARow: inARow
+            case .always: true
+            }
+        }
+    }
+
     /// The browsing screens' look; the player is always dark.
     var appearance = Appearance.system { didSet { store(appearance.rawValue, Keys.appearance) } }
     var streamingQuality = VideoQuality.original { didSet { store(streamingQuality.rawValue, Keys.streamingQuality) } }
@@ -81,6 +110,12 @@ final class AppSettings {
     var autoplayNextEpisode = true { didSet { store(autoplayNextEpisode, Keys.autoplayNextEpisode) } }
     /// Offers to skip intros, recaps, previews and credits the server has marked.
     var showSkipButtons = true { didSet { store(showSkipButtons, Keys.showSkipButtons) } }
+    /// Skips the intros the server has marked without asking.
+    var introSkipping = IntroSkipping.ask { didSet { store(introSkipping.rawValue, Keys.introSkipping) } }
+    /// The audio and subtitles last picked in each show, which its episodes start with.
+    var trackMemory = TrackMemory() {
+        didSet { store((try? JSONEncoder().encode(trackMemory)) ?? Data(), Keys.trackMemory) }
+    }
     /// ISO 639-2 code, such as "eng"; empty plays the file's default track. English unless chosen.
     var audioLanguage = "eng" { didSet { store(audioLanguage, Keys.audioLanguage) } }
     var subtitleLanguage = "eng" { didSet { store(subtitleLanguage, Keys.subtitleLanguage) } }
@@ -116,6 +151,8 @@ final class AppSettings {
         static let autoplayNextEpisode = "settings.autoplayNextEpisode"
         // Named for when it only covered intros; renaming it would reset everyone's choice.
         static let showSkipButtons = "settings.showSkipIntro"
+        static let introSkipping = "settings.introSkipping"
+        static let trackMemory = "settings.trackMemory"
         static let audioLanguage = "settings.audioLanguage"
         static let subtitleLanguage = "settings.subtitleLanguage"
         static let subtitleMode = "settings.subtitleMode"
@@ -162,6 +199,9 @@ final class AppSettings {
         downloadNotifications = defaults.object(forKey: Keys.downloadNotifications) as? Bool ?? downloadNotifications
         autoplayNextEpisode = defaults.object(forKey: Keys.autoplayNextEpisode) as? Bool ?? autoplayNextEpisode
         showSkipButtons = defaults.object(forKey: Keys.showSkipButtons) as? Bool ?? showSkipButtons
+        introSkipping = defaults.string(forKey: Keys.introSkipping).flatMap(IntroSkipping.init) ?? introSkipping
+        trackMemory = defaults.data(forKey: Keys.trackMemory).flatMap { try? JSONDecoder().decode(TrackMemory.self, from: $0) }
+            ?? trackMemory
         audioLanguage = defaults.string(forKey: Keys.audioLanguage) ?? audioLanguage
         subtitleLanguage = defaults.string(forKey: Keys.subtitleLanguage) ?? subtitleLanguage
         subtitleMode = defaults.string(forKey: Keys.subtitleMode).flatMap(SubtitleMode.init) ?? subtitleMode
@@ -217,6 +257,46 @@ final class AppSettings {
         guard !values.isEmpty else { return }
         for (key, value) in values { defaults.set(value, forKey: key) }
         load()
+    }
+
+    // MARK: Languages from the first sign-in
+
+    /// Whether the audio or the subtitle language has never been chosen in vinnyfin, on this
+    /// device or, as far as iCloud has said, another of the person's.
+    var needsLanguageDefaults: Bool {
+        !isChosen(Keys.audioLanguage) || !isChosen(Keys.subtitleLanguage)
+    }
+
+    /// Defaults the audio and subtitle languages never chosen to the Jellyfin user's own, or
+    /// else the device's (`languageDefault`). The default stays on this device until iCloud has
+    /// what the person chose elsewhere, which then replaces it, or has nothing, which it then
+    /// takes (`reconcileWithCloud`). Once defaulted, a language counts as chosen.
+    func defaultLanguages(audio: String?, subtitle: String?, device: String? = Locale.preferredLanguages.first) {
+        var values: [String: Any] = [:]
+        if let code = Self.languageDefault(chosen: isChosen(Keys.audioLanguage), server: audio, device: device) {
+            values[Keys.audioLanguage] = code
+        }
+        if let code = Self.languageDefault(chosen: isChosen(Keys.subtitleLanguage), server: subtitle, device: device) {
+            values[Keys.subtitleLanguage] = code
+        }
+        adopt(values)
+    }
+
+    /// The language to default to: none for one chosen in vinnyfin; else the server's, when
+    /// vinnyfin offers it; else the device's, when vinnyfin offers it.
+    nonisolated static func languageDefault(chosen: Bool, server: String?, device: String?) -> String? {
+        guard !chosen else { return nil }
+        return offeredCode(for: server) ?? offeredCode(for: device)
+    }
+
+    /// The code vinnyfin offers for a language tag in any of its forms, "ger", "deu", "de" or
+    /// "de-AT"; nil for one it doesn't offer.
+    nonisolated static func offeredCode(for tag: String?) -> String? {
+        languages.first { sameLanguage($0.code, tag) }?.code
+    }
+
+    private func isChosen(_ key: String) -> Bool {
+        defaults.object(forKey: key) != nil || cloud?.object(forKey: key) != nil
     }
 
     /// The storage limits offered, in gigabytes; 0 is no limit.

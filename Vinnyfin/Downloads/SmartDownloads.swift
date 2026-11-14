@@ -17,6 +17,9 @@ import OSLog
 /// episode in it could be the one a refresh deletes. The episodes a refresh queues for a show
 /// someone just set up count as downloads they started; the ones it tops up later don't. Siri
 /// and Shortcuts queue a show's next episodes once through `downloadNext`.
+///
+/// Each show's rule is a sign-in's (`Rule.owner`), set up while it was in use: only the sign-in
+/// in use's rules refresh, and the others wait for theirs, as their downloads do.
 @Observable
 final class SmartDownloads {
     static let openInterval: Duration = .seconds(15 * 60)
@@ -26,7 +29,16 @@ final class SmartDownloads {
         var seriesName: String
         /// Nil keeps every episode not yet watched, wherever it is in the show.
         var episodesAhead: Int?
-        var id: String { seriesId }
+        /// The sign-in that set it up. Nil for one saved before rules had one, until a sign-in
+        /// is in use.
+        var owner: AccountStore.Account?
+
+        var id: String { [owner?.tokenKey ?? "", seriesId].joined(separator: "/") }
+
+        /// Whether it's the sign-in's, or saved before rules had one.
+        func belongs(to account: AccountStore.Account?) -> Bool {
+            owner.map { $0.isSame(as: account) } ?? true
+        }
     }
 
     private(set) var rules: [Rule] = []
@@ -61,15 +73,44 @@ final class SmartDownloads {
                 problem = "Couldn't read the smart download list: \(error.localizedDescription)"
             }
         }
+        adoptUnowned()
+        followSignIns()
     }
 
+    /// Tops up a sign-in's shows as it comes into use; the app opening refreshes the first one.
+    private func followSignIns() {
+        let accounts = accounts
+        Task { [weak self] in
+            for await account in Observations({ accounts.client == nil ? nil : accounts.account }).dropFirst() {
+                guard let self else { return }
+                if account != nil { self.refreshSoon() }
+            }
+        }
+    }
+
+    /// The sign-in in use's rule for the show.
     func rule(for seriesId: String) -> Rule? {
-        rules.first { $0.seriesId == seriesId }
+        rules.first { $0.seriesId == seriesId && isInUse($0) }
     }
 
+    /// One rule a show, as Downloads lists them: the sign-in in use's, or else another's, which
+    /// waits for its sign-in.
+    var rulesByShow: [Rule] {
+        var shown: [String: Rule] = [:]
+        for rule in rules where shown[rule.seriesId] == nil || isInUse(rule) { shown[rule.seriesId] = rule }
+        return Array(shown.values)
+    }
+
+    /// The sign-in a rule waits for, while another is in use or none is; nil for the one in use.
+    func pausedOwner(of rule: Rule) -> AccountStore.Account? {
+        isInUse(rule) ? nil : rule.owner
+    }
+
+    /// Sets up or changes the sign-in in use's rule for the show.
     func setRule(seriesId: String, seriesName: String, episodesAhead: Int?) {
-        let rule = Rule(seriesId: seriesId, seriesName: seriesName, episodesAhead: episodesAhead)
-        if let index = rules.firstIndex(where: { $0.seriesId == seriesId }) {
+        guard let account = accounts.account else { return }
+        let rule = Rule(seriesId: seriesId, seriesName: seriesName, episodesAhead: episodesAhead, owner: account)
+        if let index = rules.firstIndex(where: { $0.id == rule.id }) {
             rules[index] = rule
         } else {
             rules.append(rule)
@@ -79,9 +120,27 @@ final class SmartDownloads {
         refreshSoon()
     }
 
+    /// Stops the sign-in in use's rule for the show.
     func removeRule(seriesId: String) {
-        rules.removeAll { $0.seriesId == seriesId }
-        seriesSetUpByUser.remove(seriesId)
+        guard let rule = rule(for: seriesId) else { return }
+        remove(rule)
+    }
+
+    /// Stops a rule, whichever sign-in's it is.
+    func remove(_ rule: Rule) {
+        rules.removeAll { $0.id == rule.id }
+        if isInUse(rule) { seriesSetUpByUser.remove(rule.seriesId) }
+        save()
+    }
+
+    private func isInUse(_ rule: Rule) -> Bool {
+        rule.belongs(to: accounts.account)
+    }
+
+    /// Gives the rules saved before rules had a sign-in to the one in use.
+    private func adoptUnowned() {
+        guard let account = accounts.account, rules.contains(where: { $0.owner == nil }) else { return }
+        for index in rules.indices where rules[index].owner == nil { rules[index].owner = account }
         save()
     }
 
@@ -126,7 +185,9 @@ final class SmartDownloads {
         isRefreshing = true
         defer { isRefreshing = false }
         problem = nil
-        for seriesId in rules.map(\.seriesId).sorted() {
+        adoptUnowned()
+        let inUse = rules.filter(isInUse)
+        for seriesId in inUse.map(\.seriesId).sorted() {
             if Task.isCancelled { return }
             do {
                 try await refresh(seriesId: seriesId)
@@ -151,7 +212,7 @@ final class SmartDownloads {
         // A player opened while the server was answering could be playing one of them.
         guard openPlayers.isEmpty else { return }
         // An episode watched since it was queued isn't ahead of where the show is watched any more.
-        downloads.dropWatchedEpisodes(ofShows: Set(rules.map(\.seriesId)))
+        downloads.dropWatchedEpisodes(ofShows: Set(inUse.map(\.seriesId)))
         if settings.deleteWatchedEpisodes { downloads.deleteWatchedEpisodes() }
     }
 
@@ -202,10 +263,11 @@ final class SmartDownloads {
         return (episodes, states, nextUp)
     }
 
-    /// Asks the server how every download was watched, finished or not, a page of them at a time.
+    /// Asks the server how each of the sign-in in use's downloads was watched, finished or not, a
+    /// page of them at a time.
     private func refreshWatchState() async throws {
         guard let client = accounts.client, let account = accounts.account else { return }
-        let ids = Set(downloads.jobs.map(\.itemId)).sorted()
+        let ids = Set(downloads.jobs.filter(downloads.belongsToSignInInUse).map(\.itemId)).sorted()
         for start in stride(from: 0, to: ids.count, by: Self.watchStatePage) {
             let page = Array(ids[start..<min(ids.count, start + Self.watchStatePage)])
             var query = JellyfinClient.ItemQuery(types: ["Movie", "Episode"], ids: page)

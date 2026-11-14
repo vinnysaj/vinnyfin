@@ -60,18 +60,55 @@ final class LoadSequence {
     }
 }
 
-/// The countdown to the next episode as an episode ends, and what it was started for. When it
-/// runs out it plays the next episode only if nothing has loaded since, the episode that ended is
-/// still the one on screen, and the next episode is still the one it counted down to: a Play
-/// Again, a move back on the timeline or another episode picked during it plays instead.
-struct UpNextCountdown {
-    let generation: Int
-    let endedEpisodeId: String?
-    let nextEpisodeId: String
+/// The countdown to the next episode, from the start of the credits the server marks or from the
+/// end of the episode, and what it was started for. It runs while the episode plays or has ended,
+/// and waits while it's paused. When it runs out it plays the next episode only if nothing has
+/// loaded since, the episode it started in is still on screen and still in its credits or ended,
+/// and the next episode is still the one it counted down to: a Play Again, a move back on the
+/// timeline or another episode picked during it plays instead.
+struct UpNextCountdown: Equatable {
+    /// Seconds from the start of the credits.
+    static let fromCredits = 10
+    /// Seconds from the end of an episode with no credits marked.
+    static let fromEnd = 5
 
-    func isDue(loads: LoadSequence, onScreen episodeId: String?, next nextId: String?, hasEnded: Bool) -> Bool {
-        hasEnded && loads.isCurrent(generation) && episodeId == endedEpisodeId && nextId == nextEpisodeId
+    let generation: Int
+    let episodeId: String?
+    let nextEpisodeId: String
+    /// Started as the credits started, rather than at the end.
+    let startedInCredits: Bool
+    /// Seconds in all.
+    let length: Int
+    var remaining: Int
+
+    init(generation: Int, episodeId: String?, nextEpisodeId: String, startedInCredits: Bool) {
+        self.generation = generation
+        self.episodeId = episodeId
+        self.nextEpisodeId = nextEpisodeId
+        self.startedInCredits = startedInCredits
+        length = startedInCredits ? Self.fromCredits : Self.fromEnd
+        remaining = length
     }
+
+    /// How much of it has run, from 0 to 1, for the ring that fills around Play Now.
+    var progress: Double {
+        Double(length - remaining) / Double(length)
+    }
+
+    /// `isEnding`: the episode on screen is in its credits, or has ended.
+    func isDue(loads: LoadSequence, onScreen episodeId: String?, next nextId: String?, isEnding: Bool) -> Bool {
+        isEnding && loads.isCurrent(generation) && episodeId == self.episodeId && nextId == nextEpisodeId
+    }
+}
+
+/// A word over the picture for a few seconds of playback, with the way back from something the
+/// player did by itself.
+enum PlaybackChip: Equatable {
+    /// It started at the title's saved position, a moment before it; Start Over plays it from
+    /// the beginning.
+    case resumed(at: Double)
+    /// It skipped the intro, as Skip Intros has it; Watch It goes back to it.
+    case skippedIntro(MediaSegment)
 }
 
 /// A word about the playback over the picture for a few seconds, such as a move to a lower
@@ -152,6 +189,7 @@ final class PlayerModel: Identifiable {
     private(set) var status = Status.preparing {
         didSet {
             if status.isUnderway != oldValue.isUnderway { onUnderwayChanged?(status.isUnderway) }
+            if case .failed(let message) = status { failure = message }
         }
     }
     private(set) var title: String
@@ -186,8 +224,11 @@ final class PlayerModel: Identifiable {
     private(set) var volume: PlayerVolume
     /// Counts the seeks another device or the group asked for, which the timeline shows.
     private(set) var seeksFromElsewhere = 0
-    /// Seconds left before the next episode starts by itself; nil when it isn't counting down.
-    private(set) var upNextCountdown: Int?
+    /// The countdown to the next episode starting by itself; nil when it isn't counting down.
+    private(set) var upNextCountdown: UpNextCountdown?
+    /// After `UnattendedAutoplay.limit` episodes started by themselves with nobody doing anything,
+    /// the player asks whether anyone is still watching, paused, rather than counting down.
+    private(set) var asksStillWatching = false
     /// A word about the playback, such as a move to a lower quality, shown for a few seconds.
     private(set) var notice: PlaybackNotice?
     /// Why the stream playing is the version, or the size, it is, as the Quality panel says.
@@ -199,7 +240,15 @@ final class PlayerModel: Identifiable {
     private(set) var isReconnecting = false
     /// A lighter way to play the title, offered while its sound plays with no picture.
     private(set) var pictureOffer: PictureOffer?
-    var upNextDismissed = false
+    /// Says it resumed, or skipped the intro, with the way back, for a few seconds.
+    private(set) var chip: PlaybackChip?
+    /// Titles like the one that ended, for its end screen when nothing comes after it.
+    private(set) var similarTitles: [JellyfinItem] = []
+    /// Try Again was pressed a moment ago. The failure stays up meanwhile, saying so, rather than
+    /// flashing away and back when the new try fails at once.
+    private(set) var isRetrying = false
+    /// The viewer hid the up-next card, or stopped its countdown, for the episode on screen.
+    private(set) var upNextDismissed = false
     let clock = PlaybackClock()
     /// The position the viewer is moving the timeline to, before it's committed.
     let scrubbing = Scrubbing()
@@ -287,6 +336,24 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private var hasStarted = false
     /// The streams the request asks to start with, until the playback it started has them.
     @ObservationIgnored private var askedStreams: PlaybackRequest.StartingPoint?
+    /// The audio and subtitles the viewer picked this session, in the show they were picked in,
+    /// which its other episodes start with.
+    @ObservationIgnored private var sessionPicks: ShowPicks?
+    /// The episodes that started by themselves since the viewer last did anything.
+    @ObservationIgnored private var unattended = UnattendedAutoplay()
+    /// The episode on screen started by moving on from the one before, as Next, Play Now and the
+    /// countdown do, which Skip Intros' When Watching in a Row goes by.
+    @ObservationIgnored private var startedInARow = false
+    /// The starts of the intros the playhead has reached in the title, each skipped by itself at
+    /// most once: Watch It goes back to one for good.
+    @ObservationIgnored private var reachedIntros: Set<Double> = []
+    @ObservationIgnored private var chipTask: Task<Void, Never>?
+    @ObservationIgnored private var similarTask: Task<Void, Never>?
+    /// The title's next episode was looked for, found or not: nil `nextEpisode` means it has none.
+    @ObservationIgnored private var lookedForNextEpisode = false
+    @ObservationIgnored private var retryHoldTask: Task<Void, Never>?
+    /// The server item the player opened on.
+    let startedItemId: String?
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "player")
     static let skipInterval: Double = 10
@@ -310,12 +377,28 @@ final class PlayerModel: Identifiable {
         self.settings = settings
         self.downloadedEpisode = downloadedEpisode
         title = request.title
+        startedItemId = if case .item(let id, _) = request.source { id } else { nil }
         volume = PlayerVolume(level: engine.volume)
     }
 
     var isTranscoding: Bool { current?.isTranscode ?? false }
     var isPlaying: Bool { status == .playing || status == .buffering }
     var item: JellyfinItem? { current?.item }
+    /// The title on screen, or while it starts, as the screen it was picked on had it, for its
+    /// picture.
+    var shownItem: JellyfinItem? { current?.item ?? request.shownItem }
+
+    /// Why the playback failed, while it has, and through a try again's first moment.
+    var shownFailure: String? {
+        switch status {
+        case .failed(let message): message
+        case .preparing, .loading: isRetrying ? failure : nil
+        default: nil
+        }
+    }
+
+    /// Why the playback failed last time it did.
+    private(set) var failure = ""
     /// The scrub previews, from the server for a stream and from the saved files for a download.
     var trickplay: TrickplayTiles? { current?.trickplay }
     var chapters: [ChapterMark] { current?.chapters ?? [] }
@@ -329,12 +412,25 @@ final class PlayerModel: Identifiable {
         return segments.first { $0.skipTitle != nil && time >= $0.start && time < $0.end - 1 }
     }
 
-    /// Whether the up-next card belongs on screen at `time`: in the credits, or the last 30 seconds.
+    /// The end of the title on screen, by its length and the credits the server marks.
+    var ending: TitleEnding { TitleEnding(duration: duration, segments: segments) }
+
+    /// What the up-next card is about at `time`, while it belongs on screen: from the credits or
+    /// the last half minute until the viewer hides it, and once the episode has ended, as the
+    /// way on, whatever happened before.
+    func upNextPhase(at time: Double) -> UpNextPhase? {
+        guard nextEpisode != nil, let phase = ending.upNextPhase(at: time, hasEnded: status == .ended) else { return nil }
+        return phase == .ended || !upNextDismissed ? phase : nil
+    }
+
     func showsUpNext(at time: Double) -> Bool {
-        guard nextEpisode != nil, !upNextDismissed, duration > 120 else { return false }
-        if status == .ended { return true }
-        if let outro = segments.first(where: { $0.type == "Outro" }), time >= outro.start { return true }
-        return duration - time <= 30
+        upNextPhase(at: time) != nil
+    }
+
+    /// The title has ended with nothing after it: a movie, or a show's last episode. Its end
+    /// screen offers it again, its page, and titles like it.
+    var showsEndScreen: Bool {
+        status == .ended && nextEpisode == nil && item != nil && !asksStillWatching
     }
 
     // MARK: Starting
@@ -347,16 +443,20 @@ final class PlayerModel: Identifiable {
         await load(request)
     }
 
-    /// Plays another episode, such as the next one, in place of this one. Asked again for the
-    /// episode already starting, as a second press of Next is, it lets that one start.
+    /// Plays another episode, such as the next one, in place of this one, as the viewer asks.
+    /// Asked again for the episode already starting, as a second press of Next is, it lets that
+    /// one start.
     func play(_ episode: JellyfinItem) async {
         if requestedItemId == episode.id, status == .preparing || status == .loading { return }
-        await switchTo(episode)
+        unattended.viewerActed()
+        await switchTo(episode, inARow: episode.id == nextEpisode?.id)
     }
 
-    private func switchTo(_ episode: JellyfinItem) async {
-        finishSession(reachedEnd: status == .ended)
+    /// `inARow`: it's the next episode, moved on to from this one.
+    private func switchTo(_ episode: JellyfinItem, inARow: Bool) async {
+        finishSession(status == .ended ? .reachedEnd : .left(toNextEpisode: episode.id == nextEpisode?.id))
         startsPaused = false
+        startedInARow = inARow
         var next = PlaybackRequest.item(episode)
         if preparedNext?.id == episode.id { next.loadedItem = preparedNext }
         // Holds the last picture until the episode's first, where the engine can.
@@ -365,10 +465,25 @@ final class PlayerModel: Identifiable {
     }
 
     /// Tries the title again after a failure: from where it had got to, with the audio and
-    /// subtitles it had, when it got that far.
+    /// subtitles it had, when it got that far. The failure stays up for `retryHold` meanwhile.
     func retry() async {
+        holdFailure()
         startsPaused = false
         await load(request.retrying(from: current != nil ? clock.time : nil), carrying: tracksToCarry())
+    }
+
+    /// Long enough for a try that fails at once to read as a try.
+    private static let retryHold: Duration = .seconds(0.8)
+
+    /// Keeps the failure up through a try again's first moment (`isRetrying`).
+    private func holdFailure() {
+        isRetrying = true
+        retryHoldTask?.cancel()
+        retryHoldTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.retryHold)
+            guard !Task.isCancelled else { return }
+            self?.isRetrying = false
+        }
     }
 
     /// Rebuilds the picture after the system took the video pipeline away in the background.
@@ -388,6 +503,7 @@ final class PlayerModel: Identifiable {
     /// where it got to and with the audio and subtitles it had.
     func retryTranscoded() async {
         guard let playing = current, let item = playing.item, let source = playing.mediaSource, !playing.isTranscode else { return }
+        holdFailure()
         let position = clock.time > 0 ? clock.time : playing.startPosition
         let audioIndex: Int?
         let subtitleIndex: Int?
@@ -399,7 +515,7 @@ final class PlayerModel: Identifiable {
         }
         let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
         await startLoad { [self] generation in
-            finishSession(reachedEnd: false)
+            finishSession(.interrupted)
             startsPaused = false
             status = .loading
             do {
@@ -424,14 +540,20 @@ final class PlayerModel: Identifiable {
         let isNewTitle = !request.playsSameTitle(as: self.request) || current == nil
         if isNewTitle {
             // Nothing of the title on screen carries over to another.
-            if sessionIsOpen { finishSession(reachedEnd: false) }
+            if sessionIsOpen { finishSession(.left(toNextEpisode: false)) }
             current = nil
             isLoaded = false
             carriedTracks = nil
             playingTracks = nil
             title = request.title
             subtitle = nil
+            reachedIntros = []
+            similarTask?.cancel()
+            similarTask = nil
+            similarTitles = []
         }
+        asksStillWatching = false
+        dismissChip()
         // The engine plays what's ending until the new stream replaces it; none of it is this load's.
         subscriptions.removeAll()
         seekWait?.cancel()
@@ -442,13 +564,15 @@ final class PlayerModel: Identifiable {
         askedStreams = request.startingPoint
         status = startsPaused ? .paused : .preparing
         nextEpisode = nil
+        lookedForNextEpisode = false
         segments = []
         upNextDismissed = false
         extrasRequestedFor = nil
         scrubbing.finish()
+        let picks = sessionPicks
         await startLoad { [self] generation in
             do {
-                let resolved = try await resolver.resolve(request, carrying: tracks)
+                let resolved = try await resolver.resolve(request, carrying: tracks, picks: picks)
                 guard loads.isCurrent(generation) else { return }
                 // A download's own copy, until the server's arrive.
                 segments = resolved.segments
@@ -476,7 +600,7 @@ final class PlayerModel: Identifiable {
     private func begin(_ resolved: ResolvedPlayback, carrying tracks: TrackSelection? = nil, generation: Int) async {
         guard !isClosed else { return }
         // The session this one replaces ends first, so the server hears it stopped.
-        if sessionIsOpen { finishSession(reachedEnd: false) }
+        if sessionIsOpen { finishSession(.interrupted) }
         current = resolved
         sessionIsOpen = true
         title = resolved.title
@@ -531,6 +655,12 @@ final class PlayerModel: Identifiable {
             let streams = resolved.mediaSource?.audioStreams.compactMap(TrackChooser.Candidate.init) ?? []
             audioStreamIndex = (tracks.exactAudioIndex(in: resolved.mediaSource) ?? TrackChooser.same(as: audio, in: streams)).map(Int32.init)
             options.preferredAudioLanguages = [audio.language, settings.audioLanguage].compactMap { $0 }.filter { !$0.isEmpty }
+        } else if !resolved.isTranscode, let picked = resolved.trackPicks?.audio {
+            // The audio the viewer picked in the show, by the server's list of the version's streams
+            // when it has one, else by language.
+            let streams = resolved.mediaSource?.audioStreams.compactMap(TrackChooser.Candidate.init) ?? []
+            audioStreamIndex = resolved.trackPicks?.audio(in: streams).map(Int32.init)
+            options.preferredAudioLanguages = [picked.language, settings.audioLanguage].compactMap { $0 }.filter { !$0.isEmpty }
         } else if !resolved.isTranscode, let described = describedAudio(in: resolved.mediaSource) {
             // Audio Descriptions asks for the description, which the engine ranks below the main mix.
             audioStreamIndex = Int32(described)
@@ -572,6 +702,10 @@ final class PlayerModel: Identifiable {
         Self.keepScreenAwake(!startsPaused && engine.state != .paused)
         startReporting()
         if resolved.isStream { watchConnection() }
+        // Watched together, the group sets the position, and a start over would be everyone's.
+        if resolved.resumesSavedPosition, sharing == nil, let start = resolved.startPosition {
+            show(.resumed(at: start), for: Self.resumeChipSeconds)
+        }
         let extras = ExtrasKey(title: resolved.historyKey, version: resolved.mediaSource?.versionItemId)
         if extrasRequestedFor != extras {
             let isNewTitle = extrasRequestedFor?.title != extras.title
@@ -648,6 +782,7 @@ final class PlayerModel: Identifiable {
             nextEpisode = downloadedEpisode(item)
             if nextEpisode == nil, nextFailed { missing.append("the next episode") }
         }
+        lookedForNextEpisode = true
         if resolved.isStream, !missing.isEmpty {
             show("Couldn't load \(missing.formatted(.list(type: .and))).", .info, for: 6)
         }
@@ -663,7 +798,7 @@ final class PlayerModel: Identifiable {
             """)
         isReconnecting = false
         status = .failed(PlaybackFailureMessage.text(for: error, engine: info))
-        finishSession(reachedEnd: false)
+        finishSession(.interrupted)
     }
 
     // MARK: Engine state
@@ -712,6 +847,8 @@ final class PlayerModel: Identifiable {
             guard let self, self.isLoaded, self.isPresenting else { return }
             self.clock.time = time
             self.prepareNextEpisodeIfDue(at: time)
+            self.followEnding(at: time)
+            self.skipIntroIfDue(at: time)
         }
         .store(in: &subscriptions)
         engine.clock.$sourceTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
@@ -754,7 +891,7 @@ final class PlayerModel: Identifiable {
                 """)
             if reconnectsTranscode(after: info) { return }
             status = .failed(info.map { PlaybackFailureMessage.text(for: $0) } ?? PlaybackFailureMessage.unknown)
-            finishSession(reachedEnd: false)
+            finishSession(.interrupted)
         case .paused:
             if status != .ended { status = .paused }
             reportPauseChange(paused: true)
@@ -864,7 +1001,8 @@ final class PlayerModel: Identifiable {
 
     /// Turns on the subtitle track the subtitle setting asks for, once per playback, after the
     /// load has listed the tracks. A version standing in for another keeps that one's choice,
-    /// subtitles off included, when it has the same.
+    /// subtitles off included, when it has the same, and the viewer's picks in the show
+    /// (`TrackPicks`) come before the setting.
     private func applySubtitlePreference(_ tracks: [TrackInfo]) {
         guard !appliedSubtitlePreference, !isTranscoding, !tracks.isEmpty else { return }
         appliedSubtitlePreference = true
@@ -878,6 +1016,8 @@ final class PlayerModel: Identifiable {
                 ?? TrackChooser.same(as: subtitle, in: candidates) ?? preferredSubtitle(from: candidates)
         } else if carriedTracks != nil {
             choice = nil
+        } else if let picked = current?.trackPicks?.subtitles(in: candidates) {
+            choice = picked.trackId
         } else {
             choice = preferredSubtitle(from: candidates)
         }
@@ -910,7 +1050,7 @@ final class PlayerModel: Identifiable {
     /// audio description Audio Descriptions asks for, once the load has listed the tracks.
     private func applyAudioDescriptionPreference() {
         guard current?.mediaSource == nil, askedStreams?.audioStreamIndex == nil, carriedTracks == nil,
-              AccessibleMedia.prefersAudioDescriptions else { return }
+              current?.trackPicks?.audio == nil, AccessibleMedia.prefersAudioDescriptions else { return }
         let candidates = engine.audioTracks.map(TrackChooser.Candidate.init)
         guard let active = candidates.first(where: { $0.id == engine.activeAudioTrackIndex }), !active.describesVideo,
               let pick = TrackChooser.audio(from: candidates, language: settings.audioLanguage, defaultId: active.id, descriptions: true),
@@ -925,11 +1065,17 @@ final class PlayerModel: Identifiable {
     // group commands below.
 
     func togglePlayPause() {
+        // Someone is watching: a question about it goes, and playing on answers it.
+        unattended.viewerActed()
+        asksStillWatching = false
         switch status {
         case .ended:
-            // The group starts over together.
-            if sharing?.share(.seek(0)) == true { return }
-            Task { await replay(from: 0) }
+            // The way on is the next episode, as the up-next card offers, when there is one.
+            if let nextEpisode {
+                Task { await play(nextEpisode) }
+            } else {
+                watchAgain()
+            }
         case .failed:
             return
         case .preparing, .loading:
@@ -1159,6 +1305,7 @@ final class PlayerModel: Identifiable {
     // meanwhile keeps the first.
 
     func chooseAudio(_ id: Int) {
+        if let picked = audioCandidate(id) { pick { $0.audio = TrackPicks.Track(picked) } }
         if isTranscoding {
             selectedAudio = id
             Task { await reloadTranscode(audioIndex: id, subtitleIndex: selectedSubtitle) }
@@ -1169,6 +1316,11 @@ final class PlayerModel: Identifiable {
 
     /// Nil turns subtitles off.
     func chooseSubtitle(_ id: Int?) {
+        if let id {
+            if let picked = subtitleCandidate(id) { pick { $0.subtitles = .track(TrackPicks.Track(picked)) } }
+        } else {
+            pick { $0.subtitles = .off }
+        }
         if isTranscoding {
             selectedSubtitle = id
             Task { await reloadTranscode(audioIndex: selectedAudio, subtitleIndex: id) }
@@ -1179,10 +1331,85 @@ final class PlayerModel: Identifiable {
         }
     }
 
+    // MARK: Picks for the show
+
+    /// Keeps a pick of the viewer's for the show playing: its other episodes start with it, this
+    /// session and next time (`TrackPicks`).
+    private func pick(_ change: (inout TrackPicks) -> Void) {
+        unattended.viewerActed()
+        guard let seriesId = item?.seriesId else { return }
+        var picks = sessionPicks?.seriesId == seriesId ? sessionPicks?.picks ?? TrackPicks() : TrackPicks()
+        change(&picks)
+        sessionPicks = ShowPicks(seriesId: seriesId, picks: picks)
+        settings.trackMemory.remember(picks, forShow: seriesId)
+    }
+
+    /// The audio the menus number `id`: a transcode's by the server's index, else the engine's track.
+    private func audioCandidate(_ id: Int) -> TrackChooser.Candidate? {
+        if isTranscoding {
+            return current?.mediaSource?.audioStreams.first { $0.index == id }.flatMap(TrackChooser.Candidate.init)
+        }
+        return engine.audioTracks.first { $0.id == id }.map(TrackChooser.Candidate.init)
+    }
+
+    private func subtitleCandidate(_ id: Int) -> TrackChooser.Candidate? {
+        if isTranscoding {
+            return current?.mediaSource?.subtitleStreams.first { $0.index == id }.flatMap(TrackChooser.Candidate.init)
+        }
+        return engine.subtitleTracks.first { $0.id == id }.map(TrackChooser.Candidate.init)
+    }
+
+    // MARK: The end of an episode
+
+    /// Hide, Watch Credits, or Back on Apple TV: the countdown stops and the next episode waits to
+    /// be picked. Before the end the card goes too; once the episode ends it's back as the way on.
     func cancelUpNext() {
-        countdownTask?.cancel()
-        upNextCountdown = nil
+        unattended.viewerActed()
+        stopCountdown()
         upNextDismissed = true
+    }
+
+    private func stopCountdown() {
+        countdownTask?.cancel()
+        countdownTask = nil
+        upNextCountdown = nil
+    }
+
+    /// Plays the title that ended again from the beginning, as the end screen's and the up-next
+    /// card's Watch Again do. A group starts over together.
+    func watchAgain() {
+        unattended.viewerActed()
+        if sharing?.share(.seek(0)) == true { return }
+        Task { await replay(from: 0) }
+    }
+
+    /// Someone answered "Still watching?": the next episode plays.
+    func continueWatching() async {
+        unattended.viewerActed()
+        asksStillWatching = false
+        guard let nextEpisode else { return }
+        await play(nextEpisode)
+    }
+
+    /// The viewer brought up the controls or otherwise used the player, so someone is watching
+    /// (`UnattendedAutoplay`).
+    func noteViewerActivity() {
+        unattended.viewerActed()
+    }
+
+    /// Plays the title from its beginning, from the chip that says it resumed.
+    func startOver() {
+        dismissChip()
+        unattended.viewerActed()
+        seek(to: 0)
+    }
+
+    /// Goes back to the intro Skip Intros skipped, which then plays.
+    func watchIntro() {
+        guard case .skippedIntro(let intro) = chip else { return }
+        dismissChip()
+        unattended.viewerActed()
+        seek(to: intro.start)
     }
 
     func playNextEpisode() async {
@@ -1526,7 +1753,7 @@ final class PlayerModel: Identifiable {
             resolved.startPosition = switchPosition
             if engine.state == .paused { startsPaused = true }
             engine.prepareForItemReplacement()
-            finishSession(reachedEnd: false)
+            finishSession(.interrupted)
             qualityReason = reason
             onSwitch()
             await begin(resolved, carrying: tracks, generation: generation)
@@ -1663,7 +1890,7 @@ final class PlayerModel: Identifiable {
         let subtitleIndex = selectedSubtitle
         let paused = status == .paused
         Self.log.notice("Asking the server again for the transcode it lost, from \(position) s")
-        finishSession(reachedEnd: false)
+        finishSession(.interrupted)
         startsPaused = paused
         status = paused ? .paused : .loading
         isReconnecting = true
@@ -1734,35 +1961,135 @@ final class PlayerModel: Identifiable {
 
     // MARK: Ending
 
-    /// Gives the title its end and, with autoplay, counts down to the next episode
-    /// (`UpNextCountdown`).
+    /// Gives the title its end and, with autoplay, counts down to the next episode, unless the
+    /// countdown from the credits runs on. With nothing after it, gets titles like it for the end
+    /// screen.
     private func reachedEnd() {
-        finishSession(reachedEnd: true)
+        finishSession(.reachedEnd)
         prepareNextEpisodeIfDue(at: clock.time)
-        guard let next = nextEpisode, settings.autoplayNextEpisode, !upNextDismissed else { return }
-        let countdown = UpNextCountdown(generation: loads.generation, endedEpisodeId: current?.item?.id, nextEpisodeId: next.id)
-        countdownTask?.cancel()
-        countdownTask = Task {
-            for remaining in stride(from: 5, through: 1, by: -1) {
-                upNextCountdown = remaining
-                try? await Task.sleep(for: .seconds(1))
-                if Task.isCancelled { return }
-            }
-            upNextCountdown = nil
-            guard let next = nextEpisode,
-                  countdown.isDue(loads: loads, onScreen: current?.item?.id, next: next.id, hasEnded: status == .ended)
-            else { return }
-            // Out of reach before the switch: its load cancels any countdown (`startLoad`), and
-            // cancelling this one would cancel the load started from it.
-            countdownTask = nil
-            await switchTo(next)
+        if nextEpisode == nil {
+            loadSimilarTitles()
+        } else {
+            beginUpNext(inCredits: false)
         }
     }
 
+    /// Follows the playhead through the end of the episode: the countdown starts as the credits
+    /// the server marks start, and one started there stops as the playhead moves back out of them
+    /// (`TitleEnding`).
+    private func followEnding(at time: Double) {
+        guard status != .ended else { return }
+        if upNextPhase(at: time) == .credits {
+            beginUpNext(inCredits: true)
+        } else if upNextCountdown?.startedInCredits == true {
+            stopCountdown()
+        }
+        let nearsEnd = ending.isInCredits(at: time) || duration > 0 && duration - time <= Self.similarTitlesLead
+        if nearsEnd, nextEpisode == nil, lookedForNextEpisode { loadSimilarTitles() }
+    }
+
+    /// How long before the end the end screen's titles are fetched.
+    private static let similarTitlesLead: Double = 120
+
+    /// With autoplay, counts down to the next episode (`UpNextCountdown`), from the credits or the
+    /// end. After `UnattendedAutoplay.limit` episodes started by themselves with nobody doing
+    /// anything, it pauses and asks whether anyone is still watching instead. Not while the
+    /// viewer has said no to the next one, or while a countdown or the question is up already.
+    private func beginUpNext(inCredits: Bool) {
+        guard let next = nextEpisode, settings.autoplayNextEpisode, !upNextDismissed, upNextCountdown == nil,
+              !asksStillWatching else { return }
+        // Watched together, someone is: the group goes on as one.
+        if unattended.asksFirst, sharing == nil {
+            asksStillWatching = true
+            if status != .ended { pauseHere() }
+            return
+        }
+        upNextCountdown = UpNextCountdown(generation: loads.generation, episodeId: current?.item?.id, nextEpisodeId: next.id,
+                                          startedInCredits: inCredits)
+        countdownTask?.cancel()
+        countdownTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled, var countdown = self.upNextCountdown else { return }
+                // Paused, or waiting for the stream, it waits too.
+                guard self.status == .playing || self.status == .ended else { continue }
+                countdown.remaining -= 1
+                self.upNextCountdown = countdown
+                guard countdown.remaining <= 0 else { continue }
+                self.upNextCountdown = nil
+                let isEnding = self.status == .ended || self.ending.isInCredits(at: self.clock.time)
+                guard let next = self.nextEpisode,
+                      countdown.isDue(loads: self.loads, onScreen: self.current?.item?.id, next: next.id, isEnding: isEnding)
+                else { return }
+                // Out of reach before the switch: its load cancels any countdown (`startLoad`), and
+                // cancelling this one would cancel the load started from it.
+                self.countdownTask = nil
+                self.unattended.episodeStartedByItself()
+                await self.switchTo(next, inARow: true)
+                return
+            }
+        }
+    }
+
+    /// Fetches titles like the one playing, for its end screen, once it nears its end with
+    /// nothing after it.
+    private func loadSimilarTitles() {
+        guard similarTask == nil, let item, let client = accounts.client, let account = accounts.account else { return }
+        let titleId = item.titleId
+        similarTask = Task { [weak self] in
+            do {
+                let found = try await client.similar(to: titleId, userId: account.userId, limit: Self.similarCount)
+                guard let self, !Task.isCancelled, self.item?.titleId == titleId else { return }
+                self.similarTitles = found
+            } catch {
+                guard !error.isCancellation else { return }
+                Self.log.notice("Couldn't load titles like this one: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private static let similarCount = 8
+
+    /// Skips the intro the playhead has just reached, once, when Skip Intros says to. Watched
+    /// together, the button leaves it to whoever presses it, for everyone.
+    private func skipIntroIfDue(at time: Double) {
+        guard status == .playing, !scrubbing.isActive,
+              let intro = segments.first(where: { $0.type == "Intro" && time >= $0.start && time < $0.end - 1 }),
+              !reachedIntros.contains(intro.start) else { return }
+        reachedIntros.insert(intro.start)
+        guard sharing == nil, settings.introSkipping.skips(inARow: startedInARow) else { return }
+        seek(to: intro.end)
+        show(.skippedIntro(intro), for: Self.introChipSeconds)
+    }
+
+    private static let resumeChipSeconds: Double = 6
+    private static let introChipSeconds: Double = 5
+
+    /// Shows `chip` for `seconds` of playback, counted from when it plays, so a slow start doesn't
+    /// use them up.
+    private func show(_ chip: PlaybackChip, for seconds: Double) {
+        self.chip = chip
+        chipTask?.cancel()
+        chipTask = Task {
+            for await status in Observations({ self.status }) where status == .playing {
+                break
+            }
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled, self.chip == chip else { return }
+            self.chip = nil
+        }
+    }
+
+    private func dismissChip() {
+        chipTask?.cancel()
+        chipTask = nil
+        chip = nil
+    }
+
     /// Fetches the next episode with its versions, and warms its stream, once the up-next card
-    /// is up, so it starts sooner when it's played.
+    /// is due, so it starts sooner when it's played.
     private func prepareNextEpisodeIfDue(at time: Double) {
-        guard nextPreparation == nil, let next = nextEpisode, showsUpNext(at: time),
+        guard nextPreparation == nil, let next = nextEpisode, ending.upNextPhase(at: time, hasEnded: status == .ended) != nil,
               let client = accounts.client, let account = accounts.account else { return }
         nextPreparation = Task { [weak self] in
             let item: JellyfinItem
@@ -1789,12 +2116,15 @@ final class PlayerModel: Identifiable {
         guard !isClosed else { return }
         countdownTask?.cancel()
         noticeTask?.cancel()
+        chipTask?.cancel()
+        similarTask?.cancel()
+        retryHoldTask?.cancel()
         nextPreparation?.cancel()
         artworkTask?.cancel()
         seekWait?.cancel()
         loads.cancel()
         scrubbing.finish()
-        finishSession(reachedEnd: status == .ended)
+        finishSession(status == .ended ? .reachedEnd : .left(toNextEpisode: false))
         isClosed = true
         subscriptions.removeAll()
         // Warmed for a next episode that won't play now.
@@ -1813,7 +2143,16 @@ final class PlayerModel: Identifiable {
     /// take seconds; the next session's start waits for it instead, so the server hears them in
     /// order. A session that never got as far as telling the server it started has nothing to
     /// stop there. `current` stays, for the controls. Safe to call twice.
-    private func finishSession(reachedEnd: Bool) {
+    ///
+    /// The server hears the title played to its end when it did, and when the viewer leaves it
+    /// in its credits, or moves on to the next episode while the up-next card offers it
+    /// (`TitleEnding.finishes`), so it's marked watched rather than left a few minutes from the end.
+    private func finishSession(_ end: SessionEnd) {
+        let finished = switch end {
+        case .reachedEnd: true
+        case .left(let toNextEpisode): ending.finishes(leavingAt: clock.time, toNextEpisode: toNextEpisode && nextEpisode != nil)
+        case .interrupted: false
+        }
         // The stop waits for the periodic report in flight, and the title's position it gives, so
         // nothing lands after the stop that finished the title and marked it watched.
         let progress = reportTask
@@ -1829,7 +2168,7 @@ final class PlayerModel: Identifiable {
         sessionIsOpen = false
         nowPlayingChanged()
         current.scopedURL?.stopAccessingSecurityScopedResource()
-        let position = reachedEnd ? (duration > 0 ? duration : clock.time) : clock.time
+        let position = finished ? (duration > 0 ? duration : clock.time) : clock.time
         let previousReport = stopReport
         let wasReported = progress != nil
         // Immediate: the report reads this session's length and pause before the next one starts.
@@ -1847,6 +2186,17 @@ final class PlayerModel: Identifiable {
                 Self.log.notice("Couldn't stop the server's transcode: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    /// How a session ends, which decides the position the server hears (`finishSession`).
+    private enum SessionEnd {
+        /// The stream played to its end.
+        case reachedEnd
+        /// The viewer left the title: closed the player, or moved to another title, the next
+        /// episode when `toNextEpisode`.
+        case left(toNextEpisode: Bool)
+        /// Another stream of the title takes over, or it failed: where it got to.
+        case interrupted
     }
 
     // MARK: Reporting

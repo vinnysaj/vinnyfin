@@ -1,15 +1,23 @@
 import SwiftUI
 
-/// Signs in to a Jellyfin server, asking for the account first and the server second: a server
-/// signed in to before, on this device or another of the person's, signs in with a tap, with the
-/// password saved in iCloud or for the password next, and any other is asked for by its address
-/// once the account is in (see `SignInFlow`).
+/// Signs in to a Jellyfin server. Someone new finds their server first, from those that answer on
+/// the network or by its address, then signs in on its account step, which shows the people the
+/// server lists. Anyone who has signed in before starts on the account step: a server signed in
+/// to on this device is picked already, and one on another of the person's devices signs in with
+/// a tap, with the password saved in iCloud or for the password next (see `SignInFlow`). Signed
+/// out, it offers the sign-ins still kept on this device, which switch without a password.
 struct LoginView: View {
     /// A sign-in to start from, such as the one a handed-off title is from.
     var offer: ServerSignIn?
+    /// Signs in beside the sign-in in use, starting from its server for someone else on it.
+    var addsAccount = false
 
     @Environment(AccountStore.self) private var accounts
     @Environment(KnownServers.self) private var knownServers
+    @Environment(AppSettings.self) private var settings
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    #endif
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -20,6 +28,11 @@ struct LoginView: View {
     /// editing the address it's for, takes it back.
     @State private var running: Running?
     @State private var quickConnect: QuickConnectPrompt?
+    @State private var discovery = ServerDiscovery()
+    /// The people the picked server lists on its sign-in screen, with the server they're on.
+    @State private var publicUsers: (server: URL, users: [PublicUser])?
+    /// The address's protocol, port and base path show.
+    @State private var showsAdvanced = false
     @FocusState private var focus: SignInFlow.Field?
     /// The field the cursor moves to next, which comes into view first: a form draws only the
     /// rows on screen, and a field it hasn't drawn can't take the cursor.
@@ -63,81 +76,103 @@ struct LoginView: View {
     }
 
     private static let quickConnectExplanation: LocalizedStringKey =
-        "Shows a code to approve in Jellyfin on a device that's already signed in, so there's no password to type."
+        "Quick Connect shows a code to approve in Jellyfin on a device that's already signed in, so there's no password to type."
 
     var body: some View {
-        NavigationStack {
-            ScrollViewReader { form in
-                Form {
-                    switch flow.step {
-                    case .account: accountStep
-                    case .server: serverStep
-                    }
+        NavigationStack(path: steps) {
+            stepForm(flow.root)
+                .navigationDestination(for: SignInFlow.Step.self) { stepForm($0) }
+        }
+        #if !os(tvOS)
+        // Closing the sheet takes back the sign-in under way.
+        .onDisappear(perform: cancelSignIn)
+        #endif
+        .sheet(item: $quickConnect, onDismiss: cancelSignIn) { prompt in
+            QuickConnectSheet(code: prompt.code, server: prompt.server, isSignedIn: prompt.isSignedIn, onCancel: cancelSignIn)
+        }
+        .onAppear {
+            let next = flow.start(offer: offer, password: offer.flatMap { knownServers.password(for: $0) },
+                                  adding: addsAccount ? accounts.account : nil, lastServerURL: accounts.lastServerURL,
+                                  lastServerName: accounts.lastServerName, lastUserName: accounts.lastUserName,
+                                  knowsServers: !knownServers.signIns.isEmpty || !accounts.saved.isEmpty)
+            if let next { follow(next) }
+        }
+        .onChange(of: focus) { previous, _ in
+            // A full address in the field fills in Advanced once it's done, so "nas:8096" isn't
+            // cut apart at "nas:" while it's being typed.
+            if previous == .host { flow.editAddress { $0.splitHost() } }
+        }
+        // Editing the address takes back the sign-in to the address as it was.
+        .onChange(of: flow.address) {
+            if let running, flow.isStale(running.attempt) { cancelSignIn() }
+        }
+        .task(id: flow.step == .server ? flow.address : nil) { await checkServer() }
+        .task(id: flow.step == .account ? flow.pickedServer?.url : nil) { await loadPublicUsers() }
+        // Said where they show, in the form's footers, away from VoiceOver's cursor.
+        .onChange(of: flow.accountError) { _, error in if let error { announce(error) } }
+        .onChange(of: flow.serverError) { _, error in if let error { announce(error) } }
+    }
+
+    /// The step on screen over the one the screen opens on, as the navigation stack shows it:
+    /// Back, the swipe back and Menu on Apple TV go back to that one.
+    private var steps: Binding<[SignInFlow.Step]> {
+        Binding {
+            flow.step == flow.root ? [] : [flow.step]
+        } set: { path in
+            if path.isEmpty, flow.step != flow.root { back() }
+        }
+    }
+
+    private func stepForm(_ step: SignInFlow.Step) -> some View {
+        ScrollViewReader { form in
+            Form {
+                switch step {
+                case .account: accountStep
+                case .server: serverStep
                 }
-                .formStyle(.grouped)
-                .navigationTitle("Connect to Jellyfin")
-                #if os(iOS)
-                .safeAreaBar(edge: .top) {
-                    if pinsServerStatus { pinnedServerStatus }
-                }
-                #endif
-                #if os(tvOS)
-                .onExitCommand(perform: exitCommand)
-                #else
-                .toolbar {
+            }
+            .formStyle(.grouped)
+            .navigationTitle(title(of: step))
+            #if os(iOS)
+            .safeAreaBar(edge: .top) {
+                if step == .server, pinsServerStatus { pinnedServerStatus }
+            }
+            #endif
+            #if !os(tvOS)
+            .toolbar {
+                if step == flow.root {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") { dismiss() }
                     }
-                    ToolbarItem(placement: .confirmationAction) { stepButton }
                 }
-                // Closing the sheet takes back the sign-in under way.
-                .onDisappear(perform: cancelSignIn)
-                #endif
-                .sheet(item: $quickConnect, onDismiss: cancelSignIn) { prompt in
-                    QuickConnectSheet(code: prompt.code, server: prompt.server, isSignedIn: prompt.isSignedIn, onCancel: cancelSignIn)
-                }
-                .onAppear {
-                    if let next = flow.start(offer: offer, password: offer.flatMap { knownServers.password(for: $0) },
-                                             lastServerURL: accounts.lastServerURL, lastServerName: accounts.lastServerName,
-                                             lastUserName: accounts.lastUserName) {
-                        follow(next)
-                    }
-                }
-                .onChange(of: focus) { previous, _ in
-                    // A full address in the host field fills in the other fields once the host is
-                    // done, so "nas:8096" isn't cut apart at "nas:" while it's being typed.
-                    if previous == .host { flow.address.splitHost() }
-                }
-                // Editing the address takes back the sign-in to the address as it was.
-                .onChange(of: flow.address) {
-                    if let running, flow.isStale(running.attempt) { cancelSignIn() }
-                }
-                .task(id: flow.step == .server ? flow.address : nil) { await checkServer() }
-                // Said where they show, in the form's footers, away from VoiceOver's cursor.
-                .onChange(of: flow.accountError) { _, error in if let error { announce(error) } }
-                .onChange(of: flow.serverError) { _, error in if let error { announce(error) } }
-                .onChange(of: nextFocus) { _, field in
-                    guard let field else { return }
-                    nextFocus = nil
-                    form.scrollTo(field)
-                    focus = field
-                }
+                ToolbarItem(placement: .confirmationAction) { stepButton(step) }
+            }
+            #endif
+            .onChange(of: nextFocus, initial: true) { _, field in
+                guard let field, step == flow.step else { return }
+                nextFocus = nil
+                if field == .port || field == .path { showsAdvanced = true }
+                form.scrollTo(field)
+                focus = field
+            }
+            // While the server step shows, for servers on the network.
+            .task(id: step == .server && flow.step == .server) {
+                if step == .server, flow.step == .server { await discovery.searchWhileShown() }
             }
         }
     }
 
-    #if os(tvOS)
-    /// Menu on the server step goes back to the account step. The account step is the app's first
-    /// screen, so there Menu leaves the app as usual.
-    private var exitCommand: (@MainActor () -> Void)? {
-        flow.step == .server ? back : nil
+    private func title(of step: SignInFlow.Step) -> String {
+        switch step {
+        case .server: "Find Your Server"
+        case .account: flow.pickedServer?.title ?? "Connect to Jellyfin"
+        }
     }
-    #endif
 
     /// The step's button, which signs in or goes on to the next step: beside Cancel in the
     /// sheet's bar, and on Apple TV, whose sheet has no bar, in the form.
-    @ViewBuilder private var stepButton: some View {
-        switch flow.step {
+    @ViewBuilder private func stepButton(_ step: SignInFlow.Step) -> some View {
+        switch step {
         case .account:
             Button(action: submitAccount) {
                 title(flow.accountStepSignsIn ? "Sign In" : "Next",
@@ -157,6 +192,9 @@ struct LoginView: View {
     // MARK: The account step
 
     @ViewBuilder private var accountStep: some View {
+        if let users = shownUsers, !users.isEmpty {
+            usersSection(users)
+        }
         Section {
             TextField("Username", text: $flow.username)
                 .textContentType(.username)
@@ -176,13 +214,20 @@ struct LoginView: View {
                 .onSubmit(submitAccount)
                 .accessibilityIdentifier("login.password")
                 .id(SignInFlow.Field.password)
+            #if os(tvOS)
+            stepButton(.account)
+            #endif
+            quickConnectButton
         } header: {
             Text("Account")
         } footer: {
-            if let error = flow.accountError {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("login.error")
+            VStack(alignment: .leading, spacing: 4) {
+                if let error = flow.accountError {
+                    Text(error)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier("login.error")
+                }
+                Text(Self.quickConnectExplanation)
             }
         }
         if let server = flow.pickedServer {
@@ -194,27 +239,94 @@ struct LoginView: View {
                 }
             }
         }
-        #if os(tvOS)
-        Section { stepButton }
-        #endif
-        Section {
-            Button(action: useQuickConnect) {
-                title("Use Quick Connect", systemImage: "number.square", isRunning: running?.attempt.goal == .quickConnect)
-            }
-            .disabled(running != nil)
-            .accessibilityIdentifier("login.quickConnect")
-        } footer: {
-            Text(Self.quickConnectExplanation)
-        }
+        keptSection
         knownServersSection
     }
 
-    /// The servers signed in to on the person's devices, from iCloud: one tap picks the server
-    /// and fills in the user, and the password or Quick Connect does the rest.
-    @ViewBuilder private var knownServersSection: some View {
-        if !knownServers.signIns.isEmpty || knownServers.problem != nil {
+    private var quickConnectButton: some View {
+        Button(action: useQuickConnect) {
+            title("Use Quick Connect", systemImage: "number.square", isRunning: running?.attempt.goal == .quickConnect)
+        }
+        .disabled(running != nil)
+        .accessibilityIdentifier("login.quickConnect")
+    }
+
+    /// The people the picked server lists, once they've come.
+    private var shownUsers: [PublicUser]? {
+        guard let publicUsers, publicUsers.server == flow.pickedServer?.url else { return nil }
+        return publicUsers.users
+    }
+
+    /// The people the server lists on its sign-in screen: one tap fills in the username, and
+    /// signs in someone without a password.
+    private func usersSection(_ users: [PublicUser]) -> some View {
+        Section {
+            ScrollView(.horizontal) {
+                HStack(spacing: Self.userSpacing) {
+                    ForEach(users) { user in
+                        Button {
+                            choose(user)
+                        } label: {
+                            PublicUserLabel(user: user, picture: flow.pickedServer.flatMap {
+                                accounts.pictureURL(of: user, on: $0.url, points: Int(Self.userSide))
+                            }, side: Self.userSide, isChosen: flow.trimmedUsername == user.name)
+                        }
+                        #if os(tvOS)
+                        .buttonStyle(.borderless)
+                        #else
+                        .buttonStyle(.plain)
+                        #endif
+                        .accessibilityIdentifier("login.publicUser")
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .scrollIndicators(.hidden)
+        } header: {
+            Text("Who's Signing In?")
+        }
+    }
+
+    #if os(tvOS)
+    private static let userSide: CGFloat = 140
+    private static let userSpacing: CGFloat = 40
+    #else
+    private static let userSide: CGFloat = 64
+    private static let userSpacing: CGFloat = 18
+    #endif
+
+    /// The sign-ins kept on this device but for the one in use: one tap uses it again.
+    @ViewBuilder private var keptSection: some View {
+        if !accounts.others.isEmpty {
             Section {
-                ForEach(knownServers.signIns) { signIn in
+                ForEach(accounts.others, id: \.tokenKey) { account in
+                    Button {
+                        switchTo(account)
+                    } label: {
+                        Label("\(account.userName) on \(account.serverTitle)", systemImage: "person.crop.circle")
+                    }
+                    .contextMenu {
+                        Button("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { signOut(account) }
+                    }
+                    .accessibilityAction(named: "Sign Out") { signOut(account) }
+                    .accessibilityIdentifier("login.keptAccount")
+                }
+            } header: {
+                Text("Signed In on This \(Device.name)")
+            } footer: {
+                Text("Choosing one switches to it without a password.")
+            }
+        }
+    }
+
+    /// The servers signed in to on the person's devices, from iCloud, but for the sign-ins kept
+    /// here: one tap picks the server and fills in the user, and the password or Quick Connect
+    /// does the rest.
+    @ViewBuilder private var knownServersSection: some View {
+        let signIns = knownServers.signIns.filter { signIn in !accounts.saved.contains { signIn.isSignedIn(as: $0) } }
+        if !signIns.isEmpty || knownServers.problem != nil {
+            Section {
+                ForEach(signIns) { signIn in
                     Button {
                         choose(signIn)
                     } label: {
@@ -243,61 +355,54 @@ struct LoginView: View {
     // MARK: The server step
 
     @ViewBuilder private var serverStep: some View {
+        #if os(tvOS)
+        if flow.root == .server {
+            Section {
+                HStack(spacing: 32) {
+                    AppMark(size: 120)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("vinnyfin").font(.title2.weight(.bold))
+                        Text("Your Jellyfin library, on this Apple TV.").foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        #endif
+        discoveredSection
         Section {
-            Picker("Protocol", selection: Binding { flow.address.scheme } set: { flow.address.choose($0) }) {
-                Text("HTTP").tag(ServerAddress.Scheme.http)
-                Text("HTTPS").tag(ServerAddress.Scheme.https)
+            TextField("Server Address", text: Binding { flow.addressText } set: { flow.typeAddress($0) },
+                      prompt: Text("http://192.168.1.10:8096 or jf.example.com"))
+                .textContentType(.URL)
+                #if !os(macOS)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+                .focused($focus, equals: .host)
+                .submitLabel(showsAdvanced ? .next : .go)
+                .onSubmit { if showsAdvanced { nextFocus = .port } else { connect() } }
+                .accessibilityIdentifier("login.host")
+                .id(SignInFlow.Field.host)
+            #if os(tvOS)
+            Button {
+                showsAdvanced.toggle()
+            } label: {
+                LabeledContent("Advanced") {
+                    Image(systemName: showsAdvanced ? "chevron.down" : "chevron.right")
+                }
             }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("login.scheme")
-            LabeledContent("Host") {
-                TextField("Host", text: $flow.address.host, prompt: Text("192.168.1.10 or jf.example.com"))
-                    .labelsHidden()
-                    .textContentType(.URL)
-                    #if !os(macOS)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .autocorrectionDisabled()
-                    .focused($focus, equals: .host)
-                    .submitLabel(.next)
-                    .onSubmit { nextFocus = .port }
-                    .accessibilityIdentifier("login.host")
-            }
-            .id(SignInFlow.Field.host)
-            LabeledContent("Port") {
-                TextField("Port", text: $flow.address.port, prompt: Text(String(flow.address.scheme.defaultPort)))
-                    .labelsHidden()
-                    #if !os(macOS)
-                    // Has a return key, unlike the number pad.
-                    .keyboardType(.numbersAndPunctuation)
-                    #endif
-                    .autocorrectionDisabled()
-                    .focused($focus, equals: .port)
-                    .submitLabel(.next)
-                    .onSubmit { nextFocus = .path }
-                    .accessibilityIdentifier("login.port")
-            }
-            .id(SignInFlow.Field.port)
-            LabeledContent("Base Path") {
-                TextField("Base Path", text: $flow.address.path, prompt: Text("Optional, e.g. /jellyfin"))
-                    .labelsHidden()
-                    #if !os(macOS)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .autocorrectionDisabled()
-                    .focused($focus, equals: .path)
-                    .submitLabel(.go)
-                    .onSubmit(connect)
-                    .accessibilityIdentifier("login.path")
-            }
-            .id(SignInFlow.Field.path)
+            .accessibilityIdentifier("login.advanced")
+            if showsAdvanced { advancedFields }
+            #else
+            DisclosureGroup("Advanced", isExpanded: $showsAdvanced) { advancedFields }
+                .accessibilityIdentifier("login.advanced")
+            #endif
         } header: {
             // Above the fields, where the keyboard doesn't cover it, or on a short screen, under
             // the bar.
             VStack(alignment: .leading, spacing: 4) {
-                Text("Server")
+                Text("Server Address")
                 if !pinsServerStatus {
                     serverStatus
                         .textCase(nil)
@@ -311,7 +416,7 @@ struct LoginView: View {
             }
         }
         #if os(tvOS)
-        Section { stepButton }
+        Section { stepButton(.server) }
         #endif
         if offersHTTP {
             Section {
@@ -325,9 +430,94 @@ struct LoginView: View {
                     .accessibilityIdentifier("login.usePassword")
             }
         }
-        Section {
-            Button("Back", systemImage: "chevron.backward", action: back)
-                .accessibilityIdentifier("login.back")
+        if flow.root == .server {
+            if flow.trimmedUsername.isEmpty {
+                Section {
+                    Button("Sign In with a Username", systemImage: "person.text.rectangle", action: useUsernameFirst)
+                        .accessibilityIdentifier("login.usernameFirst")
+                } footer: {
+                    Text("Enter your username and password first, and the server's address after.")
+                }
+            }
+            keptSection
+            knownServersSection
+        }
+    }
+
+    /// The address's protocol, port and base path, which the address field fills in.
+    @ViewBuilder private var advancedFields: some View {
+        Picker("Protocol", selection: Binding { flow.address.givenScheme } set: { scheme in flow.editAddress { $0.choose(scheme) } }) {
+            Text("Automatic").tag(ServerAddress.Scheme?.none)
+            Text("HTTP").tag(ServerAddress.Scheme?.some(.http))
+            Text("HTTPS").tag(ServerAddress.Scheme?.some(.https))
+        }
+        .accessibilityIdentifier("login.scheme")
+        LabeledContent("Port") {
+            TextField("Port", text: Binding { flow.address.port } set: { port in flow.editAddress { $0.port = port } },
+                      prompt: Text(flow.address.givenScheme.map { String($0.defaultPort) } ?? "Automatic"))
+                .labelsHidden()
+                #if !os(macOS)
+                // Has a return key, unlike the number pad.
+                .keyboardType(.numbersAndPunctuation)
+                #endif
+                .autocorrectionDisabled()
+                .focused($focus, equals: .port)
+                .submitLabel(.next)
+                .onSubmit { nextFocus = .path }
+                .accessibilityIdentifier("login.port")
+        }
+        .id(SignInFlow.Field.port)
+        LabeledContent("Base Path") {
+            TextField("Base Path", text: Binding { flow.address.path } set: { path in flow.editAddress { $0.path = path } },
+                      prompt: Text("Optional, e.g. /jellyfin"))
+                .labelsHidden()
+                #if !os(macOS)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                #endif
+                .autocorrectionDisabled()
+                .focused($focus, equals: .path)
+                .submitLabel(.go)
+                .onSubmit(connect)
+                .accessibilityIdentifier("login.path")
+        }
+        .id(SignInFlow.Field.path)
+    }
+
+    /// The servers that answered on the network, while the system lets the app ask
+    /// (`ServerDiscovery`): one tap finds the server, then asks who's signing in.
+    @ViewBuilder private var discoveredSection: some View {
+        if discovery.isAvailable == true {
+            Section {
+                ForEach(discovery.servers) { server in
+                    Button {
+                        pick(server)
+                    } label: {
+                        LabeledContent {
+                            Text(SignInFlow.title(of: server.address))
+                        } label: {
+                            Label(server.name, systemImage: "server.rack")
+                        }
+                    }
+                    .disabled(running != nil)
+                    .accessibilityIdentifier("login.discovered")
+                }
+                if discovery.servers.isEmpty {
+                    if discovery.isSearching {
+                        Label {
+                            Text("Looking on your network…")
+                        } icon: {
+                            ProgressView().controlSize(.small)
+                        }
+                        .foregroundStyle(.secondary)
+                    } else {
+                        Text("No servers answered on this network. Enter your server's address below.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("On Your Network")
+            }
         }
     }
 
@@ -449,14 +639,53 @@ struct LoginView: View {
         follow(flow.connect())
     }
 
+    private func pick(_ server: DiscoveredServer) {
+        guard running == nil else { return }
+        follow(flow.pick(server))
+    }
+
+    private func choose(_ user: PublicUser) {
+        guard running == nil else { return }
+        follow(flow.chooseUser(user))
+    }
+
+    /// A server signed in to on the person's devices: this device's own sign-in to it, kept here,
+    /// switches to it; any other picks the server and fills in the user.
     private func choose(_ signIn: ServerSignIn) {
         cancelSignIn()
+        if let kept = accounts.saved.first(where: { signIn.isSignedIn(as: $0) }) {
+            switchTo(kept)
+            return
+        }
         if let next = flow.choose(signIn, password: knownServers.password(for: signIn)) { follow(next) }
+    }
+
+    private func switchTo(_ account: AccountStore.Account) {
+        cancelSignIn()
+        do {
+            try accounts.switchTo(account)
+            dismiss()
+        } catch {
+            flow.showAccountError(error.localizedDescription)
+        }
+    }
+
+    private func signOut(_ account: AccountStore.Account) {
+        #if os(tvOS)
+        accounts.signOut(of: account)
+        #else
+        accounts.signOut(of: account, cancelling: downloads)
+        #endif
     }
 
     private func changeServer() {
         cancelSignIn()
         nextFocus = flow.changeServer()
+    }
+
+    private func useUsernameFirst() {
+        cancelSignIn()
+        nextFocus = flow.useUsernameFirst()
     }
 
     private func back() {
@@ -531,7 +760,13 @@ struct LoginView: View {
             case .server:
                 return
             case .password(let username, let password):
-                try await accounts.signIn(to: server, username: username, password: password)
+                try await accounts.signIn(to: server, username: username, password: password) {
+                    // Emptied on screen before the screen goes: iOS offers to save a password
+                    // still in its field as the field goes, over vinnyfin's own offer to save it
+                    // in iCloud.
+                    flow.password = ""
+                    try await Task.sleep(for: Self.fieldClearing)
+                }
                 if let account = accounts.account { knownServers.signedIn(as: account, with: password) }
             case .quickConnect:
                 let state = try await accounts.startQuickConnect(on: server)
@@ -543,9 +778,11 @@ struct LoginView: View {
                 }
             }
         } catch {
+            if case .password(_, let password) = going.goal, flow.password.isEmpty { flow.password = password }
             fail(going, while: .signingIn, with: error)
             return
         }
+        defaultLanguages()
         guard !Task.isCancelled else { return }
         quickConnect = nil
         dismiss()
@@ -553,6 +790,23 @@ struct LoginView: View {
 
     /// How long the Quick Connect code says it's signed in before the screen goes.
     private static let signedInMoment = Duration.seconds(1)
+    /// Long enough for the screen to draw the password field emptied.
+    private static let fieldClearing = Duration.milliseconds(100)
+
+    /// The first sign-in sets the audio and subtitle languages never chosen in vinnyfin to the
+    /// Jellyfin user's own, or else this device's.
+    private func defaultLanguages() {
+        guard settings.needsLanguageDefaults, let client = accounts.client else { return }
+        let settings = settings
+        Task {
+            do {
+                let languages: UserLanguages = try await client.currentUser()
+                settings.defaultLanguages(audio: languages.audio, subtitle: languages.subtitle)
+            } catch {
+                // Asked again at the next sign-in.
+            }
+        }
+    }
 
     private func fail(_ attempt: SignInFlow.Attempt, while stage: SignInFlow.Stage, with error: any Error) {
         guard !Task.isCancelled, !error.isCancellation else { return }
@@ -586,6 +840,58 @@ struct LoginView: View {
                 announce(trouble.message)
             }
         }
+    }
+
+    /// The people the picked server lists on its sign-in screen. A server that lists no one, or
+    /// can't be asked, shows no one.
+    private func loadPublicUsers() async {
+        guard flow.step == .account, let server = flow.pickedServer?.url else { return }
+        if publicUsers?.server == server { return }
+        do {
+            let users = try await accounts.publicUsers(on: server)
+            publicUsers = (server, users)
+        } catch {
+            publicUsers = (server, [])
+        }
+    }
+}
+
+/// Someone a server lists: their picture, or their initial without one, and their name.
+private struct PublicUserLabel: View {
+    let user: PublicUser
+    let picture: URL?
+    let side: CGFloat
+    let isChosen: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().fill(.tint.opacity(0.18))
+                Text(user.name.prefix(1).uppercased())
+                    .font(.system(size: side * 0.42, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.tint)
+                if let picture {
+                    AsyncImage(url: picture) { image in
+                        image.resizable().scaledToFill()
+                    } placeholder: {
+                        Color.clear
+                    }
+                    .clipShape(.circle)
+                }
+            }
+            .frame(width: side, height: side)
+            .overlay {
+                if isChosen { Circle().strokeBorder(.tint, lineWidth: 3) }
+            }
+            Text(user.name)
+                .font(.footnote)
+                .lineLimit(1)
+                .frame(maxWidth: side + 16)
+        }
+        .contentShape(.rect)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(user.name)
+        .accessibilityAddTraits(isChosen ? .isSelected : [])
     }
 }
 

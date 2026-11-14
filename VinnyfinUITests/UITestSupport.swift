@@ -24,8 +24,9 @@ func requestScreenshot(_ name: String) async throws {
 extension XCTestCase {
     #if os(tvOS)
     /// Signs in to `server` as `username`, a user without a password, with the remote: down
-    /// through the form, typing into each field the keyboard opens for. The account comes first,
-    /// then the server, unless the last sign-in picked it.
+    /// through the form, typing into each field the keyboard opens for. Someone new gives the
+    /// server first, then the account; anyone who has signed in before, the account first, then
+    /// the server, unless the last sign-in picked it.
     @MainActor
     func signInIfNeeded(_ app: XCUIApplication, server: String, username: String) {
         let connect = app.buttons["welcome.connect"]
@@ -34,7 +35,12 @@ extension XCTestCase {
             XCUIRemote.shared.press(.select)
         }
         let usernameField = app.textFields["login.username"]
-        guard usernameField.waitForExistence(timeout: 5) else { return }
+        let host = app.textFields["login.host"]
+        guard let first = firstToAppear(usernameField, host) else { return }
+        if first == .second {
+            self.connect(to: server, from: host, in: app)
+            XCTAssertTrue(usernameField.waitForExistence(timeout: uiTimeout), "The server step never led to the account step")
+        }
         enter(username, into: usernameField, in: app)
         let change = app.buttons["login.changeServer"]
         let changing = change.exists && !isAddress(change.value as? String, of: server)
@@ -46,17 +52,16 @@ extension XCTestCase {
             focus(submit, in: app)
         }
         XCUIRemote.shared.press(.select)
-        let host = app.textFields["login.host"]
         guard waitForServerStep(host, orSignInPast: usernameField) else { return }
-        if changing {
-            // The other server's port and path would stay, as an address without its own keeps them.
-            enter("", into: app.textFields["login.port"], in: app)
-            enter("", into: app.textFields["login.path"], in: app)
-        }
-        // A full address in the host field is split into protocol, host, port and path.
+        self.connect(to: server, from: host, in: app)
+    }
+
+    /// Replaces the server step's address with `server`, protocol, port, path and all, and
+    /// connects to it.
+    @MainActor
+    private func connect(to server: String, from host: XCUIElement, in app: XCUIApplication) {
         enter(server, into: host, in: app)
-        let signIn = app.buttons["login.connect"]
-        focus(signIn, in: app)
+        focus(app.buttons["login.connect"], in: app)
         XCUIRemote.shared.press(.select)
     }
 
@@ -86,7 +91,7 @@ extension XCTestCase {
         XCUIRemote.shared.press(.select)
         let keyboard = app.keyboards.firstMatch
         XCTAssertTrue(keyboard.waitForExistence(timeout: uiTimeout), "The keyboard never opened for \(field)")
-        app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 30) + text)
+        app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 60) + text)
         XCUIRemote.shared.press(.menu)
         XCTAssertTrue(keyboard.waitForNonExistence(timeout: uiTimeout), "The keyboard never closed")
     }
@@ -115,14 +120,24 @@ extension XCTestCase {
     }
     #else
     /// Signs in to `server` as `username`, a user without a password: typing a password would
-    /// raise the system's Save Password sheet. The account comes first, then the server, unless
-    /// the last sign-in picked it.
+    /// raise the system's Save Password sheet. Someone new gives the server first, then the
+    /// account; anyone who has signed in before, the account first, then the server, unless the
+    /// last sign-in picked it.
     @MainActor
     func signInIfNeeded(_ app: XCUIApplication, server: String, username: String) {
         let connect = app.buttons["welcome.connect"]
         if connect.waitForExistence(timeout: 5) { connect.tap() }
         let usernameField = app.textFields["login.username"]
-        guard usernameField.waitForExistence(timeout: 5) else { return }
+        let host = app.textFields["login.host"]
+        guard let first = firstToAppear(usernameField, host) else { return }
+        if first == .second {
+            host.tap()
+            enterAddress(server, into: host)
+            // Return walks the account step's fields, username then password, then signs in.
+            type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + username + "\n", into: usernameField)
+            type("\n", into: app.secureTextFields["login.password"])
+            return
+        }
         // The form starts from the last sign-in's user and server. Return walks the fields:
         // username, password, then signs in to the server picked, or asks for one.
         usernameField.tap()
@@ -134,23 +149,19 @@ extension XCTestCase {
         } else {
             type("\n", into: app.secureTextFields["login.password"])
         }
-        let host = app.textFields["login.host"]
         guard waitForServerStep(host, orSignInPast: usernameField) else { return }
-        if changing {
-            // The other server's port and path would stay, as an address without its own keeps them.
-            for field in [app.textFields["login.path"], app.textFields["login.port"]] {
-                field.tap()
-                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20))
-            }
-        }
-        // A full address in the host field is split into protocol, host, port and path, and Return
-        // walks the fields: host, port, path, then signs in. The tap is past the end of the text,
-        // so the deletes before the cursor take all of it: one in the middle of a long address,
-        // such as the demo server's, leaves the rest after what's typed.
+        enterAddress(server, into: host)
+    }
+
+    /// Replaces the server step's address, which has the cursor, with `server`, protocol, port,
+    /// path and all, and Return connects to it. The tap is past the end of the text, so the
+    /// deletes before the cursor take all of it: one in the middle of a long address, such as
+    /// the demo server's, leaves the rest after what's typed.
+    @MainActor
+    func enterAddress(_ server: String, into host: XCUIElement) {
+        XCTAssertTrue(waitForKeyboardFocus(host), "The address field never took focus")
         host.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
-        host.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + server + "\n")
-        type("\n", into: app.textFields["login.port"])
-        type("\n", into: app.textFields["login.path"])
+        host.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 60) + server + "\n")
     }
 
     /// Types once `field` has the keyboard focus that Return moved to it.
@@ -168,9 +179,8 @@ extension XCTestCase {
     }
     #endif
 
-    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone, iPad and Vision
-    /// Pro and in a tab of the sidebar on Apple TV, and in the General pane of the Mac's Settings
-    /// window.
+    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone and in a tab on
+    /// iPad, Vision Pro and Apple TV, and in the General pane of the Mac's Settings window.
     @MainActor
     func signOut(_ app: XCUIApplication) {
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign Out' AND identifier != 'settings.signOut'")).firstMatch
@@ -195,7 +205,7 @@ extension XCTestCase {
         tap(confirm)
         app.typeKey("w", modifierFlags: .command)
         #else
-        tap(app.buttons["home.settings"])
+        openSettings(app)
         tap(app.buttons["settings.account"])
         // Down the page to it, past the screen's bottom at the largest text sizes.
         let signOut = app.buttons["settings.signOut"]
@@ -205,7 +215,40 @@ extension XCTestCase {
         #endif
     }
 
+    #if os(iOS) || os(visionOS)
+    /// Opens Settings: on iPhone a sheet from the account menu, Home's avatar, whose items XCUITest
+    /// knows by their labels; on iPad and Vision Pro a tab of its own. Whether it's a sheet, which
+    /// Done closes.
+    @MainActor @discardableResult
+    func openSettings(_ app: XCUIApplication) -> Bool {
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            tap(app.buttons["home.settings"])
+            tap(app.buttons.matching(NSPredicate(format: "identifier == 'home.openSettings' OR label == 'Settings'")).firstMatch)
+            return true
+        }
+        #endif
+        tap(tab("Settings", in: app))
+        return false
+    }
+    #endif
+
     #if !os(visionOS)
+    /// Which of two elements appears first.
+    enum Appeared { case first, second }
+
+    /// Which of two elements appears first, within a few seconds; nil for neither.
+    @MainActor
+    func firstToAppear(_ first: XCUIElement, _ second: XCUIElement) -> Appeared? {
+        let deadline = Date.now.addingTimeInterval(5)
+        repeat {
+            if first.exists { return .first }
+            if second.exists { return .second }
+            RunLoop.current.run(until: .now.addingTimeInterval(0.25))
+        } while Date.now < deadline
+        return nil
+    }
+
     /// Waits for the sign-in screen to ask for the server's address, or to sign in to the server
     /// it picked, which takes it and the account step away. Whether it asked.
     @MainActor

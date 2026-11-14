@@ -90,7 +90,7 @@ struct StartingTitle: View {
                     .font((isShort ? Font.title3 : .title).weight(.bold))
                     .lineLimit(isShort ? 1 : dynamicTypeSize.lineLimit(2))
             }
-            if item.isEpisode {
+            if namesEpisode {
                 Text([item.episodeCode, item.name].compactMap(\.self).joined(separator: " · "))
                     .font((isShort ? Font.headline : .title3).weight(.semibold))
                     .lineLimit(isShort ? 1 : dynamicTypeSize.lineLimit(2))
@@ -99,11 +99,15 @@ struct StartingTitle: View {
         .foregroundStyle(.white)
         .shadow(color: .black.opacity(0.5), radius: 8)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Starting \(item.isEpisode ? [name, item.episodeCode, item.name].compactMap(\.self).joined(separator: ", ") : name)")
+        .accessibilityLabel("Starting \(namesEpisode ? [name, item.episodeCode, item.name].compactMap(\.self).joined(separator: ", ") : name)")
     }
 
     /// The show's name for an episode.
     private var name: String { item.isEpisode ? item.seriesName ?? item.name : item.name }
+
+    /// An episode of a known show, which says which one it is under the show's name. One a link
+    /// opened is only its name until it loads.
+    private var namesEpisode: Bool { item.isEpisode && item.seriesName != nil }
 
     private var logoURL: URL? {
         #if !os(tvOS)

@@ -146,8 +146,9 @@ struct HandoffTests {
         #expect(handedOff.start(resuming: nil) == 600)
         #expect(handedOff.start(resuming: 300) == 600)
         #expect(handedOff.start(resuming: 900) == 900)
+        // A plain resume backs up a moment; the other device's position stands as it is.
         let plain = PlaybackRequest.item(Samples.movie)
-        #expect(plain.start(resuming: 300) == 300)
+        #expect(plain.start(resuming: 300) == 300 - PlaybackRequest.resumeLeadIn)
         #expect(plain.start(resuming: nil) == nil)
         // A device that plays what another one asks starts where it asked, wherever the title resumes.
         let asked = PlaybackRequest(source: .item(id: Samples.movie.id, mediaSourceId: nil), title: "",

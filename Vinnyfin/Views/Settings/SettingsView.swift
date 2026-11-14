@@ -223,6 +223,9 @@ private struct AccountSection: View {
                 LabeledContent("Server", value: account.serverName ?? account.serverURL.host() ?? "Jellyfin")
                 LabeledContent("Address", value: account.serverURL.absoluteString)
                 LabeledContent("Signed In As", value: account.userName)
+                #if os(tvOS)
+                AccountRows()
+                #endif
                 LabeledContent("Remote Control", value: socket.state.label)
                     .accessibilityIdentifier("settings.remoteControl")
                 Button(role: .destructive) {
@@ -305,6 +308,10 @@ private struct PlaybackSettings: View {
         Section {
             Toggle("Play the Next Episode Automatically", isOn: $settings.autoplayNextEpisode)
             Toggle("Offer to Skip Intros and Credits", isOn: $settings.showSkipButtons)
+            SettingPicker("Skip Intros", selection: $settings.introSkipping) {
+                ForEach(AppSettings.IntroSkipping.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.introSkipping")
             #if os(tvOS)
             Toggle("Match Frame Rate and Dynamic Range", isOn: $settings.matchContent)
             #endif
@@ -527,19 +534,6 @@ private struct AboutSettings: View {
         }
     }
 }
-
-#if !os(tvOS)
-extension AccountStore {
-    /// Signs out, cancelling the downloads that haven't finished: only this sign-in can fetch
-    /// them. The server's copies of their transcodes are deleted before it's told, while the
-    /// sign-in still works there.
-    func signOut(cancelling downloads: DownloadManager) {
-        downloads.removeUnfinished()
-        let transcodes = downloads.transcodes
-        signOut { await transcodes.finishCleanups() }
-    }
-}
-#endif
 
 #if os(tvOS)
 /// The system's toggle with its name in the text's color, which turns dark on the white of a

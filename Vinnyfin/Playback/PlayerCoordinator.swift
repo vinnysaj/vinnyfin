@@ -149,7 +149,7 @@ final class PlayerCoordinator {
         // Put away, the player isn't there to close itself.
         case .stop where isInPictureInPicture: Task { await dismiss() }
         case .stop: stopRequest = model.id
-        case .seek(let seconds): model.seek(to: seconds)
+        case .seek(let seconds): model.seekAsAskedElsewhere(to: seconds)
         case .skip(let seconds): model.skip(by: seconds)
         case .nextEpisode: Task { await model.playNextEpisode() }
         case .previousEpisode: Task { await model.playPreviousEpisode() }

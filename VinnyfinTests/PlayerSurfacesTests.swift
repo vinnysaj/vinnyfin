@@ -273,6 +273,8 @@ struct QualityPanelTests {
         #expect(summary(.direct(uhd), .connectionRecovered) == "Original · 4K, the connection recovered")
         #expect(summary(.direct(fullHD), .streamingLimit(.setting(.fullHD))) == "1080p version, Streaming Quality is set to 1080p")
         #expect(summary(.direct(fullHD), .streamingLimit(.display(1080))) == "1080p version, this TV shows 1080p")
+        #expect(summary(.transcode(uhd, .hd), .streamingLimit(.network(.expensive))) == "Converted to 720p, on cellular data")
+        #expect(summary(.transcode(uhd, .hd), .streamingLimit(.network(.lowData))) == "Converted to 720p, in Low Data Mode")
         #expect(summary(.direct(fullHD), .streamingLimit(.learnedBitrate(12_000_000)))
             == "1080p version, the connection here carries about 12 Mbps")
         #expect(summary(.transcode(uhd, .fullHD), .deviceCouldNotPlay) == "Converted to 1080p, this device can't play the original")
@@ -290,6 +292,8 @@ struct QualityPanelTests {
         }
         #expect(started(.direct(uhd), StreamingLimit(quality: .original)) == .streamingLimit(nil))
         #expect(started(.direct(fullHD), StreamingLimit(quality: .fullHD)) == .streamingLimit(.setting(.fullHD)))
+        // Held to the cellular streaming quality, below the streaming quality.
+        #expect(started(.direct(hd), StreamingLimit(quality: .hd, savingData: .expensive)) == .streamingLimit(.network(.expensive)))
         #expect(started(.direct(fullHD), StreamingLimit(quality: .original, displayHeight: 1080)) == .streamingLimit(.display(1080)))
         #expect(started(.direct(fullHD), StreamingLimit(quality: .original, bitrate: 12_000_000))
             == .streamingLimit(.learnedBitrate(12_000_000)))

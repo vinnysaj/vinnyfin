@@ -1,3 +1,4 @@
+import AetherEngine
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
@@ -7,14 +8,15 @@ import UIKit
 /// `TrackPanel`'s, the quality `QualityPanel`'s, and the show's episodes `EpisodesPanel`'s; on
 /// Apple TV the episodes and the info are the tabs a swipe down from the buttons (`PlayerTabs`).
 enum PlayerPanel: Identifiable {
-    case audio, subtitles, speed, chapters, episodes, quality, info
+    /// The audio tracks when there's a choice, the subtitles and their timing, and the sound tools.
+    case audioAndSubtitles
+    case speed, chapters, episodes, quality, info
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .audio: "Audio"
-        case .subtitles: "Subtitles"
+        case .audioAndSubtitles: "Audio & Subtitles"
         case .speed: "Speed"
         case .chapters: "Chapters"
         case .episodes: "Episodes"
@@ -25,8 +27,7 @@ enum PlayerPanel: Identifiable {
 
     var symbol: String {
         switch self {
-        case .audio: "speaker.wave.2"
-        case .subtitles: "captions.bubble"
+        case .audioAndSubtitles: "captions.bubble"
         case .speed: "gauge.with.dots.needle.67percent"
         case .chapters: "list.bullet.rectangle"
         case .episodes: "rectangle.stack"
@@ -38,7 +39,7 @@ enum PlayerPanel: Identifiable {
     /// A list of `TrackPanel`'s.
     var isTrackPanel: Bool {
         switch self {
-        case .audio, .subtitles, .speed, .chapters: true
+        case .audioAndSubtitles, .speed, .chapters: true
         case .episodes, .quality, .info: false
         }
     }
@@ -50,6 +51,32 @@ enum PlayerPanel: Identifiable {
         #else
         false
         #endif
+    }
+
+    /// Picking a choice closes it; the audio and subtitles panel, with more to set beside the
+    /// choice, stays.
+    var closesOnChoice: Bool { self != .audioAndSubtitles }
+}
+
+/// Where each panel's button is, in global coordinates, for the panel to open above it.
+struct PanelButtonFrames: PreferenceKey {
+    static let defaultValue: [PlayerPanel: CGRect] = [:]
+
+    static func reduce(value: inout [PlayerPanel: CGRect], nextValue: () -> [PlayerPanel: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// Where a panel opens over the button that opened it.
+nonisolated enum PanelPlacement {
+    /// The gap between a panel and the top of its button.
+    static let gap: CGFloat = 10
+
+    /// The leading edge of a panel `width` wide, centered over a button whose middle is at
+    /// `buttonMidX`, kept `margin` inside a container `containerWidth` wide.
+    static func leading(width: CGFloat, buttonMidX: CGFloat, containerWidth: CGFloat, margin: CGFloat) -> CGFloat {
+        let centered = buttonMidX - width / 2
+        return min(max(margin, centered), max(margin, containerWidth - margin - width))
     }
 }
 
@@ -66,10 +93,16 @@ enum PlaybackSpeed {
     static func name(_ rate: Float) -> String {
         rate == 1 ? "Normal" : label(rate)
     }
+
+    /// The choice nearest `rate`, as a remote can ask for any speed.
+    static func nearest(to rate: Float) -> Float {
+        choices.min { abs($0 - rate) < abs($1 - rate) } ?? 1
+    }
 }
 
-/// A list of audio tracks, subtitle tracks or chapters, with the current one checked, or a row of
-/// speeds with the current one lit.
+/// A panel of choices with the current one checked: the audio tracks when there's a choice, the
+/// subtitles and their timing, and the sound tools; the speeds in a row with the current one
+/// lit; or the chapters.
 struct TrackPanel: View {
     let model: PlayerModel
     let panel: PlayerPanel
@@ -93,44 +126,49 @@ struct TrackPanel: View {
     @FocusState private var focusedRow: String?
     #endif
 
-    private var rows: [Row] {
-        switch panel {
-        case .audio:
-            return model.audioOptions.map { option in
-                Row(id: "audio.\(option.id)", title: option.title, detail: option.detail,
-                    isSelected: model.selectedAudio == option.id) { model.chooseAudio(option.id) }
-            }
-        case .subtitles:
-            let off = Row(id: "subtitle.off", title: "Off", detail: nil, isSelected: model.selectedSubtitle == nil) {
-                model.chooseSubtitle(nil)
-            }
-            return [off] + model.subtitleOptions.map { option in
-                Row(id: "subtitle.\(option.id)", title: option.title, detail: option.detail,
-                    isSelected: model.selectedSubtitle == option.id) { model.chooseSubtitle(option.id) }
-            }
-        case .speed:
-            return PlaybackSpeed.choices.map { rate in
-                Row(id: "speed.\(rate)", title: PlaybackSpeed.label(rate), spokenTitle: PlaybackSpeed.name(rate), detail: nil,
-                    isSelected: model.rate == rate) { model.setRate(rate) }
-            }
-        case .chapters:
-            let playing = ChapterMark.current(in: model.chapters, at: model.clock.time)
-            return model.chapters.map { chapter in
-                Row(id: "chapter.\(chapter.index)", title: chapter.name, detail: Scrubber.format(chapter.start),
-                    isSelected: chapter == playing, image: chapter.image) { model.seek(to: chapter.start) }
-            }
-        case .episodes, .quality, .info:
-            return []
+    private var audioRows: [Row] {
+        model.audioOptions.map { option in
+            Row(id: "audio.\(option.id)", title: option.title, detail: option.detail,
+                isSelected: model.selectedAudio == option.id) { model.chooseAudio(option.id) }
         }
     }
 
-    /// Under the rows, when there's only one choice or none: why.
-    private var note: String? {
+    private var subtitleRows: [Row] {
+        let off = Row(id: "subtitle.off", title: "Off", detail: nil, isSelected: model.selectedSubtitle == nil) {
+            model.chooseSubtitle(nil)
+        }
+        return [off] + model.subtitleOptions.map { option in
+            Row(id: "subtitle.\(option.id)", title: option.title, detail: option.detail,
+                isSelected: model.selectedSubtitle == option.id) { model.chooseSubtitle(option.id) }
+        }
+    }
+
+    private var speedRows: [Row] {
+        PlaybackSpeed.choices.map { rate in
+            Row(id: "speed.\(rate)", title: PlaybackSpeed.label(rate), spokenTitle: PlaybackSpeed.name(rate), detail: nil,
+                isSelected: model.rate == rate) { model.setRate(rate) }
+        }
+    }
+
+    private var chapterRows: [Row] {
+        let playing = ChapterMark.current(in: model.chapters, at: model.clock.time)
+        return model.chapters.map { chapter in
+            Row(id: "chapter.\(chapter.index)", title: chapter.name, detail: Scrubber.format(chapter.start),
+                isSelected: chapter == playing, image: chapter.image) { model.seek(to: chapter.start) }
+        }
+    }
+
+    /// The audio tracks are a choice only when there's more than one; one track has nothing to pick.
+    private var showsAudioTracks: Bool { model.audioOptions.count > 1 }
+
+    /// The choice the remote starts on and a long list opens at: the subtitles' in the audio and
+    /// subtitles panel, which its button is for.
+    private var currentRow: String? {
         switch panel {
-        case .audio where model.audioOptions.count == 1: "Only audio track"
-        // While the playback starts, its tracks aren't all listed yet.
-        case .subtitles where model.subtitleOptions.isEmpty && !isStarting: "No subtitles in this file"
-        default: nil
+        case .audioAndSubtitles: subtitleRows.first(where: \.isSelected)?.id
+        case .speed: speedRows.first(where: \.isSelected)?.id ?? speedRows.first?.id
+        case .chapters: chapterRows.first(where: \.isSelected)?.id ?? chapterRows.first?.id
+        case .episodes, .quality, .info: nil
         }
     }
 
@@ -156,16 +194,22 @@ struct TrackPanel: View {
                 #endif
             }
             .padding([.horizontal, .top])
-            if panel == .speed { speeds } else { list }
+            switch panel {
+            case .audioAndSubtitles: tracks
+            case .speed: speeds
+            case .chapters: chapters
+            // Panels of their own (`PlayerPanel.isTrackPanel`).
+            case .episodes, .quality, .info: EmptyView()
+            }
         }
         // The speeds' row sets the width of theirs.
         .frame(width: panel == .speed ? nil : Self.width)
-        .frame(maxHeight: min(440, room))
+        .frame(maxHeight: min(Self.maxHeight, room))
         .fixedSize(horizontal: panel == .speed, vertical: true)
         .platformGlass(in: .rect(cornerRadius: 24))
         #if os(tvOS)
         .focusSection()
-        .onAppear { focusedRow = rows.first(where: \.isSelected)?.id ?? rows.first?.id }
+        .onAppear { focusedRow = currentRow }
         #endif
         .accessibilityElement(children: .contain)
         // VoiceOver's two-finger scrub, and Escape, close it.
@@ -173,40 +217,121 @@ struct TrackPanel: View {
         .accessibilityIdentifier("player.panel")
     }
 
-    /// The rows, opening on the current choice, as far down a long list as it is.
-    private var list: some View {
+    // MARK: Audio and subtitles
+
+    private var tracks: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Self.rowSpacing) {
+                if showsAudioTracks {
+                    sectionHeader("Audio")
+                    ForEach(audioRows) { rowButton($0) }
+                }
+                sectionHeader("Subtitles")
+                ForEach(subtitleRows) { rowButton($0) }
+                // While the playback starts, its tracks aren't all listed yet.
+                if model.subtitleOptions.isEmpty, !isStarting {
+                    noteLabel("No subtitles in this file")
+                }
+                if model.selectedSubtitle != nil {
+                    SubtitleTiming(model: model)
+                        .padding(.horizontal, Self.rowInset)
+                }
+                sectionHeader("Sound")
+                soundToggle("Boost Dialogue", detail: "Voices clearer over music and effects", id: "sound.dialogue",
+                            isOn: model.sound.boostsDialogue, set: model.setBoostsDialogue)
+                soundToggle("Reduce Loud Sounds", detail: "Loud scenes closer to quiet ones", id: "sound.loud",
+                            isOn: model.sound.reducesLoudSounds, set: model.setReducesLoudSounds)
+                if model.soundShapingState == .unavailable {
+                    noteLabel("Not available for this stream")
+                }
+            }
+            .padding(.bottom, Self.rowInset + 6)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal)
+            .padding(.horizontal, Self.rowInset)
+            .padding(.top, Self.sectionGap)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    /// A sound tool, on or off, which stays on for every playback until it's turned off.
+    @ViewBuilder private func soundToggle(_ title: String, detail: String, id: String, isOn: Bool,
+                                          set: @escaping (Bool) -> Void) -> some View {
+        #if os(tvOS)
+        Button {
+            set(!isOn)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Text(isOn ? "On" : "Off").foregroundStyle(.secondary)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(PanelRowStyle())
+        .padding(.horizontal, Self.rowInset)
+        .focused($focusedRow, equals: id)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityIdentifier("panel.\(id)")
+        #else
+        Toggle(isOn: Binding(get: { isOn }, set: set)) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .toggleStyle(.switch)
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .accessibilityIdentifier("panel.\(id)")
+        #endif
+    }
+
+    // MARK: Chapters and speeds
+
+    /// The chapters, opening on the one playing, as far down a long list as it is.
+    private var chapters: some View {
         ScrollViewReader { scroller in
             ScrollView {
                 VStack(alignment: .leading, spacing: Self.rowSpacing) {
-                    ForEach(rows) { row in
-                        Button {
-                            choose(row.choose)
-                        } label: {
-                            rowLabel(row)
-                        }
-                        #if os(tvOS)
-                        .buttonStyle(PanelRowStyle())
-                        .padding(.horizontal, Self.rowInset)
-                        .focused($focusedRow, equals: row.id)
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
-                        .accessibilityAddTraits(row.isSelected ? .isSelected : [])
-                        .accessibilityIdentifier("panel.\(row.id)")
-                        .id(row.id)
-                    }
-                    if let note {
-                        noteLabel(note)
-                    }
+                    ForEach(chapterRows) { rowButton($0) }
                 }
                 .padding(.vertical, Self.rowInset)
             }
             .scrollBounceBehavior(.basedOnSize)
             // Once laid out, and again as another panel takes this one's place.
             .task(id: panel) {
-                if let selected = rows.first(where: \.isSelected) { scroller.scrollTo(selected.id, anchor: .center) }
+                if let currentRow { scroller.scrollTo(currentRow, anchor: .center) }
             }
         }
+    }
+
+    private func rowButton(_ row: Row) -> some View {
+        Button {
+            choose(row.choose)
+        } label: {
+            rowLabel(row)
+        }
+        #if os(tvOS)
+        .buttonStyle(PanelRowStyle())
+        .padding(.horizontal, Self.rowInset)
+        .focused($focusedRow, equals: row.id)
+        #else
+        .buttonStyle(.plain)
+        #endif
+        .accessibilityAddTraits(row.isSelected ? .isSelected : [])
+        .accessibilityIdentifier("panel.\(row.id)")
+        .id(row.id)
     }
 
     private func rowLabel(_ row: Row) -> some View {
@@ -249,7 +374,7 @@ struct TrackPanel: View {
     /// text size, as the player's buttons do, and the Large Content Viewer shows each one large.
     private var speeds: some View {
         HStack(spacing: Self.chipSpacing) {
-            ForEach(rows) { row in
+            ForEach(speedRows) { row in
                 speedChip(row)
             }
         }
@@ -275,14 +400,15 @@ struct TrackPanel: View {
         .accessibilityIdentifier("panel.\(row.id)")
     }
 
-    /// Makes a choice and closes the panel. The choice ticks on iPhone here, as it's made: the
-    /// panel closes with it, before a sensory feedback modifier on it could see the change.
+    /// Makes a choice, closing a panel that closes on one. The choice ticks on iPhone here, as
+    /// it's made: a panel closing with it would be gone before a sensory feedback modifier on it
+    /// could see the change.
     private func choose(_ choice: () -> Void) {
         choice()
         #if os(iOS)
         UISelectionFeedbackGenerator().selectionChanged()
         #endif
-        onClose()
+        if panel.closesOnChoice { onClose() }
     }
 
     private static var width: CGFloat {
@@ -290,6 +416,14 @@ struct TrackPanel: View {
         560
         #else
         320
+        #endif
+    }
+
+    private static var maxHeight: CGFloat {
+        #if os(tvOS)
+        760
+        #else
+        480
         #endif
     }
 
@@ -307,6 +441,15 @@ struct TrackPanel: View {
         12
         #else
         2
+        #endif
+    }
+
+    /// Above a section's title, apart from the section before.
+    private static var sectionGap: CGFloat {
+        #if os(tvOS)
+        16
+        #else
+        10
         #endif
     }
 
@@ -342,6 +485,59 @@ struct TrackPanel: View {
         #else
         20
         #endif
+    }
+}
+
+/// Moves the subtitles a tenth of a second earlier or later, holding a button to keep going, and
+/// shows how far off the file's timing they are; the amount resets it. VoiceOver adjusts it as one
+/// control.
+private struct SubtitleTiming: View {
+    let model: PlayerModel
+
+    var body: some View {
+        let offset = model.subtitleOffset
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Timing")
+                Text(offset == 0 ? "As the file times them" : offset > 0 ? "Later than the file" : "Earlier than the file")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            step(later: false)
+            Button(SubtitleOffsets.label(offset)) { model.setSubtitleOffset(0) }
+                .buttonStyle(SpeedChipStyle(isSelected: false))
+                .monospacedDigit()
+                .disabled(offset == 0)
+            step(later: true)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Subtitle Timing")
+        .accessibilityValue(SubtitleOffsets.spoken(offset))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: model.shiftSubtitles(later: true)
+            case .decrement: model.shiftSubtitles(later: false)
+            @unknown default: break
+            }
+        }
+        .accessibilityIdentifier("panel.timing")
+    }
+
+    private func step(later: Bool) -> some View {
+        Button {
+            model.shiftSubtitles(later: later)
+        } label: {
+            Image(systemName: later ? "plus" : "minus")
+                .fontWeight(.semibold)
+                .frame(minHeight: 20)
+        }
+        .buttonStyle(SpeedChipStyle(isSelected: false))
+        .buttonRepeatBehavior(.enabled)
+        .accessibilityLabel(later ? "Later" : "Earlier")
     }
 }
 

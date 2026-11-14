@@ -1,4 +1,7 @@
 import AetherEngine
+#if os(macOS)
+import AppKit
+#endif
 import Nuke
 import OSLog
 import SwiftUI
@@ -58,6 +61,9 @@ struct PlayerControls: View {
     /// The skips back and forward so far, each of which turns its button's arrow.
     @State private var backSkips = 0
     @State private var forwardSkips = 0
+    #endif
+    #if os(macOS)
+    @Environment(\.playerIsFullScreen) private var isFullScreen
     #endif
 
     var body: some View {
@@ -216,11 +222,7 @@ struct PlayerControls: View {
                     #if os(tvOS)
                     FormatBadge(model: model).padding(.top, 6)
                     #else
-                    // The way into the Quality panel, saying what plays.
-                    FormatBadge(model: model) {
-                        panel = panel == .quality ? nil : .quality
-                        onInteraction()
-                    }
+                    if !isTitleOwnRow { qualityButton }
                     #endif
                     if let playElsewhere {
                         Button {
@@ -256,16 +258,38 @@ struct PlayerControls: View {
                     }
                     #endif
                     #if os(iOS)
-                    // Last, where it shows by itself as the phone turns.
-                    RotateButton(onUse: onInteraction)
+                    // Last, where it shows by itself as the phone turns against it.
+                    RotationLockButton(onUse: onInteraction)
                     #endif
                 }
                 .dynamicTypeSize(...Self.largestControlSize)
             }
-            if isTitleOwnRow { titleBlock }
+            if isTitleOwnRow {
+                #if os(tvOS)
+                titleBlock
+                #else
+                // Opposite the title, where a phone held upright has room its row of buttons hasn't.
+                HStack(alignment: .top, spacing: 14) {
+                    titleBlock
+                    Spacer(minLength: 0)
+                    qualityButton
+                        .dynamicTypeSize(...Self.largestControlSize)
+                }
+                #endif
+            }
         }
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topBarBottom = $0 }
     }
+
+    #if !os(tvOS)
+    /// The way into the Quality panel, saying what plays.
+    private var qualityButton: some View {
+        FormatBadge(model: model) {
+            panel = panel == .quality ? nil : .quality
+            onInteraction()
+        }
+    }
+    #endif
 
     /// Like the system player's, the buttons keep their size past the default text size, where a
     /// row of them would run off the screen; the Large Content Viewer shows each one large.
@@ -467,6 +491,16 @@ struct PlayerControls: View {
                 .buttonStyle(.platformGlass)
                 .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
                 .accessibilityShowsLargeContentViewer()
+                #elseif os(macOS)
+                Button {
+                    NSApp.keyWindow?.toggleFullScreen(nil)
+                    onInteraction()
+                } label: {
+                    symbol(isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(.platformGlass)
+                .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Full Screen")
+                .help(isFullScreen ? "Exit Full Screen" : "Full Screen")
                 #endif
                 #if os(visionOS)
                 CinemaButton(onUse: onInteraction)
@@ -569,10 +603,11 @@ struct PlayerControls: View {
     }
 
     @ViewBuilder private var trackMenus: some View {
-        panelButton(.audio, identifier: "player.audio", value: model.audioOptions.first { $0.id == model.selectedAudio }?.title)
-            .disabled(model.audioOptions.isEmpty)
-        panelButton(.subtitles, identifier: "player.subtitles", filled: model.selectedSubtitle != nil,
-                    value: model.subtitleOptions.first { $0.id == model.selectedSubtitle }?.title ?? "Off")
+        // Filled while subtitles show; VoiceOver hears which, and the audio when there's a choice.
+        let subtitle = model.subtitleOptions.first { $0.id == model.selectedSubtitle }?.title
+        let audio = model.audioOptions.count > 1 ? model.audioOptions.first { $0.id == model.selectedAudio }?.title : nil
+        panelButton(.audioAndSubtitles, identifier: "player.subtitles", filled: subtitle != nil,
+                    value: [audio, "Subtitles \(subtitle ?? "Off")"].compactMap(\.self).joined(separator: ", "))
         // Away from 1×, the button reads the speed in place of its symbol.
         panelButton(.speed, identifier: "player.speed", text: model.rate == 1 ? nil : PlaybackSpeed.label(model.rate),
                     value: PlaybackSpeed.name(model.rate))
@@ -608,6 +643,12 @@ struct PlayerControls: View {
         .focused(focus, equals: .panel(kind))
         #endif
         .accessibilityIdentifier(identifier)
+        // For the panel to open above it.
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(key: PanelButtonFrames.self, value: [kind: geometry.frame(in: .global)])
+            }
+        }
     }
 }
 
@@ -644,6 +685,12 @@ private struct FormatBadge: View {
             .help(model.qualityStatus?.summary ?? PlayerPanel.quality.title)
             #endif
             .accessibilityIdentifier("player.quality")
+            // For the panel to open below it.
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: PanelButtonFrames.self, value: [.quality: geometry.frame(in: .global)])
+                }
+            }
         } else if let text {
             Text(text)
                 .font(.caption.weight(.bold))
@@ -718,10 +765,14 @@ struct Scrubber: View {
         }
         #if !os(tvOS)
         // The bar and its times take the drag together, a target a finger finds though the bar is
-        // drawn thin.
-        .timelineDragging(duration: duration, position: $scrubbing.position, onDrag: onInteraction) { model.seek(to: $0) }
-        .sensoryFeedback(Self.landmarkFeedback, trigger: landmark(at: position, duration: duration)) { old, new in
-            Self.ticks(from: old, to: new)
+        // drawn thin. The position holds at chapters' starts on the way.
+        .timelineDragging(duration: duration, time: model.clock.time, position: $scrubbing.position,
+                          rate: $scrubbing.dragRate, snapPoints: model.chapters.map(\.start), onDrag: onInteraction) {
+            model.seek(to: $0)
+        }
+        .sensoryFeedback(Self.landmarkFeedback,
+                         trigger: ScrubLandmark.at(position, duration: duration, chapters: model.chapters)) { old, new in
+            ScrubLandmark.ticks(from: old, to: new)
         }
         #endif
         #if os(tvOS)
@@ -842,31 +893,6 @@ struct Scrubber: View {
         #endif
     }
 
-    /// What a tick marks as the position being chosen moves: reaching either end of the title, or
-    /// crossing into another chapter.
-    private enum Landmark: Equatable {
-        case start, end
-        /// The chapter's index; nil without chapters.
-        case chapter(Int?)
-    }
-
-    private func landmark(at position: Double?, duration: Double) -> Landmark? {
-        guard let position else { return nil }
-        if position <= 0 { return .start }
-        if position >= duration { return .end }
-        return .chapter(ChapterMark.current(in: model.chapters, at: position)?.index)
-    }
-
-    /// Reaching an end ticks, and so does a move from one chapter to another; leaving an end, or
-    /// starting or ending a drag, doesn't.
-    private static func ticks(from old: Landmark?, to new: Landmark?) -> Bool {
-        guard let old, let new, old != new else { return false }
-        switch (old, new) {
-        case (_, .start), (_, .end), (.chapter, .chapter): return true
-        default: return false
-        }
-    }
-
     private static var landmarkFeedback: SensoryFeedback {
         #if os(macOS)
         .alignment
@@ -902,8 +928,19 @@ enum TimeLabel {
         "\(Int(abs(secondsPerSecond).rounded()))×"
     }
 
-    /// The fastest scanning speed, whose width every speed takes.
-    static let widestScanSpeed = scanSpeed(ScrubMotion.scanSpeeds.max() ?? 0)
+    /// The fastest scanning speed for a title of `duration`, whose width every speed takes.
+    static func widestScanSpeed(duration: Double) -> String {
+        scanSpeed(ScrubMotion.scanLevels(duration: duration).max() ?? 0)
+    }
+
+    /// What the timeline says while a finger places it finely: nil at full speed.
+    static func dragRate(_ rate: Double) -> String? {
+        switch rate {
+        case ..<0.5: "Fine Scrubbing"
+        case ..<1: "Half-Speed Scrubbing"
+        default: nil
+        }
+    }
 
     /// When a title with `seconds` left ends, played from `now` at `rate`.
     static func end(after seconds: Double, rate: Float, from now: Date) -> Date {
@@ -913,7 +950,8 @@ enum TimeLabel {
 
 /// Over the timeline while it moves: the picture at that point, when the server made scrub
 /// previews, with the chapter, the time, and how far that is from where playback is. On Apple
-/// TV, also the speed of a held side scanning.
+/// TV, also the speed of a held side scanning; on a touchscreen, how finely a finger slid up
+/// from the bar is placing it.
 private struct ScrubPreview: View {
     let model: PlayerModel
     let time: Double
@@ -948,7 +986,17 @@ private struct ScrubPreview: View {
             .fixedSize()
             // Clear of the card's rounded corners when it's wider than the thumbnail.
             .padding(.horizontal, Self.spacing)
+            if let rate = TimeLabel.dragRate(model.scrubbing.dragRate) {
+                Text(rate)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, Self.spacing)
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeOut(duration: 0.15), value: model.scrubbing.dragRate)
         .padding(model.trickplay == nil ? Self.spacing * 2 : Self.spacing)
         .frame(minWidth: thumbnailWidth + 2 * Self.spacing)
         // Its own height, not the timeline's it's laid over.
@@ -962,7 +1010,7 @@ private struct ScrubPreview: View {
     private func scanSpeed(_ speed: Double) -> some View {
         let glyph = Image(systemName: speed < 0 ? "backward.fill" : "forward.fill")
         return ZStack(alignment: .leading) {
-            Text("\(glyph) \(TimeLabel.widestScanSpeed)").hidden()
+            Text("\(glyph) \(TimeLabel.widestScanSpeed(duration: model.duration))").hidden()
             Text("\(glyph) \(TimeLabel.scanSpeed(speed))")
                 .contentTransition(.numericText(value: abs(speed)))
         }
@@ -1008,8 +1056,9 @@ private struct ScrubPreview: View {
 }
 
 /// The sum of the skips in a row: "+30", "−1:00". On Apple TV over the playhead, with the way it
-/// went; elsewhere over the skip button, which shows the way itself.
-private struct SkipTally: View {
+/// went; elsewhere over the skip button, or the side of the picture double-tapped, which show
+/// the way themselves.
+struct SkipTally: View {
     let seconds: Double
 
     var body: some View {
@@ -1143,27 +1192,36 @@ struct TimelineBar: View {
             .frame(maxHeight: .infinity)
         }
         #if !os(tvOS)
-        .timelineDragging(duration: duration, position: $position, onDrag: onDrag, onSeek: onSeek)
+        .timelineDragging(duration: duration, time: time, position: $position, snapPoints: marks, onDrag: onDrag, onSeek: onSeek)
         #endif
     }
 }
 
 #if !os(tvOS)
 private extension View {
-    /// A drag across the view, from its leading edge to its trailing one, moves `position` through
-    /// `duration`, and `onSeek` gets where it let go. Without `onSeek` the view takes no drag.
-    func timelineDragging(duration: Double, position: Binding<Double?>, onDrag: @escaping () -> Void,
+    /// A finger on the view, from its leading edge to its trailing one, places `position` within
+    /// `duration` (`TimelineDrag`): a drag moves it from where it was, `time` until it moves, and
+    /// slower as the finger slides up, holding at `snapPoints` on the way; a tap jumps. `rate` is
+    /// the drag's speed. `onSeek` gets where it let go. Without `onSeek` the view takes no drag.
+    func timelineDragging(duration: Double, time: Double, position: Binding<Double?>, rate: Binding<Double>? = nil,
+                          snapPoints: [Double] = [], onDrag: @escaping () -> Void,
                           onSeek: ((Double) -> Void)?) -> some View {
-        modifier(TimelineDragging(duration: duration, position: position, onDrag: onDrag, onSeek: onSeek))
+        modifier(TimelineDragging(duration: duration, time: time, position: position, rate: rate, snapPoints: snapPoints,
+                                  onDrag: onDrag, onSeek: onSeek))
     }
 }
 
 private struct TimelineDragging: ViewModifier {
     let duration: Double
+    let time: Double
     @Binding var position: Double?
+    let rate: Binding<Double>?
+    let snapPoints: [Double]
     let onDrag: () -> Void
     let onSeek: ((Double) -> Void)?
     @State private var width: CGFloat = 0
+    /// The drag under way, once the finger has moved far enough to be one.
+    @State private var drag: TimelineDrag?
 
     func body(content: Content) -> some View {
         if let onSeek {
@@ -1174,12 +1232,30 @@ private struct TimelineDragging: ViewModifier {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             guard width > 0 else { return }
-                            position = min(duration, max(0, value.location.x / width * duration))
+                            let moved = hypot(value.translation.width, value.translation.height)
+                            if drag == nil {
+                                // Until it moves, the touch may be a tap.
+                                guard moved >= TimelineDrag.tapSlop else { return }
+                                drag = TimelineDrag(startX: value.startLocation.x, position: position ?? time,
+                                                    duration: duration, width: width)
+                            }
+                            guard var current = drag else { return }
+                            current.move(toX: value.location.x, rise: value.startLocation.y - value.location.y)
+                            drag = current
+                            position = ChapterSnap.snapped(current.position, to: snapPoints,
+                                                           within: current.seconds(forPoints: ChapterSnap.reach))
+                            if let rate, rate.wrappedValue != current.rate { rate.wrappedValue = current.rate }
                             onDrag()
                         }
-                        .onEnded { _ in
-                            if let position { onSeek(position) }
+                        .onEnded { value in
+                            if drag == nil {
+                                onSeek(TimelineDrag.tapPosition(x: value.location.x, width: width, duration: duration))
+                            } else if let position {
+                                onSeek(position)
+                            }
+                            drag = nil
                             position = nil
+                            if let rate, rate.wrappedValue != 1 { rate.wrappedValue = 1 }
                         }
                 )
         } else {

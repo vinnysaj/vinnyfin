@@ -28,6 +28,8 @@ enum RemoteGesture: Equatable {
 struct RemoteInput: UIViewRepresentable {
     let surface: TouchSurface
     var isActive: Bool
+    /// How far a swipe goes, as a share of the surface's width, before it counts (`StraySwipe`).
+    var swipeThreshold: Double
     let onGesture: (RemoteGesture) -> Void
 
     func makeUIView(context: Context) -> RemoteInputView {
@@ -37,6 +39,7 @@ struct RemoteInput: UIViewRepresentable {
     func updateUIView(_ view: RemoteInputView, context: Context) {
         view.onGesture = onGesture
         view.isActive = isActive
+        view.swipeThreshold = CGFloat(swipeThreshold)
     }
 
     static func dismantleUIView(_ view: RemoteInputView, coordinator: ()) {
@@ -46,6 +49,8 @@ struct RemoteInput: UIViewRepresentable {
 
 final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
     var onGesture: (RemoteGesture) -> Void = { _ in }
+    /// How far a swipe goes, as a share of the surface's width, before it counts.
+    var swipeThreshold = CGFloat(StraySwipe.threshold)
     var isActive = false {
         didSet {
             guard isActive != oldValue else { return }
@@ -90,8 +95,6 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
 
     /// A side held this long scans; let go sooner, it clicks.
     private static let holdDelay = Duration.milliseconds(400)
-    /// A swipe goes this far, as a share of the surface's width, before it counts.
-    private static let swipeThreshold: CGFloat = 0.02
 
     init(surface: TouchSurface) {
         self.surface = surface
@@ -134,7 +137,7 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
         case .began, .changed:
             let translation = pan.translation(in: window)
             if swipeIsSideways == nil {
-                guard max(abs(translation.x), abs(translation.y)) >= width * Self.swipeThreshold else { return }
+                guard max(abs(translation.x), abs(translation.y)) >= width * swipeThreshold else { return }
                 swipeIsSideways = abs(translation.x) > abs(translation.y) * 1.2
                 passedTranslation = 0
             }

@@ -31,11 +31,13 @@ struct VinnyfinApp: App {
         #if !os(tvOS)
         .commands {
             #if os(macOS)
-            CommandGroup(replacing: .newItem) {
+            // After New Window, which opens another library window.
+            CommandGroup(after: .newItem) {
                 Button("Open File…") { appDelegate.openFilePanel() }
                     .keyboardShortcut("o")
             }
             #endif
+            SidebarCommands()
             AppCommands()
             #if os(macOS)
             PortableTVCommands(tv: appDelegate.portableTV)

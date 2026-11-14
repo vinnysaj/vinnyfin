@@ -54,24 +54,24 @@ struct VersionChooserTests {
     }
 
     @Test func streamsTheOriginalWhenItFits() {
-        let plan = VersionChooser.planStreaming(sources: versions, preferred: nil, quality: .fullHD, allowTranscoding: true)
+        let plan = VersionChooser.planStreaming(sources: versions, preferred: nil, limit: StreamingLimit(quality: .fullHD), allowTranscoding: true)
         #expect(plan == .direct(versions[1]))
     }
 
     @Test func scalesDownAPickedVersionThatIsTooBig() {
-        let plan = VersionChooser.planStreaming(sources: versions, preferred: versions[0], quality: .fullHD, allowTranscoding: true)
+        let plan = VersionChooser.planStreaming(sources: versions, preferred: versions[0], limit: StreamingLimit(quality: .fullHD), allowTranscoding: true)
         #expect(plan == .transcode(versions[0], .fullHD))
     }
 
     @Test func playsTheOriginalWhenTranscodingIsOff() {
         let only4K = [versions[0]]
-        #expect(VersionChooser.planStreaming(sources: only4K, preferred: nil, quality: .fullHD, allowTranscoding: false) == .direct(versions[0]))
-        #expect(VersionChooser.planStreaming(sources: only4K, preferred: nil, quality: .fullHD, allowTranscoding: true) == .transcode(versions[0], .fullHD))
+        #expect(VersionChooser.planStreaming(sources: only4K, preferred: nil, limit: StreamingLimit(quality: .fullHD), allowTranscoding: false) == .direct(versions[0]))
+        #expect(VersionChooser.planStreaming(sources: only4K, preferred: nil, limit: StreamingLimit(quality: .fullHD), allowTranscoding: true) == .transcode(versions[0], .fullHD))
     }
 
     @Test func playsAnUnlabelledVersionAsItIs() {
         let mystery = version("mystery")
-        #expect(VersionChooser.planStreaming(sources: [mystery], preferred: nil, quality: .hd, allowTranscoding: true) == .direct(mystery))
+        #expect(VersionChooser.planStreaming(sources: [mystery], preferred: nil, limit: StreamingLimit(quality: .hd), allowTranscoding: true) == .direct(mystery))
     }
 }
 

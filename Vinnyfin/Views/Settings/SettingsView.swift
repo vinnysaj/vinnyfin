@@ -43,7 +43,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Playback")
                 } footer: {
-                    Text("Plays the best version up to this quality, untouched. When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
+                    Text("Plays the best version up to this quality, untouched.\(displayNote) When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
                 }
                 Section {
                     SettingPicker("Audio Language", selection: $settings.audioLanguage) {
@@ -122,6 +122,11 @@ struct SettingsView: View {
             }
             #endif
         }
+    }
+
+    /// On an Apple TV whose output makes use of no more than 1080p, that it streams no more.
+    private var displayNote: String {
+        DisplayOutput.streamingHeight == nil ? "" : " This Apple TV outputs 1080p, so it streams 1080p at most."
     }
 
     @ViewBuilder private var account: some View {

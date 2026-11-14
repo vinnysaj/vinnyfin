@@ -124,26 +124,34 @@ nonisolated enum PlaybackPlan: Equatable, Sendable {
 }
 
 nonisolated enum VersionChooser {
-    /// The version to play or download at `quality`: the best one that fits, in the order of
-    /// `sources`, which is the item's own version first and the rest in the server's order, as
-    /// `JellyfinClient.item` lists them (remote-stream plugins rank theirs best first). When none
-    /// fits, the smallest one that doesn't, which `planStreaming` then has the server scale down.
+    /// The version to download at `quality`, as `choose(from:limit:)` picks one.
     static func choose(from sources: [MediaSource], quality: VideoQuality) -> MediaSource? {
-        guard let cap = quality.maxHeight else { return sources.first }
-        let known = sources.compactMap { source in VersionTraits(source).resolutionClass.map { (source, $0) } }
-        // `max(by:)` and `min(by:)` return the first of equal elements, so ties keep the server's order.
-        if let best = known.filter({ $0.1 <= cap }).max(by: { $0.1 < $1.1 }) { return best.0 }
-        // Nothing known fits: an unlabelled version may, and is tried before scaling one down.
-        if let unknown = sources.first(where: { VersionTraits($0).resolutionClass == nil }) { return unknown }
-        return known.min(by: { $0.1 < $1.1 })?.0 ?? sources.first
+        choose(from: sources, limit: StreamingLimit(quality: quality))
     }
 
-    /// Streaming: the chosen version as it is when it fits the quality, otherwise scaled down
+    /// The version to play within `limit`: the best one within it, in the order of `sources`,
+    /// which is the item's own version first and the rest in the server's order, as
+    /// `JellyfinClient.item` lists them (remote-stream plugins rank theirs best first). With no
+    /// picture size to keep to, the item's own version unless it's known to be over the bitrate.
+    /// When none is within it, one that may be, else the smallest, which `planStreaming` then has
+    /// the server scale down.
+    static func choose(from sources: [MediaSource], limit: StreamingLimit) -> MediaSource? {
+        guard limit.maxHeight != nil || limit.bitrate != nil else { return sources.first }
+        let versions = sources.map { (source: $0, traits: VersionTraits($0)) }
+        if limit.maxHeight == nil, let first = versions.first, limit.admits(first.traits) != false { return first.source }
+        // `max(by:)` and `min(by:)` return the first of equal elements, so ties keep the server's order.
+        let within = versions.filter { limit.admits($0.traits) == true }
+        if let best = within.max(by: { ($0.traits.resolutionClass ?? 0) < ($1.traits.resolutionClass ?? 0) }) { return best.source }
+        // Nothing known is within it: one that may be is tried before scaling one down.
+        if let unknown = versions.first(where: { limit.admits($0.traits) == nil }) { return unknown.source }
+        return versions.min { limit.excess($0.traits) < limit.excess($1.traits) }?.source
+    }
+
+    /// Streaming: the chosen version as it is when it's within the limit, otherwise scaled down
     /// by the server when transcoding is allowed.
-    static func planStreaming(sources: [MediaSource], preferred: MediaSource?, quality: VideoQuality, allowTranscoding: Bool) -> PlaybackPlan? {
-        guard let source = preferred ?? choose(from: sources, quality: quality) else { return nil }
-        guard let cap = quality.maxHeight, allowTranscoding,
-              let resolution = VersionTraits(source).resolutionClass, resolution > cap
+    static func planStreaming(sources: [MediaSource], preferred: MediaSource?, limit: StreamingLimit, allowTranscoding: Bool) -> PlaybackPlan? {
+        guard let source = preferred ?? choose(from: sources, limit: limit) else { return nil }
+        guard allowTranscoding, limit.admits(VersionTraits(source)) == false, let quality = limit.transcodeQuality
         else { return .direct(source) }
         return .transcode(source, quality)
     }

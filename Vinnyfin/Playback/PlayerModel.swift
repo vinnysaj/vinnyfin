@@ -218,14 +218,14 @@ final class PlayerModel: Identifiable {
     }
 
     /// Plays the same version again through the server's transcoder, for a file this device
-    /// can't play directly.
+    /// can't play directly: at the size the streaming limit allows, or 1080p without one.
     func retryTranscoded() async {
         guard let current, let item = current.item, let source = current.mediaSource, !current.isTranscode else { return }
         let position = clock.time > 0 ? clock.time : current.startPosition
         finishSession(reachedEnd: false)
         status = .loading
         do {
-            let quality = settings.streamingQuality == .original ? VideoQuality.fullHD : settings.streamingQuality
+            let quality = settings.streamingLimit.transcodeQuality ?? .fullHD
             let resolved = try await resolver.transcode(item: item, source: source, quality: quality,
                                                         audioIndex: nil, subtitleIndex: nil, start: position)
             await begin(resolved)

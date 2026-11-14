@@ -20,11 +20,7 @@ struct WelcomeView: View {
         GeometryReader { screen in
             ScrollView {
                 VStack(spacing: 28) {
-                    Image(systemName: "play.square.stack.fill")
-                        .font(.system(size: 76))
-                        .foregroundStyle(.tint)
-                        .symbolRenderingMode(.hierarchical)
-                        .accessibilityHidden(true)
+                    AppMark(size: dynamicTypeSize.isAccessibilitySize ? 88 : 112)
                     VStack(spacing: 8) {
                         Text("vinnyfin").font(.largeTitle.weight(.bold))
                             .accessibilityAddTraits(.isHeader)
@@ -64,6 +60,7 @@ struct WelcomeView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
+        .background { WelcomeBackdrop() }
         .sheet(isPresented: $connecting) { LoginView() }
         .sheet(isPresented: $showingDownloads) { DownloadsView() }
         .fileImporter(isPresented: $importing, allowedContentTypes: DownloadsView.videoTypes) { result in

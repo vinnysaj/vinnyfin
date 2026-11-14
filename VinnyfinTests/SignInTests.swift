@@ -709,6 +709,94 @@ struct KeptSignInTests {
     }
 }
 
+struct ServerFirstTests {
+    private static let home = DiscoveredServer(id: "home", name: "Home", address: URL(string: "http://192.168.1.10:8096")!)
+
+    /// The flow as someone new opens it.
+    private static func someoneNew() -> SignInFlow {
+        var flow = SignInFlow(deviceName: "iPhone")
+        _ = flow.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: nil, knowsServers: false)
+        return flow
+    }
+
+    @Test func someoneNewStartsOnTheServerStep() {
+        let flow = Self.someoneNew()
+        #expect(flow.step == .server)
+        #expect(flow.root == .server)
+        #expect(flow.pickedServer == nil)
+    }
+
+    @Test func anyoneWhoHasSignedInBeforeStartsOnTheAccountStep() {
+        // On another of their devices.
+        var elsewhere = SignInFlow(deviceName: "iPhone")
+        _ = elsewhere.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: nil, knowsServers: true)
+        #expect(elsewhere.step == .account)
+        #expect(elsewhere.root == .account)
+        // On this one.
+        var here = SignInFlow(deviceName: "iPhone")
+        _ = here.start(offer: nil, password: nil, lastServerURL: nil, lastServerName: nil, lastUserName: "Alex", knowsServers: false)
+        #expect(here.step == .account)
+    }
+
+    @Test func addingASignInStartsOnTheAccountStepOfTheServerInUse() {
+        var flow = SignInFlow(deviceName: "iPhone")
+        #expect(flow.start(offer: nil, password: nil, adding: Kept.alex, lastServerURL: Kept.alex.serverURL, lastServerName: "Home",
+                           lastUserName: "Alex") == nil)
+        #expect(flow.step == .account)
+        #expect(flow.pickedServer == SignInFlow.PickedServer(address: SignIn.homeAddress, url: Kept.alex.serverURL, title: "Home"))
+        #expect(flow.username.isEmpty)
+    }
+
+    @Test func pickingAServerOnTheNetworkConnectsToItsAddress() throws {
+        var flow = Self.someoneNew()
+        let attempt = try SignIn.attempt(flow.pick(Self.home))
+        let address = ServerAddress(scheme: .http, host: "192.168.1.10", port: "8096")
+        #expect(attempt == SignInFlow.Attempt(address: address, goal: .server))
+        #expect(flow.addressText == "http://192.168.1.10:8096")
+        #expect(flow.found(SignIn.server("http://192.168.1.10:8096"), at: address, for: attempt) == .picked(.username))
+        #expect(flow.step == .account)
+        #expect(flow.pickedServer?.title == "Home")
+        flow.back()
+        #expect(flow.step == .server)
+    }
+
+    @Test func theUsernameFirstLeadsToTheAccountStepAndBack() {
+        var flow = Self.someoneNew()
+        #expect(flow.useUsernameFirst() == .username)
+        #expect(flow.step == .account)
+        flow.back()
+        #expect(flow.step == .server)
+    }
+
+    @Test func theAddressFieldTakesTheWholeAddressAndAdvancedChangesItsParts() {
+        var flow = Self.someoneNew()
+        flow.typeAddress("nas.local:8096")
+        #expect(flow.address == ServerAddress(host: "nas.local", port: "8096"))
+        #expect(flow.address.givenScheme == nil)
+        #expect(flow.addressText == "nas.local:8096")
+        flow.typeAddress("https://jf.example.com/jellyfin")
+        #expect(flow.address == ServerAddress(scheme: .https, host: "jf.example.com", path: "/jellyfin"))
+        flow.editAddress { $0.choose(.http) }
+        #expect(flow.addressText == "http://jf.example.com/jellyfin")
+        flow.editAddress { $0.port = "8096" }
+        #expect(flow.addressText == "http://jf.example.com:8096/jellyfin")
+        flow.editAddress { $0.choose(nil) }
+        #expect(flow.address.givenScheme == nil)
+        #expect(flow.addressText == "jf.example.com:8096/jellyfin")
+    }
+
+    @Test func choosingSomeoneTheServerListsFillsInTheirName() throws {
+        var flow = SignIn.pickedHome()
+        flow.password = "typed"
+        #expect(flow.chooseUser(PublicUser(id: "u2", name: "Sam")) == .focus(.password))
+        #expect(flow.username == "Sam")
+        #expect(flow.password.isEmpty)
+        // Someone without a password signs in straight away.
+        let attempt = try SignIn.attempt(flow.chooseUser(PublicUser(id: "u3", name: "Robin", hasPassword: false)))
+        #expect(attempt == SignInFlow.Attempt(address: SignIn.homeAddress, goal: .password(username: "Robin", password: "")))
+    }
+}
+
 struct DiscoveryTests {
     @Test func readsAServersAnswer() throws {
         let reply = #"{"Address":"http://192.168.1.10:8096","Id":"a1b2","Name":"Home","EndpointAddress":null}"#

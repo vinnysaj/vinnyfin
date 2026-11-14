@@ -1,8 +1,9 @@
 import Network
 import XCTest
 
-/// Signs in as someone would, the account first and the server second, against the local test
-/// server `VinnyfinUITests` describes: a user "viewer" without a password. Another server and
+/// Signs in as someone would, the server first for someone new and the account first for anyone
+/// who has signed in before, against the local test server `VinnyfinUITests` describes: a user
+/// "viewer" without a password. Another server and
 /// user without a password come from `VINNYFIN_TEST_SERVER` and `VINNYFIN_TEST_USER` (pass
 /// `TEST_RUNNER_VINNYFIN_TEST_SERVER` and `TEST_RUNNER_VINNYFIN_TEST_USER` to xcodebuild).
 final class SignInUITests: XCTestCase {
@@ -75,29 +76,25 @@ final class SignInUITests: XCTestCase {
 
         let picked = app.buttons["login.changeServer"]
         tap(picked)
-        // Change puts the cursor in the host. Nothing listens on port 9.
+        // Change puts the cursor in the address, and Return connects. Nothing listens on port 9.
         let host = app.textFields["login.host"]
-        type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + "127.0.0.1:9\n", into: host)
-        type("\n", into: app.textFields["login.port"])
-        type("\n", into: app.textFields["login.path"])
+        enterAddress("127.0.0.1:9", into: host)
         XCTAssertTrue(app.descendants(matching: .any)["login.error"].waitForExistence(timeout: uiTimeout),
                       "The server step never said the server doesn't answer")
         XCTAssertTrue(app.buttons["login.connect"].exists, "The sign-in left the server step")
-        XCTAssertTrue(waitForKeyboardFocus(host), "The cursor didn't go back to the host")
-        XCTAssertEqual(host.value as? String, "127.0.0.1")
-        XCTAssertEqual(app.textFields["login.port"].value as? String, "9")
+        XCTAssertTrue(waitForKeyboardFocus(host), "The cursor didn't go back to the address")
+        XCTAssertEqual(host.value as? String, "127.0.0.1:9")
         keep("Server step with its error", in: app)
 
         let silent = try SilentServer()
         defer { silent.stop() }
         let silentPort = try await silent.port()
-        type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + "127.0.0.1:\(silentPort)\n", into: host)
-        type("\n", into: app.textFields["login.port"])
-        type("\n", into: app.textFields["login.path"])
+        enterAddress("127.0.0.1:\(silentPort)", into: host)
         let connect = app.buttons["login.connect"]
         XCTAssertTrue(connect.wait(for: \.isEnabled, toEqual: false, timeout: uiTimeout), "Sign In never started")
+        // Typed without Return, which would connect.
         host.tap()
-        host.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + server + "\n")
+        host.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + server)
         XCTAssertTrue(connect.wait(for: \.isEnabled, toEqual: true, timeout: 5), "Sign In stayed taken by the sign-in to the old address")
         let found = app.descendants(matching: .any)["login.found"]
         XCTAssertTrue(found.waitForExistence(timeout: uiTimeout), "The server wasn't found at the corrected address")
@@ -108,7 +105,12 @@ final class SignInUITests: XCTestCase {
         XCTAssertTrue(connect.isEnabled, "Sign In didn't stay available")
         keep("Corrected address found", in: app)
 
-        tap(app.buttons["login.back"])
+        // Back, at the leading end of the bar.
+        #if os(macOS)
+        tap(app.toolbars.buttons.element(boundBy: 0))
+        #else
+        tap(app.navigationBars.buttons.element(boundBy: 0))
+        #endif
         XCTAssertTrue(picked.waitForExistence(timeout: uiTimeout), "Back didn't go to the account step")
         XCTAssertTrue(isAddress(picked.value as? String, of: server), "Back picked \(String(describing: picked.value))")
         XCTAssertFalse(app.descendants(matching: .any)["login.error"].exists, "The server step's error stayed")
@@ -130,10 +132,7 @@ final class SignInUITests: XCTestCase {
         signOut(app)
         tap(app.buttons["welcome.connect"])
         tap(app.buttons["login.changeServer"])
-        let host = app.textFields["login.host"]
-        type(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + server + "/web/#/home.html\n", into: host)
-        type("\n", into: app.textFields["login.port"])
-        type("\n", into: app.textFields["login.path"])
+        enterAddress(server + "/web/#/home.html", into: app.textFields["login.host"])
         XCTAssertTrue(tabs(app).waitForExistence(timeout: uiTimeout), "Signing in with the browser's address never finished")
     }
 
@@ -198,7 +197,7 @@ final class SignInUITests: XCTestCase {
     #if os(iOS)
     /// Signing in with a password asks whether to save it in iCloud, over the library once the
     /// sign-in screen has gone, and Not Now leaves the app signed in. The password is the demo
-    /// account's, on the demo server.
+    /// account's, on the demo server, which someone new reaches through the username first.
     @MainActor
     func testAsksWhetherToSaveThePasswordSignedInWith() async throws {
         let info = try XCTUnwrap(URL(string: "https://jftest.vinnysaj.net/System/Info/Public"))
@@ -209,8 +208,10 @@ final class SignInUITests: XCTestCase {
         if tabs(app).waitForExistence(timeout: 5) { signOut(app) }
         tap(app.buttons["welcome.connect"])
         let usernameField = app.textFields["login.username"]
-        XCTAssertTrue(usernameField.waitForExistence(timeout: uiTimeout), "The sign-in form never opened")
-        usernameField.tap()
+        let usernameFirst = app.buttons["login.usernameFirst"]
+        XCTAssertNotNil(firstToAppear(usernameField, usernameFirst), "The sign-in form never opened")
+        if usernameFirst.exists { tap(usernameFirst) }
+        tap(usernameField)
         usernameField.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + "apple\n")
         type("apple\n", into: app.secureTextFields["login.password"])
 

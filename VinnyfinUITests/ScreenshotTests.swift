@@ -274,7 +274,7 @@ final class ScreenshotTests: XCTestCase {
     @MainActor
     private func chooseDownloads(_ quality: String, transcoded: Bool, in app: XCUIApplication) {
         tap(tab("Home", in: app))
-        tap(app.buttons["home.settings"])
+        openSettingsFromHome(app)
         tap(scrolledTo(app.buttons["settings.downloadQuality"], in: app))
         tap(app.buttons[quality])
         turn(scrolledTo(app.switches["settings.transcodeDownloads"], in: app), on: transcoded)

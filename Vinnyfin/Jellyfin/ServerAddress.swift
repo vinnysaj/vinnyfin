@@ -1,6 +1,7 @@
 import Foundation
 
-/// A Jellyfin server address as the sign-in form edits it: protocol, host, port and base path.
+/// A Jellyfin server address as the sign-in form edits it: one field for the whole address, and
+/// Advanced's protocol, port and base path.
 nonisolated struct ServerAddress: Equatable, Sendable {
     enum Scheme: String, CaseIterable, Sendable {
         case http, https
@@ -78,10 +79,25 @@ nonisolated struct ServerAddress: Equatable, Sendable {
         path = basePath(components.path)
     }
 
-    /// Picks the scheme, as the form's protocol does.
-    mutating func choose(_ scheme: Scheme) {
-        self.scheme = scheme
-        isSchemeGiven = true
+    /// Picks the scheme, as the form's protocol does; nil leaves it to the address, on HTTPS
+    /// and else on HTTP (`fallback`).
+    mutating func choose(_ scheme: Scheme?) {
+        self.scheme = scheme ?? .https
+        isSchemeGiven = scheme != nil
+    }
+
+    /// The scheme picked or typed; nil when it's left to the address.
+    var givenScheme: Scheme? { isSchemeGiven ? scheme : nil }
+
+    /// The address as one line, as the form's address field shows it: "http://nas.local:8096/jf",
+    /// or without a scheme given, "nas.local:8096". Reads back as the same address
+    /// (`init(parsing:)`), but for a base path that ends in "web", which the field takes for
+    /// Jellyfin's web app.
+    var text: String {
+        var text = isSchemeGiven ? "\(scheme.rawValue)://" : ""
+        text += host.trimmingCharacters(in: .whitespaces)
+        if !port.isEmpty { text += ":" + port }
+        return text + Self.normalizedPath(path)
     }
 
     /// Splits a full address typed into the host field into the fields; the scheme, port and path

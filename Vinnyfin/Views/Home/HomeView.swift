@@ -113,6 +113,7 @@ struct HomeView: View {
             .toolbar {
                 ToolbarItem(placement: .barTrailing) { portableTVButton }
                 ToolbarItem(placement: .barTrailing) { soundsButton }
+                ToolbarItem(placement: .barTrailing) { AccountMenu() }
             }
             #endif
             #if !os(tvOS)
@@ -181,9 +182,9 @@ struct HomeView: View {
     #endif
 
     #if os(iOS) || os(visionOS)
+    /// The avatar: who's signed in, switching to another sign-in, adding one, and Settings.
     private var settingsButton: some View {
-        Button("Settings", systemImage: "person.crop.circle") { showingSettings = true }
-            .accessibilityIdentifier("home.settings")
+        AccountMenu { showingSettings = true }
     }
     #endif
 

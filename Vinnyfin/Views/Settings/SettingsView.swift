@@ -166,6 +166,9 @@ struct SettingsView: View {
                 LabeledContent("Server", value: account.serverName ?? account.serverURL.host() ?? "Jellyfin")
                 LabeledContent("Address", value: account.serverURL.absoluteString)
                 LabeledContent("Signed In As", value: account.userName)
+                #if os(tvOS)
+                AccountRows()
+                #endif
                 LabeledContent("Remote Control", value: socket.state.label)
                     .accessibilityIdentifier("settings.remoteControl")
                 Button(role: .destructive) {
@@ -296,19 +299,6 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 }
-
-#if !os(tvOS)
-extension AccountStore {
-    /// Signs out, cancelling the downloads that haven't finished: only this sign-in can fetch
-    /// them. The server's copies of their transcodes are deleted before it's told, while the
-    /// sign-in still works there.
-    func signOut(cancelling downloads: DownloadManager) {
-        if let account { downloads.removeUnfinished(of: account) }
-        let transcodes = downloads.transcodes
-        signOut { await transcodes.finishCleanups() }
-    }
-}
-#endif
 
 #if os(tvOS)
 /// The system's toggle with its name in the text's color, which turns dark on the white of a

@@ -88,24 +88,40 @@ typealias PlatformGlassButtonStyle = GlassButtonStyle
 #endif
 
 /// A screen's main action, filled with the accent color: on Liquid Glass, or on Vision Pro its
-/// own glass. White reads on the accent green at only 2.6 to 1, so with Increase Contrast the fill
-/// is a deeper green it reads on at 5.9. Apple TV's accent is white, with a dark title already.
+/// own glass. Its title is near-black, which reads on the sage green at about 8 to 1, and on dark
+/// mode's lighter green at more, where white reads at only 2 to 2.6. With Increase Contrast the
+/// fill is the accent's deeper high-contrast green instead, with a white title, at 5.9 to 1. Apple
+/// TV's prominent buttons turn white under focus, with a dark title, by themselves.
 struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
     @Environment(\.colorSchemeContrast) private var contrast
 
     /// The accent green's own high-contrast variant in light mode, which white reads on.
     private static let increasedContrastFill = Color(red: 0.20658, green: 0.43823, blue: 0.27906)
+    /// The title on the accent green: black but for a little light, as the system's dark labels are.
+    private static let title = Color(white: 0.08)
 
     func makeBody(configuration: Configuration) -> some View {
-        Button(configuration)
+        let button = Button(configuration)
             #if os(visionOS)
             .buttonStyle(.borderedProminent)
             #else
             .buttonStyle(.glassProminent)
             #endif
-            #if !os(tvOS)
-            .tint(contrast == .increased ? Self.increasedContrastFill : nil)
-            #endif
+        #if os(tvOS)
+        button
+        #else
+        if contrast == .increased {
+            button
+                .tint(Self.increasedContrastFill)
+                .foregroundStyle(.white)
+        } else {
+            // Vision Pro's prominent style fills with its own gray, like the plain bordered style
+            // beside it, unless it's given the accent itself.
+            button
+                .tint(.accentColor)
+                .foregroundStyle(Self.title)
+        }
+        #endif
     }
 }
 
@@ -134,18 +150,39 @@ extension View {
 }
 
 extension View {
-    /// Artwork in a card that Apple TV lifts under focus, with the system's sheen, sway and glass
-    /// rim. The card's button style lifts the first picture in its label by itself, but not one
-    /// clipped to rounded corners, as `Artwork` is: without this, focus barely shows on it.
-    /// Elsewhere nothing.
+    /// Artwork in a card that lifts under focus, the pointer or the eyes. Apple TV lifts it under
+    /// focus, with the system's sheen, sway and glass rim: the card's button style lifts the first
+    /// picture in its label by itself, but not one clipped to rounded corners, as `Artwork` is,
+    /// and without this focus barely shows on it. iPad's pointer and Vision Pro's gaze lift the
+    /// artwork's rounded shape rather than the whole card with its caption, and on the Mac it
+    /// grows a little under the pointer.
     func liftsUnderFocus() -> some View {
         #if os(tvOS)
         hoverEffect(.highlight)
+        #elseif os(macOS)
+        modifier(PointerLift())
         #else
-        self
+        contentShape(.hoverEffect, .rect(cornerRadius: Metrics.cardRadius))
+            .hoverEffect(.lift)
         #endif
     }
 }
+
+#if os(macOS)
+/// Grows a card's artwork a little while the pointer is over it.
+private struct PointerLift: ViewModifier {
+    @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isHovered && !reduceMotion ? 1.03 : 1)
+            .brightness(isHovered ? 0.04 : 0)
+            .animation(.snappy(duration: 0.2), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+#endif
 
 /// The title and details under a card's artwork. On Apple TV they're dimmed but for the card
 /// with focus, so it stands out beside its row, and move down out of the way of its artwork as
@@ -181,22 +218,30 @@ extension View {
 }
 
 /// For artwork cards: Apple TV lifts them under focus; elsewhere they stay untinted, with the
-/// title in the text color rather than the accent.
+/// title in the text color rather than the accent, and give a little under a finger or a click.
 #if os(tvOS)
 typealias ArtworkButtonStyle = BorderlessButtonStyle
-#else
-typealias ArtworkButtonStyle = PlainButtonStyle
-#endif
 
 extension PrimitiveButtonStyle where Self == ArtworkButtonStyle {
-    static var artwork: Self {
-        #if os(tvOS)
-        .borderless
-        #else
-        .plain
-        #endif
+    static var artwork: Self { .borderless }
+}
+#else
+struct ArtworkButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // With Reduce Motion it dims instead of moving.
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+            .opacity(configuration.isPressed && reduceMotion ? 0.7 : 1)
+            .animation(.spring(duration: 0.3, bounce: 0.4), value: configuration.isPressed)
     }
 }
+
+extension ButtonStyle where Self == ArtworkButtonStyle {
+    static var artwork: Self { ArtworkButtonStyle() }
+}
+#endif
 
 extension View {
     #if os(tvOS)
@@ -270,4 +315,13 @@ extension EnvironmentValues {
     /// How far the bars over the top of an `EdgeToEdgeScrollView` that runs up under them reach
     /// over its content; zero in one that doesn't.
     @Entry var topBarsHeight: CGFloat = 0
+}
+
+extension View {
+    /// The page's color behind a screen, under the bars too: the one its hero artwork fades into
+    /// (see `Color.pageBackground`), so moving between screens doesn't change it. On Apple TV
+    /// that's black, where the system's would be gray.
+    func pageBackground() -> some View {
+        background(Color.pageBackground.ignoresSafeArea())
+    }
 }

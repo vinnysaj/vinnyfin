@@ -174,7 +174,7 @@ final class SmartDownloads {
 
     /// What keeping every unwatched episode of a show would add to the downloads, by the sizes
     /// the server lists for the versions closest to the download quality, and the transcodes'
-    /// estimates where none fits and Transcode When No Version Fits is on.
+    /// estimates where none fits and Transcode Downloads When No Version Fits is on.
     func everyUnwatchedEstimate(seriesId: String) async throws -> DownloadEstimate {
         guard let client = accounts.client, let account = accounts.account else { throw PlaybackError.notSignedIn }
         let show = try await show(seriesId, client: client, userId: account.userId)

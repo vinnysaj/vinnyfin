@@ -436,3 +436,533 @@ struct IntentSummaryTests {
     }
 }
 #endif
+
+struct CardFitTests {
+    #if os(iOS)
+    /// A 402-point iPhone, less its margins, and less the A–Z index's strip as well.
+    @Test func aPhonesGridHoldsThreeColumnsDownTo340Points() {
+        func columns(_ width: CGFloat) -> Int {
+            CardFit.columns(in: width, minimum: Metrics.posterWidth, spacing: Metrics.gridSpacing)
+        }
+        #expect(columns(370) == 3)
+        #expect(columns(358) == 3)
+        #expect(columns(342) == 3)
+        #expect(columns(340) == 3)
+        #expect(columns(339) == 2)
+        #expect(columns(300) == 2)
+    }
+    #endif
+
+    @Test func fillsAGridWithAsManyColumnsAsFitAtTheMinimum() {
+        #expect(CardFit.columns(in: 1000, minimum: 156, spacing: 14) == 5)
+        #expect(CardFit.columns(in: 100, minimum: 156, spacing: 14) == 1)
+        #expect(CardFit.columns(in: 1720, minimum: 230, spacing: 48) == 6)
+    }
+
+    /// The cards visible from the first's leading edge to the row's trailing one.
+    private func visible(room: CGFloat, target: CGFloat, spacing: CGFloat = 14) -> Double {
+        let width = CardFit.rowCardWidth(room: room, target: target, spacing: spacing)
+        let whole = ((room + spacing) / (width + spacing)).rounded(.down)
+        return Double(whole + (room - whole * (width + spacing)) / width)
+    }
+
+    @Test func aPhonesRowShowsThreePostersAndAPartOfAFourth() {
+        // 402 and 375 points wide, the first card 16 in.
+        #expect(abs(visible(room: 386, target: 104) - 3.3) < 0.01)
+        #expect(abs(visible(room: 359, target: 104) - 3.3) < 0.01)
+        #expect(abs(CardFit.rowCardWidth(room: 386, target: 104, spacing: 14) - 104.2) < 0.1)
+    }
+
+    @Test func aPhonesRowShowsALandscapeCardAndAPartOfTheNext() {
+        #expect(abs(visible(room: 386, target: 270) - 1.3) < 0.01)
+    }
+
+    @Test func growsCardsALittleRatherThanCrowdingMoreIn() {
+        // 88-point cast photos fit three and a part across a 402-point phone at 104, not four at 77.
+        #expect(abs(CardFit.rowCardWidth(room: 386, target: 88, spacing: 14) - 104.2) < 0.1)
+        // Posters a third over would be too many, so a 375-point phone fits them narrower.
+        #expect(abs(CardFit.rowCardWidth(room: 359, target: 104, spacing: 14) - 96.1) < 0.1)
+    }
+
+    @Test func keepsCardsNearTheirWidthOnWideScreens() {
+        let width = CardFit.rowCardWidth(room: 1081, target: 156, spacing: 14)
+        #expect(width > 140 && width < 175)
+        let cards = visible(room: 1081, target: 156)
+        #expect(abs(cards - cards.rounded(.down) - 0.3) < 0.01)
+    }
+}
+
+struct LibraryTitleTests {
+    @Test func aListPickedByItsOrderIsRetitledInAnother() {
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: "SortName") == "Movies")
+        #expect(LibraryGridView.title(of: HomeRows.topShows.list, sortedBy: "DateLastContentAdded") == "Shows")
+        #expect(LibraryGridView.title(of: HomeRows.genre("Drama", type: "Movie").list, sortedBy: "SortName") == "Drama Movies")
+        #expect(LibraryGridView.title(of: HomeRows.somethingDifferent("Drama").list, sortedBy: "SortName")
+            == "Unwatched Drama Movies and Shows")
+    }
+
+    @Test func keepsItsTitleInItsOwnOrder() {
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: "DateCreated") == "Recently Added Movies")
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: nil) == "Recently Added Movies")
+    }
+
+    @Test func keepsTheTitleOfAListPickedByWhatsInIt() {
+        #expect(LibraryGridView.title(of: HomeRows.favorites.list, sortedBy: "DateCreated") == "Favorites")
+        #expect(LibraryGridView.title(of: .titles(with: Person(id: "p", name: "Ada Vale")), sortedBy: "SortName") == "Ada Vale")
+        let found = BrowseList(title: SearchView.seeAllTitle("Movies", term: "ferry"),
+                               source: .items(JellyfinClient.ItemQuery(types: ["Movie"], searchTerm: "ferry")))
+        #expect(LibraryGridView.title(of: found, sortedBy: "DateCreated") == "Movies Matching \u{201C}ferry\u{201D}")
+    }
+}
+
+struct SearchTests {
+    @Test func titlesEveryMatchOfAKindByWhatWasSearchedFor() {
+        #expect(SearchView.seeAllTitle("Movies", term: "ferry") == "Movies Matching \u{201C}ferry\u{201D}")
+        #expect(SearchView.seeAllTitle("Episodes", term: "the night") == "Episodes Matching \u{201C}the night\u{201D}")
+    }
+
+    @Test func neverSaysNoResultsBeforeTheSearchForWhatsTypedFinishes() {
+        // The first letter, waiting out the pause before the search.
+        #expect(SearchPhase(text: "p", searched: "", isSearching: false, hasResults: false, error: nil) == .searching)
+        // More letters after a search that found nothing.
+        #expect(SearchPhase(text: "port", searched: "p", isSearching: false, hasResults: false, error: nil) == .searching)
+        // The search for what's typed waiting on the server.
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: true, hasResults: false, error: nil) == .searching)
+        #expect(SearchPhase(text: "port ", searched: "port", isSearching: false, hasResults: false, error: nil) == .noResults)
+    }
+
+    @Test func keepsWhatWasFoundOnScreenWhileTheNextSearchRuns() {
+        #expect(SearchPhase(text: "por", searched: "po", isSearching: true, hasResults: true, error: nil) == .results)
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: false, hasResults: true, error: nil) == .results)
+    }
+
+    @Test func saysASearchFailedOnlyForWhatsTyped() {
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: false, hasResults: false, error: "Offline") == .failed("Offline"))
+        #expect(SearchPhase(text: "porta", searched: "port", isSearching: false, hasResults: false, error: "Offline") == .searching)
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: true, hasResults: false, error: "Offline") == .searching)
+    }
+
+    @Test func promptsWithNothingTyped() {
+        #expect(SearchPhase(text: "  ", searched: "port", isSearching: false, hasResults: true, error: nil) == .prompt)
+    }
+
+    @Test func numbersAnEpisodeShortForItsSearchCard() {
+        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#))
+            == "S1, E1")
+        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#))
+            == "S2, E2–3")
+        #expect(LandscapeCard.shortCode(of: Samples.movie) == nil)
+    }
+
+    // MARK: Hints
+
+    private static func hints(_ json: String) throws -> [SearchHint] {
+        try JSONDecoder().decode(SearchHintsPage.self, from: Data(json.utf8)).searchHints
+    }
+
+    @Test func sortsTheServersHintsIntoPeopleGenresAndCollections() throws {
+        let hints = try Self.hints("""
+        {"SearchHints":[
+          {"Id":"p1","Name":"Ada Vale","Type":"Person","PrimaryImageTag":"face"},
+          {"Id":"g1","Name":"Western","Type":"Genre","PrimaryImageTag":"collage"},
+          {"Id":"b1","Name":"The Vale Collection","Type":"BoxSet","PrimaryImageTag":"poster","ProductionYear":2019},
+          {"Id":"s1","Name":"Studio Vale","Type":"Studio"},
+          {"Id":"g2","Name":"Western","Type":"Genre"},
+          {"ItemId":"p2","Name":"Bo Vale","Type":"Person"}
+        ],"TotalRecordCount":6}
+        """)
+        let results = SearchResults(hints: hints)
+        #expect(results.people == [Person(id: "p1", name: "Ada Vale", type: "Person", primaryImageTag: "face"),
+                                   Person(id: "p2", name: "Bo Vale", type: "Person")])
+        #expect(results.genres == ["Western"])
+        #expect(results.collections.map(\.id) == ["b1"])
+        let collection = try #require(results.collections.first)
+        #expect(collection.isCollection)
+        #expect(collection.primaryImageTag == "poster")
+        #expect(collection.productionYear == 2019)
+        #expect(!results.isEmpty)
+        #expect(results.summary == "1 collection, 2 people, and 1 genre")
+        #expect(SearchResults().isEmpty)
+        #expect(SearchResults().summary == "No results")
+    }
+
+    @Test func leadsWithTheTitleNamedOrStartingWithWhatWasTyped() {
+        let starfall = Samples.item(#"{"Id":"e9","Name":"Starfall","Type":"Episode","SeriesName":"Starfall Station"}"#)
+        let station = Samples.item(#"{"Id":"s3","Name":"Starfall Station","Type":"Series"}"#)
+        let ferry = Samples.item(#"{"Id":"m3","Name":"The Last Ferry to Ilsa","Type":"Movie"}"#)
+        let signal = Samples.item(#"{"Id":"m4","Name":"Signal Over Kestrel Bay","Type":"Movie"}"#)
+        let found = SearchResults(movies: [ferry, signal], shows: [station], episodes: [starfall])
+        // A show starting with it, ahead of the episode of the same and movies merely containing it.
+        #expect(found.topResult(for: "st") == station)
+        #expect(found.sections(for: "st") == [.shows, .episodes, .movies])
+        // Named exactly, the episode leads.
+        #expect(found.topResult(for: "Starfall") == starfall)
+        // A word of the name starting with it.
+        #expect(found.topResult(for: "kestrel") == signal)
+        #expect(found.sections(for: "kestrel") == [.movies, .shows, .episodes])
+        // Contained mid-word is no top result.
+        #expect(found.topResult(for: "estre") == nil)
+        let copperline = Samples.item(#"{"Id":"m2","Name":"Copperline","Type":"Movie","ProductionYear":2019}"#)
+        #expect(SearchResults(movies: [copperline]).topResult(for: "copperline (2019)") == copperline)
+    }
+
+    @Test func putsAGenreOrPersonNamedExactlyAboveLooseTitles() throws {
+        let hints = try Self.hints(#"{"SearchHints":[{"Id":"g","Name":"Western","Type":"Genre"},{"Id":"p","Name":"Wes Hart","Type":"Person"}]}"#)
+        let loose = Samples.item(#"{"Id":"m","Name":"Midwestern Nights","Type":"Movie"}"#)
+        let found = SearchResults(movies: [loose], hints: hints)
+        #expect(found.sections(for: "western") == [.genres, .movies, .people])
+        #expect(found.sections(for: "wes") == [.people, .genres, .movies])
+        #expect(found.topResult(for: "western") == nil)
+    }
+
+    @Test func matchesIgnoringCaseAccentsAndPunctuationAtTheEnds() {
+        #expect(SearchMatch(name: "Amélie", term: "amelie") == .exact)
+        #expect(SearchMatch(name: "Port Ellery", term: "  port  ") == .prefix)
+        #expect(SearchMatch(name: "The Long Field", term: "field!") == .wordPrefix)
+        #expect(SearchMatch(name: "Copperline", term: "perl") == .contains)
+        #expect(SearchMatch(name: "Copperline", term: "zinc") == .none)
+        #expect(SearchMatch(name: "Copperline", term: "") == .none)
+    }
+
+    // MARK: Did you mean
+
+    private static let names = ["Copperline", "Port Ellery", "The Last Ferry to Ilsa", "Starfall Station", "Western", "Drama", "Thriller"]
+
+    @Test func suggestsTheNameALetterOrTwoOff() {
+        #expect(DidYouMean.suggestion(for: "coperline", among: Self.names) == "Copperline")
+        #expect(DidYouMean.suggestion(for: "Coppreline", among: Self.names) == "Copperline")
+        #expect(DidYouMean.suggestion(for: "westrn", among: Self.names) == "Western")
+        #expect(DidYouMean.suggestion(for: "port elery", among: Self.names) == "Port Ellery")
+        // The start of a long name.
+        #expect(DidYouMean.suggestion(for: "the last fery", among: Self.names) == "The Last Ferry to Ilsa")
+        // Swapped letters count once.
+        #expect(DidYouMean.suggestion(for: "dramma", among: Self.names) == "Drama")
+        #expect(DidYouMean.suggestion(for: "darma", among: Self.names) == "Drama")
+    }
+
+    @Test func suggestsNothingTooFarOffOrTooShort() {
+        #expect(DidYouMean.suggestion(for: "zebra crossing", among: Self.names) == nil)
+        // Up to five letters, one letter off at most.
+        #expect(DidYouMean.suggestion(for: "drxmx", among: Self.names) == nil)
+        #expect(DidYouMean.suggestion(for: "dr", among: Self.names) == nil)
+        #expect(DidYouMean.suggestion(for: "copperline", among: Self.names) == nil)
+        #expect(DidYouMean.suggestion(for: "coperline", among: []) == nil)
+    }
+
+    @Test func countsLettersAddedTakenAwayChangedAndSwapped() {
+        func distance(_ left: String, _ right: String, limit: Int = 5) -> Int {
+            DidYouMean.editDistance(Array(left), Array(right), limit: limit)
+        }
+        #expect(distance("teh", "the") == 1)
+        #expect(distance("kitten", "sitting") == 3)
+        #expect(distance("", "abc") == 3)
+        #expect(distance("same", "same") == 0)
+        // Past the limit, it stops counting.
+        #expect(distance("kitten", "sitting", limit: 1) == 2)
+        #expect(distance("a", "abcdefgh", limit: 2) == 3)
+    }
+
+    // MARK: Recent searches
+
+    @Test func keepsRecentSearchesNewestFirstOnceEach() {
+        var terms: [String] = []
+        for term in ["port", "Western", " copperline ", "PORT", ""] {
+            terms = RecentSearches.adding(term, to: terms)
+        }
+        #expect(terms == ["PORT", "copperline", "Western"])
+        for number in 1...10 { terms = RecentSearches.adding("term \(number)", to: terms) }
+        #expect(terms.count == RecentSearches.limit)
+        #expect(terms.first == "term 10")
+    }
+
+    @Test func keepsRecentSearchesForEachSignIn() throws {
+        let suite = "RecentSearchTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let alex = RecentSearches(defaults: defaults, serverId: "den", userId: "alex")
+        let sam = RecentSearches(defaults: defaults, serverId: "den", userId: "sam")
+        alex.save(["port", "western"])
+        #expect(alex.load() == ["port", "western"])
+        #expect(sam.load().isEmpty)
+        #expect(RecentSearches(defaults: defaults, serverId: "den", userId: "alex").load() == ["port", "western"])
+    }
+}
+
+struct GenreBrowsingTests {
+    @Test func aGenresListIsItsMoviesAndShowsBestRatedFirst() throws {
+        let list = BrowseList.genre("Western")
+        #expect(list.title == "Western")
+        #expect(list.style == .poster)
+        #expect(list.refinementsKey == nil)
+        guard case .items(let query) = list.source else { throw ListError.notAQuery }
+        #expect(query.types == ["Movie", "Series"])
+        #expect(query.genres == ["Western"])
+        #expect(query.sortBy == "CommunityRating")
+        #expect(!query.ascending)
+        #expect(query.excludeIds.isEmpty)
+        #expect(list.symbol == "theatermasks")
+    }
+
+    @Test func aGenresOtherTitlesLeaveOutTheOneShowing() throws {
+        guard case .items(let query) = BrowseList.genre("Western", excluding: "m2").source else { throw ListError.notAQuery }
+        #expect(query.genres == ["Western"])
+        #expect(query.excludeIds == ["m2"])
+    }
+
+    @Test func aGenresListKeepsItsNameInAnyOrder() {
+        #expect(LibraryGridView.title(of: .genre("Western"), sortedBy: "SortName") == "Western")
+        #expect(LibraryGridView.title(of: .genre("Western"), sortedBy: "Random") == "Western")
+        // Home's genre rows are titled for their kind as well, which another order keeps.
+        #expect(LibraryGridView.title(of: HomeRows.genre("Drama", type: "Movie").list, sortedBy: "SortName") == "Drama Movies")
+        // A list picked by its order, shuffled, is every title of its kind.
+        #expect(LibraryGridView.title(of: HomeRows.topMovies.list, sortedBy: "Random") == "Movies")
+    }
+
+    @Test func tilesTheGenresThatHaveTitles() {
+        let found = [
+            Samples.item(#"{"Id":"g1","Name":"Drama","Type":"Genre","MovieCount":5,"SeriesCount":2}"#),
+            Samples.item(#"{"Id":"g2","Name":"Food","Type":"Genre","SeriesCount":1}"#),
+            Samples.item(#"{"Id":"g3","Name":"Empty","Type":"Genre","MovieCount":0,"SeriesCount":0}"#),
+        ]
+        #expect(GenreTiles.genres(from: found) == [GenreTiles.Genre(name: "Drama", count: 7), GenreTiles.Genre(name: "Food", count: 1)])
+        #expect(GenreTile.count(1) == "1 title")
+        #expect(GenreTile.count(7) == "7 titles")
+    }
+
+    @Test func picksATilesPictureNoOtherTileShows() {
+        let pictured = Samples.item(#"{"Id":"a","Name":"A","Type":"Movie","BackdropImageTags":["b"]}"#)
+        let unpictured = Samples.item(#"{"Id":"b","Name":"B","Type":"Movie","BackdropImageTags":[]}"#)
+        let other = Samples.item(#"{"Id":"c","Name":"C","Type":"Series","BackdropImageTags":["c"]}"#)
+        #expect(GenreTiles.pick(from: [unpictured, pictured, other], taken: []) == pictured)
+        #expect(GenreTiles.pick(from: [unpictured, pictured, other], taken: ["a"]) == other)
+        // Every picture taken, the best one shows again rather than none.
+        #expect(GenreTiles.pick(from: [pictured, other], taken: ["a", "c"]) == pictured)
+        #expect(GenreTiles.pick(from: [unpictured], taken: []) == nil)
+    }
+
+    @Test func aLibraryListsItsOwnKindOfTitles() throws {
+        func list(_ type: String?) throws -> (BrowseList, JellyfinClient.ItemQuery) {
+            var library = JellyfinItem(id: "lib", name: "Library", type: "CollectionFolder")
+            library.collectionType = type
+            let list = BrowseList.library(library)
+            guard case .items(let query) = list.source else { throw ListError.notAQuery }
+            return (list, query)
+        }
+        let (homeVideos, homeQuery) = try list("homevideos")
+        #expect(homeQuery.types == ["Video"])
+        #expect(homeQuery.parentId == "lib")
+        #expect(homeVideos.style == .landscape)
+        #expect(homeVideos.symbol == "video")
+        #expect(try list("musicvideos").1.types == ["MusicVideo"])
+        #expect(try list("movies").1.types == ["Movie"])
+        #expect(try list("movies").0.style == .poster)
+        #expect(try list("tvshows").1.types == ["Series"])
+        #expect(try list(nil).1.types == ["Movie", "Series", "Video", "MusicVideo"])
+        #expect(try list("mixed").0.style == .poster)
+        #expect(LibraryGridView.title(of: homeVideos, sortedBy: "DateCreated") == "Library")
+    }
+
+    @Test func showsLibrariesOnSearchWhenTheTabsDontReachEach() {
+        func library(_ id: String, _ type: String?) -> JellyfinItem {
+            var library = JellyfinItem(id: id, name: id, type: "CollectionFolder")
+            library.collectionType = type
+            return library
+        }
+        let movies = library("Movies", "movies"), shows = library("Shows", "tvshows")
+        #expect(LibraryShortcuts.shown([movies, shows]).isEmpty)
+        #expect(LibraryShortcuts.shown([movies]).isEmpty)
+        let home = library("Home Videos", "homevideos")
+        #expect(LibraryShortcuts.shown([movies, shows, home]).map(\.id) == ["Movies", "Shows", "Home Videos"])
+        #expect(LibraryShortcuts.shown([movies, library("Kids", "movies")]).count == 2)
+        #expect(LibraryShortcuts.shown([library("Everything", nil)]).count == 1)
+    }
+
+    @Test func saysWhatTheTopResultIs() {
+        #expect(TopResultCard.detail(of: Samples.item(#"{"Id":"m","Name":"Copperline","Type":"Movie","ProductionYear":2019}"#)) == "Movie · 2019")
+        #expect(TopResultCard.detail(of: Samples.item(#"{"Id":"s","Name":"Port Ellery","Type":"Series"}"#)) == "Show")
+        #expect(TopResultCard.detail(of: Samples.item(
+            #"{"Id":"e","Name":"Low Tide","Type":"Episode","SeriesName":"Port Ellery","ParentIndexNumber":1,"IndexNumber":2}"#))
+            == "Episode · Port Ellery · S1, E2")
+    }
+
+    private enum ListError: Error { case notAQuery }
+}
+
+struct LibraryRefinementTests {
+    private static let movies: JellyfinClient.ItemQuery = {
+        guard case .items(let query) = BrowseList.movies.source else { return .init() }
+        return query
+    }()
+
+    private static func library(_ id: String, _ name: String) -> JellyfinItem {
+        JellyfinItem(id: id, name: name, type: "CollectionFolder")
+    }
+
+    @Test func startsFromTheListsOwnOrderWithNoFilters() {
+        let refinements = LibraryRefinements(of: Self.movies)
+        #expect(refinements.sort == .name)
+        #expect(refinements.ascending)
+        #expect(!refinements.isFiltered)
+        #expect(refinements.chips(libraries: []).isEmpty)
+        #expect(refinements.applied(to: Self.movies) == Self.movies)
+        #expect(LibraryRefinements(of: HomeRows.recentMovies.list.source.query!).sort == .dateAdded)
+        #expect(LibraryRefinements(of: HomeRows.recentMovies.list.source.query!).ascending == false)
+    }
+
+    @Test func aChipForEachFilterTakesItAway() {
+        var refinements = LibraryRefinements(sort: .name, ascending: true, filter: .unwatched, genres: ["Drama", "Thriller"],
+                                             libraryId: "kids")
+        let libraries = [Self.library("kids", "Kids"), Self.library("films", "Films")]
+        #expect(refinements.chips(libraries: libraries) == [.filter(.unwatched), .genre("Drama"), .genre("Thriller"),
+                                                             .library(id: "kids", name: "Kids")])
+        #expect(refinements.chips(libraries: libraries).map(\.label) == ["Unwatched", "Drama", "Thriller", "Kids"])
+        #expect(refinements.filterSummary(libraries: libraries) == "Unwatched, Drama or Thriller, and Kids")
+        #expect(refinements.filterSubtitle(libraries: libraries) == "Unwatched · Drama or Thriller · Kids")
+
+        refinements.remove(.genre("Drama"))
+        #expect(refinements.genres == ["Thriller"])
+        refinements.remove(.filter(.unwatched))
+        #expect(refinements.filter == .all)
+        refinements.remove(.library(id: "kids", name: "Kids"))
+        #expect(refinements.libraryId == nil)
+        #expect(refinements.chips(libraries: libraries) == [.genre("Thriller")])
+        #expect(refinements.isFiltered)
+    }
+
+    @Test func clearingTakesEveryFilterAwayAndLeavesTheSort() {
+        var refinements = LibraryRefinements(sort: .rating, ascending: true, filter: .favorites, genres: ["Drama"], libraryId: "kids")
+        refinements.clearFilters()
+        #expect(!refinements.isFiltered)
+        #expect(refinements.chips(libraries: []).isEmpty)
+        #expect(refinements.sort == .rating)
+        #expect(refinements.ascending)
+        // A library that can't be named still has a chip to take it away.
+        #expect(LibraryRefinements(sort: .name, ascending: true, libraryId: "gone").chips(libraries: []) == [.library(id: "gone", name: "Library")])
+    }
+
+    @Test func picksSeveralGenresAndPutsThemBack() {
+        var refinements = LibraryRefinements(of: Self.movies)
+        refinements.toggle(genre: "Drama")
+        refinements.toggle(genre: "Western")
+        #expect(refinements.genres == ["Drama", "Western"])
+        #expect(refinements.applied(to: Self.movies).genres == ["Drama", "Western"])
+        #expect(refinements.filterSummary(libraries: []) == "Drama or Western")
+        refinements.toggle(genre: "Drama")
+        #expect(refinements.genres == ["Western"])
+    }
+
+    @Test func refinesTheQueryButLeavesWhatTheListFixes() {
+        var refinements = LibraryRefinements(of: Self.movies)
+        refinements.choose(.dateAdded)
+        refinements.filter = .favorites
+        refinements.libraryId = "kids"
+        let query = refinements.applied(to: Self.movies)
+        #expect(query.sortBy == "DateCreated")
+        #expect(!query.ascending)
+        #expect(query.isFavorite == true)
+        #expect(query.isPlayed == nil)
+        #expect(query.parentId == "kids")
+
+        // Unwatched Favorites fixes watch state; a genre list fixes its genre; a library list its library.
+        let unwatchedFavorites = HomeRows.unwatchedFavorites.list.source.query!
+        refinements.filter = .all
+        #expect(refinements.applied(to: unwatchedFavorites).isPlayed == false)
+        #expect(refinements.applied(to: unwatchedFavorites).isFavorite == true)
+        refinements.genres = ["Drama"]
+        #expect(refinements.applied(to: BrowseList.genre("Western").source.query!).genres == ["Western"])
+        var library = JellyfinItem(id: "home", name: "Home Videos", type: "CollectionFolder")
+        library.collectionType = "homevideos"
+        #expect(refinements.applied(to: BrowseList.library(library).source.query!).parentId == "home")
+    }
+
+    @Test func eachSortGoesItsUsualWayAndTurnsTheOther() {
+        var refinements = LibraryRefinements(of: Self.movies)
+        refinements.choose(.rating)
+        #expect(refinements.sortSummary == "Rating, Highest First")
+        refinements.ascending.toggle()
+        #expect(refinements.sortSummary == "Rating, Lowest First")
+        #expect(refinements.applied(to: Self.movies).ascending)
+        refinements.choose(.name)
+        #expect(refinements.sortSummary == "Name, A to Z")
+        refinements.ascending = false
+        #expect(refinements.sortSummary == "Name, Z to A")
+        refinements.choose(.dateAdded)
+        #expect(refinements.sortSummary == "Date Added, Newest First")
+        #expect(LibraryGridView.Sort.lastPlayed.direction(ascending: false) == "Latest First")
+        #expect(LibraryGridView.Sort.releaseDate.direction(ascending: true) == "Oldest First")
+        #expect(LibraryGridView.Sort.dateAdded.serverField(for: ["Series"]) == "DateLastContentAdded")
+    }
+
+    @Test func aRandomSortShufflesTheQueryBySeed() {
+        var refinements = LibraryRefinements(of: Self.movies)
+        refinements.filter = .unwatched
+        refinements.choose(.random)
+        #expect(refinements.sortSummary == "Random")
+        guard case .shuffled(let query, let seed) = refinements.source(for: Self.movies, seed: 7) else {
+            Issue.record("A random sort isn't shuffled")
+            return
+        }
+        #expect(seed == 7)
+        #expect(query.isPlayed == false)
+        // The list's own order stays, for paging the shuffled ids.
+        #expect(query.sortBy == "SortName")
+        refinements.choose(.name)
+        #expect(refinements.source(for: Self.movies, seed: 7) == .items(refinements.applied(to: Self.movies)))
+    }
+
+    @Test func remembersEachTabsSortAndFilterForEachSignIn() throws {
+        let suite = "LibraryMemoryTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let movies = LibraryMemory(defaults: defaults, list: "movies", serverId: "den", userId: "alex")
+        #expect(movies.load() == nil)
+        var refinements = LibraryRefinements(of: Self.movies)
+        refinements.choose(.random)
+        refinements.genres = ["Drama", "Thriller"]
+        refinements.filter = .unwatched
+        movies.save(refinements)
+        #expect(LibraryMemory(defaults: defaults, list: "movies", serverId: "den", userId: "alex").load() == refinements)
+        #expect(LibraryMemory(defaults: defaults, list: "shows", serverId: "den", userId: "alex").load() == nil)
+        #expect(LibraryMemory(defaults: defaults, list: "movies", serverId: "den", userId: "sam").load() == nil)
+        #expect(LibraryMemory(defaults: defaults, list: "movies", serverId: "attic", userId: "alex").load() == nil)
+        // Only the tabs' lists are kept.
+        #expect(BrowseList.movies.refinementsKey == "movies")
+        #expect(BrowseList.shows.refinementsKey == "shows")
+        #expect(HomeRows.recentMovies.list.refinementsKey == nil)
+    }
+}
+
+struct ShuffleOrderTests {
+    private static let ids = (1...200).map { "id\($0)" }
+
+    @Test func theSameSeedGivesTheSameOrder() {
+        let once = ShuffleOrder.sorted(Self.ids, seed: 42)
+        #expect(once == ShuffleOrder.sorted(Self.ids.reversed(), seed: 42))
+        #expect(Set(once) == Set(Self.ids))
+        #expect(once != Self.ids)
+        #expect(once != ShuffleOrder.sorted(Self.ids, seed: 43))
+    }
+
+    @Test func titlesAddedOrGoneLeaveTheOthersOrderAlone() {
+        let before = ShuffleOrder.sorted(Self.ids, seed: 9)
+        let after = ShuffleOrder.sorted(Self.ids.filter { $0 != "id50" } + ["new"], seed: 9)
+        #expect(after.filter { $0 != "new" } == before.filter { $0 != "id50" })
+    }
+
+    @Test func mergesTheNewestMoviesAndShowsByWhenEachWasAdded() {
+        let day = { (offset: Double) in Date(timeIntervalSince1970: 1_800_000_000 + offset * 86_400) }
+        let movie = JellyfinItem(id: "m", name: "Movie", type: "Movie")
+        let show = JellyfinItem(id: "s", name: "Show", type: "Series")
+        let older = JellyfinItem(id: "o", name: "Older", type: "Movie")
+        let undated = JellyfinItem(id: "u", name: "Undated", type: "Movie")
+        let merged = JellyfinClient.newestFirst([(older, day(1)), (undated, nil), (movie, day(3)), (show, day(5))], limit: 3)
+        #expect(merged.map(\.id) == ["s", "m", "o"])
+        #expect(JellyfinClient.newestFirst([(undated, nil), (older, nil)], limit: 5).map(\.id) == ["u", "o"])
+    }
+}
+
+private extension JellyfinClient.ItemSource {
+    var query: JellyfinClient.ItemQuery? {
+        if case .items(let query) = self { query } else { nil }
+    }
+}

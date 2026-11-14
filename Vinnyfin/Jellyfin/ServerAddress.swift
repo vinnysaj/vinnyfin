@@ -46,8 +46,24 @@ nonisolated struct ServerAddress: Equatable, Sendable {
     }
 
     /// Splits a full address someone typed or pasted ("jf.example.com:8920/jellyfin",
-    /// "https://10.0.0.5/jf/"). Without a scheme, it's on HTTPS until one is given.
+    /// "https://10.0.0.5/jf/"), or copied from a browser showing Jellyfin's web app, which is at
+    /// "web" under the base path: that, and what follows it, go
+    /// ("https://jf.example.com/jellyfin/web/index.html#!/home" is at "/jellyfin"). Without a
+    /// scheme, it's on HTTPS until one is given.
     init?(parsing text: String) {
+        self.init(text, path: Self.basePath(ofWebAppPath:))
+    }
+
+    /// A server's saved URL, as the form shows it, its path the base path as it is. A saved HTTP
+    /// address without a port is on port 80, not the form's default of 8096.
+    init?(savedURL url: URL) {
+        guard var address = ServerAddress(url.absoluteString, path: Self.normalizedPath) else { return nil }
+        if url.port == nil { address.port = address.scheme == .http ? "80" : "" }
+        self = address
+    }
+
+    /// An address from its text, with what `basePath` makes of the URL's path as its base path.
+    private init?(_ text: String, path basePath: (String) -> String) {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasScheme = text.contains("://")
         if !hasScheme { text = "\(Scheme.https.rawValue)://" + text }
@@ -59,15 +75,7 @@ nonisolated struct ServerAddress: Equatable, Sendable {
         isSchemeGiven = hasScheme
         self.host = host
         port = components.port.map(String.init) ?? ""
-        path = Self.normalizedPath(components.path)
-    }
-
-    /// A server's saved URL, as the form shows it. A saved HTTP address without a port is on port
-    /// 80, not the form's default of 8096.
-    init?(savedURL url: URL) {
-        guard var address = ServerAddress(parsing: url.absoluteString) else { return nil }
-        if url.port == nil { address.port = address.scheme == .http ? "80" : "" }
-        self = address
+        path = basePath(components.path)
     }
 
     /// Picks the scheme, as the form's protocol does.
@@ -120,21 +128,84 @@ nonisolated struct ServerAddress: Equatable, Sendable {
         return ServerAddress(scheme: .http, host: host, port: port, path: path)
     }
 
+    /// How long a server has to answer before it counts as not answering. One on the same network
+    /// answers in well under a second, and one across the internet in a second or two.
+    static let answerTimeLimit = Duration.seconds(6)
+    /// How much longer than HTTP an answer on HTTPS is waited for: a server that answers on both
+    /// is found on HTTPS, rather than on HTTP for having answered there first.
+    static let httpsGrace = Duration.seconds(1)
+
     /// What `ask` gets from the server at this address, or when nothing answers there, at its
-    /// fallback, with the address that answered. Only an address at which nothing answers moves
-    /// on: a server that answers with an error, or isn't Jellyfin, has answered. When the fallback
-    /// doesn't do either, the error is this address's own, as the one the form shows.
-    func firstAnswer<Answer>(_ ask: (URL) async throws -> Answer) async throws -> (address: ServerAddress, answer: Answer) {
+    /// fallback, with the address that answered. Only an address at which nothing answers within
+    /// `answerTimeLimit` moves on: a server that answers with an error, or isn't Jellyfin, has
+    /// answered. Both are asked at once, and the fallback's answer stands once this address has
+    /// had `httpsGrace` longer to answer. When the fallback doesn't answer either, the error is
+    /// this address's own, as the one the form shows.
+    func firstAnswer<Answer: Sendable>(
+        _ ask: @escaping @MainActor (URL) async throws -> Answer
+    ) async throws -> (address: ServerAddress, answer: Answer) {
         let first = try url.get()
-        do {
-            return (self, try await ask(first))
-        } catch let unanswered as URLError where unanswered.code != .cancelled {
-            try Task.checkCancellation()
-            guard let fallback, case .success(let second) = fallback.url, let answer = try? await ask(second) else {
-                throw unanswered
-            }
-            return (fallback, answer)
+        let timeLimit = Self.answerTimeLimit
+        guard let fallback, case .success(let second) = fallback.url else {
+            return (self, try await withTimeLimit(timeLimit) { try await ask(first) })
         }
+        return try await withThrowingTaskGroup(of: Probe<Answer>.self) { group in
+            defer { group.cancelAll() }
+            group.addTask { .first(await Probe<Answer>.outcome { try await withTimeLimit(timeLimit) { try await ask(first) } }) }
+            group.addTask { .fallback(await Probe<Answer>.outcome { try await withTimeLimit(timeLimit) { try await ask(second) } }) }
+            var unanswered: URLError?
+            var fallbackAnswer: Answer?
+            var fallbackFailed = false
+            while let probe = try await group.next() {
+                switch probe {
+                case .first(.success(let answer)):
+                    return (self, answer)
+                case .first(.failure(let error)):
+                    guard let error = error as? URLError, error.code != .cancelled else { throw error }
+                    if let fallbackAnswer { return (fallback, fallbackAnswer) }
+                    if fallbackFailed { throw error }
+                    unanswered = error
+                case .fallback(.success(let answer)):
+                    if unanswered != nil { return (fallback, answer) }
+                    fallbackAnswer = answer
+                    group.addTask {
+                        try await Task.sleep(for: Self.httpsGrace)
+                        return .graceOver
+                    }
+                case .fallback(.failure):
+                    if let unanswered { throw unanswered }
+                    fallbackFailed = true
+                case .graceOver:
+                    if let fallbackAnswer { return (fallback, fallbackAnswer) }
+                }
+            }
+            throw CancellationError()
+        }
+    }
+
+    /// What one of `firstAnswer`'s questions came to.
+    private enum Probe<Answer: Sendable>: Sendable {
+        case first(Result<Answer, any Error>)
+        case fallback(Result<Answer, any Error>)
+        /// The fallback answered, and this address has had `httpsGrace` longer to.
+        case graceOver
+
+        static func outcome(of question: () async throws -> Answer) async -> Result<Answer, any Error> {
+            do {
+                return .success(try await question())
+            } catch {
+                return .failure(error)
+            }
+        }
+    }
+
+    /// The base path of a path in Jellyfin's web app: what's before its last "web".
+    private static func basePath(ofWebAppPath path: String) -> String {
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard let web = segments.lastIndex(where: { $0.caseInsensitiveCompare("web") == .orderedSame }) else {
+            return normalizedPath(path)
+        }
+        return normalizedPath(segments[..<web].joined(separator: "/"))
     }
 
     /// "" or "/base/path": a leading slash and no trailing one.

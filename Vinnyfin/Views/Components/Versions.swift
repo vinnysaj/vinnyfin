@@ -3,12 +3,26 @@ import SwiftUI
 /// One version of an item: its name and what's in it.
 struct VersionSummary: View {
     let source: MediaSource
+    /// What to call it; nil leaves only what's in it.
+    var name: String?
+
+    init(source: MediaSource) {
+        self.source = source
+        name = source.name ?? "Default"
+    }
+
+    init(source: MediaSource, name: String?) {
+        self.source = source
+        self.name = name
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(source.name ?? "Default")
-                .font(.body)
-                .lineLimit(4)
+            if let name {
+                Text(name)
+                    .font(.body)
+                    .lineLimit(4)
+            }
             let details = source.detailLine
             if !details.isEmpty {
                 Text(details)
@@ -139,6 +153,17 @@ enum JobStatus: Equatable {
     }
 }
 
+/// An icon just before its words, as in a line of text. A list row's own labels set their icons in
+/// a column as wide as a row's leading icon, which leaves a gap in a caption under a title.
+struct InlineLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            configuration.icon
+            configuration.title
+        }
+    }
+}
+
 /// How a job is doing, in words, with the controls that apply to it. Looked at again as its
 /// retry comes due, and a second later, as the countdown to it ends then: an update can come a
 /// moment early, and a schedule's first update gives its first date, not the time.
@@ -155,6 +180,7 @@ struct JobStatusLine: View {
                               fileInHand: downloads.downloadingJobId,
                               waitsOn: downloads.jobs.filter { downloads.fileInHandWaitsOn.contains($0.id) }, now: .now))
         }
+        .labelStyle(InlineLabelStyle())
     }
 
     @ViewBuilder private func line(_ status: JobStatus) -> some View {
@@ -217,29 +243,58 @@ struct JobStatusLine: View {
     }
 }
 
+/// How far a download has got, in bytes, and while they arrive steadily, how long the rest will
+/// take. The ring beside it in Downloads draws the fraction.
 struct JobProgress: View {
     @Environment(DownloadManager.self) private var downloads
     let job: DownloadJob
+    /// Since when its bytes have been arriving, without a pause.
+    @State private var arrivingSince: Date?
+
+    /// How long the bytes have to keep arriving before the time left is told from their speed:
+    /// the first moments' speed says little about the rest.
+    static let steadyAfter: TimeInterval = 5
 
     var body: some View {
         let received = downloads.receivedBytes[job.id] ?? job.bytesOnDisk
         let total = job.displayTotalBytes
-        VStack(alignment: .leading, spacing: 4) {
-            if let total, total > 0 {
-                // A transcode's size is an estimate until it's all here.
-                let about = job.transcode != nil && job.totalBytes == nil ? "about " : ""
-                ProgressView(value: Double(min(received, total)), total: Double(total))
-                Text("\(received.formatted(.byteCount(style: .file))) of \(about)\(total.formatted(.byteCount(style: .file)))")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            } else {
-                // The size is known once the server answers the first request.
-                ProgressView(value: 0)
-                Text(received.formatted(.byteCount(style: .file)))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+        let speed = downloads.bytesPerSecond[job.id] ?? 0
+        let isArriving = downloads.transferringJobIds.contains(job.id) && speed >= 1024
+        // A transcode's size is an estimate until it's all here, as its time left would be.
+        let isEstimate = job.transcode != nil && job.totalBytes == nil
+        let timeLeft = isEstimate || !isSteady(at: .now) ? nil
+            : total.flatMap { Self.timeLeft(remaining: $0 - received, bytesPerSecond: speed) }
+        Text([Self.amount(received: received, total: total, isEstimate: isEstimate), timeLeft].compactMap(\.self)
+            .joined(separator: " · "))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .onChange(of: isArriving, initial: true) { _, arriving in
+                arrivingSince = arriving ? .now : nil
             }
-        }
+    }
+
+    private func isSteady(at now: Date) -> Bool {
+        arrivingSince.map { now.timeIntervalSince($0) >= Self.steadyAfter } ?? false
+    }
+
+    /// "22.8 MB of 1.66 GB", and before the first byte, the size alone, "2.41 GB": the status
+    /// line under it says why none has come yet. An estimate is "about" it.
+    static func amount(received: Int64, total: Int64?, isEstimate: Bool) -> String {
+        guard let total, total > 0 else { return received.formatted(.byteCount(style: .file)) }
+        let size = total.formatted(.byteCount(style: .file))
+        guard received > 0 else { return isEstimate ? "About \(size)" : size }
+        return "\(received.formatted(.byteCount(style: .file))) of \(isEstimate ? "about " : "")\(size)"
+    }
+
+    /// "12 min left", "1 hr, 5 min left", "Less than a minute left", at `bytesPerSecond`; nil
+    /// without a speed to tell it from.
+    static func timeLeft(remaining: Int64, bytesPerSecond: Double) -> String? {
+        guard bytesPerSecond >= 1024, remaining > 0 else { return nil }
+        let seconds = Double(remaining) / bytesPerSecond
+        guard seconds < 100 * 3600 else { return nil }
+        guard seconds >= 60 else { return "Less than a minute left" }
+        let minutes = Duration.seconds(Int((seconds / 60).rounded(.up)) * 60)
+        return "\(minutes.formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
     }
 }
 #endif

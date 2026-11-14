@@ -104,11 +104,11 @@ nonisolated extension EpisodeEntity {
 
 #if !os(tvOS)
 /// What Spotlight searches besides the name: the summary, the genres and, for an episode, its
-/// show. The name, the year and the picture come from the display representation.
+/// show. The name and the picture come from the display representation.
 extension ShowEntity: IndexedEntity {
     var attributeSet: CSSearchableItemAttributeSet {
         let attributes = defaultAttributeSet
-        attributes.contentDescription = overview
+        attributes.contentDescription = spotlightDescription(["Show", year.map(String.init), genres.first], overview: overview)
         attributes.keywords = genres + ["show", "TV"]
         attributes.genre = genres.first
         return attributes
@@ -118,7 +118,7 @@ extension ShowEntity: IndexedEntity {
 extension MovieEntity: IndexedEntity {
     var attributeSet: CSSearchableItemAttributeSet {
         let attributes = defaultAttributeSet
-        attributes.contentDescription = overview
+        attributes.contentDescription = spotlightDescription(["Movie", year.map(String.init), genres.first], overview: overview)
         attributes.keywords = genres + ["movie", "film"]
         attributes.genre = genres.first
         return attributes
@@ -128,10 +128,17 @@ extension MovieEntity: IndexedEntity {
 extension EpisodeEntity: IndexedEntity {
     var attributeSet: CSSearchableItemAttributeSet {
         let attributes = defaultAttributeSet
-        attributes.contentDescription = overview
+        attributes.contentDescription = spotlightDescription(["Episode", show, code], overview: overview)
         attributes.keywords = [show, code, "episode"].compactMap(\.self).filter { !$0.isEmpty }
         return attributes
     }
+}
+
+/// What a title is, "Movie · 2019 · Western", on the line before its summary: a result shows
+/// the description in place of the display representation's subtitle, which would say the year.
+nonisolated private func spotlightDescription(_ facts: [String?], overview: String?) -> String {
+    let line = facts.compactMap(\.self).filter { !$0.isEmpty }.joined(separator: " · ")
+    return [line, overview].compactMap(\.self).filter { !$0.isEmpty }.joined(separator: "\n")
 }
 #endif
 

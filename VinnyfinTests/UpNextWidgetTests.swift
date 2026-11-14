@@ -35,8 +35,8 @@ struct UpNextWidgetTests {
 
     @Test func aTilePlaysItsTitleFromWhereItWasLeft() throws {
         let tile = try #require(UpNextWidgets.tiles(from: [Self.episodePartway], limit: 1).first)
-        #expect(tile.playLink == AppLink(.play, Self.episodePartway).url)
-        let link = try #require(AppLink(tile.playLink))
+        #expect(tile.link == AppLink(.play, Self.episodePartway).url)
+        let link = try #require(AppLink(tile.link))
         #expect(link.action == .play)
         #expect(link.itemId == "e7")
         #expect(link.type == "Episode")
@@ -50,6 +50,33 @@ struct UpNextWidgetTests {
         let season = JellyfinItem(id: "season", name: "Season 1", type: "Season")
         let tiles = UpNextWidgets.tiles(from: [season, Self.episodePartway, Self.moviePartway, Self.nextEpisode], limit: 2)
         #expect(tiles.map(\.itemId) == ["e7", "m2"])
+    }
+
+    @Test func recentlyAddedAndFavoritesOpenTheirTitlesShowsAmongThem() throws {
+        let show = Samples.item(#"{"Id":"s1","Name":"Port Ellery","Type":"Series","ProductionYear":2025}"#)
+        for row in [UpNextWidgets.Row.recentlyAdded, .favorites] {
+            let tiles = UpNextWidgets.tiles(from: [show, Self.moviePartway], limit: 4, for: row)
+            #expect(tiles.map(\.itemId) == ["s1", "m2"])
+            #expect(tiles[0].detail == "2025")
+            let link = try #require(AppLink(tiles[0].link))
+            #expect(link.action == .open)
+            #expect(link.itemId == "s1")
+            #expect(!row.plays)
+        }
+        #expect(UpNextWidgets.Row.continueWatching.plays)
+    }
+
+    @Test func eachWidgetHasItsOwnKindAndList() {
+        #expect(Set(UpNextWidgets.Row.allCases.map(\.kind)).count == UpNextWidgets.Row.allCases.count)
+        #expect(UpNextWidgets.Row.continueWatching.kind == "net.vinnysaj.vinnyfin.continueWatching")
+        #expect(UpNextWidgets.Row.recentlyAdded.source == .recentlyAdded)
+        guard case .items(let favorites) = UpNextWidgets.Row.favorites.source else {
+            Issue.record("Favorites isn't a query")
+            return
+        }
+        #expect(favorites.isFavorite == true)
+        #expect(favorites.types == ["Movie", "Series"])
+        #expect(favorites.sortBy == "SortName")
     }
 
     @Test func tellsASignInTheServerTurnedAwayFromAServerOutOfReach() {

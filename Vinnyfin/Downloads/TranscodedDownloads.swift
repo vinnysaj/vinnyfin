@@ -1656,7 +1656,7 @@ extension DownloadManager {
         }
         if let refusal = await transcodes.refusal(for: plan) { return refusal }
         if plan.transcode != nil {
-            // The smallest version, which downloads with Transcode When No Version Fits off.
+            // The smallest version, which downloads with Transcode Downloads When No Version Fits off.
             let original = VersionChooser.choose(from: item.mediaSources ?? [], quality: settings.downloadQuality)
                 .map(DownloadPlan.original) ?? .original(plan.source)
             transcodes.proposal = TranscodedDownloads.Proposal(item: item, plan: plan, original: original)

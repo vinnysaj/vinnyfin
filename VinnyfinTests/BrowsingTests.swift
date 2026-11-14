@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Nuke
 import Testing
 @testable import vinnyfin
@@ -327,6 +328,38 @@ struct HomeRowsTests {
         #expect(HomeRows.differentGenre(HomeRows.Inputs(), using: &random) == nil)
     }
 
+    @Test func somethingDifferentNeedsSomethingWatchedFirst() {
+        var inputs = inputs
+        inputs.watched = []
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            #expect(HomeRows.differentGenre(inputs, using: &random) == nil)
+        }
+        #expect(!rows(inputs).contains { $0.id.hasPrefix("somethingDifferent.") })
+    }
+
+    @Test func somethingDifferentIsNeverAGenreWatchedOrStarted() {
+        var inputs = inputs
+        // Drama is the biggest by far, and watched once, the least of any genre watched.
+        inputs.watched = [Self.title("w", genres: ["Drama"])]
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            let genre = HomeRows.differentGenre(inputs, using: &random)
+            #expect(genre != nil && genre != "Drama")
+        }
+        // Every other genre big enough for a row is in something started or in Continue Watching.
+        inputs.started = [Self.title("s1", genres: ["Science Fiction", "Comedy"]), Self.title("s2", "Series", genres: ["Western"])]
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            #expect(HomeRows.differentGenre(inputs, using: &random) == nil)
+        }
+    }
+
+    @Test func continueWatchingStandsInOnlyWhenItHadTitles() {
+        #expect(HomeRows.placeholders(continueWatching: true).map(\.id) == ["continueWatching", "recentMovies", "recentShows"])
+        #expect(HomeRows.placeholders(continueWatching: false).map(\.id) == ["recentMovies", "recentShows"])
+    }
+
     @MainActor @Test func everyRowIsDistinctAndOpensAListItsGridCanSort() {
         let rows = rows(inputs)
         #expect(Set(rows.map(\.id)).count == rows.count)
@@ -363,6 +396,117 @@ struct HomeFeedTests {
         #expect(!HomeFeed.hasNoTitles([HomeRows.recentMovies.id: [JellyfinItem(id: "m", name: "Movie", type: "Movie")]]))
         #expect(!HomeFeed.hasNoTitles([HomeRows.recentShows.id: [JellyfinItem(id: "s", name: "Show", type: "Series")]]))
     }
+
+    private static func title(_ id: String, _ type: String = "Movie", played: Bool = false, favorite: Bool = false,
+                              resumeTicks: Int64? = nil) -> JellyfinItem {
+        var item = JellyfinItem(id: id, name: "Title \(id)", type: type)
+        item.userData = UserItemData(playbackPositionTicks: resumeTicks, isFavorite: favorite, played: played)
+        return item
+    }
+
+    @Test func aTitleWatchedLeavesContinueWatchingAndUnwatchedFavoritesOnly() {
+        var episode = Self.title("e1", "Episode", favorite: true, resumeTicks: 600_000_000)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.continueWatching.id: [Self.title("m1", resumeTicks: 1), episode, Self.title("m2", resumeTicks: 1)],
+            HomeRows.unwatchedFavorites.id: [episode],
+            HomeRows.recentlyWatched.id: [episode],
+            HomeRows.favorites.id: [episode],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        episode.userData?.played = true
+        episode.userData?.playbackPositionTicks = 0
+        let left = HomeFeed.replace(episode, in: &items, removed: &removed)
+
+        #expect(left == [HomeRows.continueWatching.id, HomeRows.unwatchedFavorites.id])
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["m1", "m2"])
+        #expect(items[HomeRows.unwatchedFavorites.id]?.isEmpty == true)
+        #expect(items[HomeRows.recentlyWatched.id]?.first?.isPlayed == true)
+        #expect(items[HomeRows.favorites.id]?.first?.isPlayed == true)
+    }
+
+    @Test func aTitleNoLongerAFavoriteLeavesTheFavoritesRows() {
+        var movie = Self.title("m1", favorite: true)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.favorites.id: [Self.title("a", favorite: true), movie],
+            HomeRows.unwatchedFavorites.id: [movie, Self.title("b", favorite: true)],
+            HomeRows.topMovies.id: [movie],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        movie.userData?.isFavorite = false
+        let left = HomeFeed.replace(movie, in: &items, removed: &removed)
+
+        #expect(left == [HomeRows.favorites.id, HomeRows.unwatchedFavorites.id])
+        #expect(items[HomeRows.favorites.id]?.map(\.id) == ["a"])
+        #expect(items[HomeRows.unwatchedFavorites.id]?.map(\.id) == ["b"])
+        #expect(items[HomeRows.topMovies.id]?.first?.isFavorite == false)
+    }
+
+    @Test func aChangeUndoneByTheServerPutsTheTitleBackWhereItWas() {
+        let movie = Self.title("m1", resumeTicks: 600_000_000)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.continueWatching.id: [Self.title("a", resumeTicks: 1), movie, Self.title("b", resumeTicks: 1)],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        var watched = movie
+        watched.userData?.played = true
+        _ = HomeFeed.replace(watched, in: &items, removed: &removed)
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["a", "b"])
+
+        let left = HomeFeed.replace(movie, in: &items, removed: &removed)
+        #expect(left.isEmpty)
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["a", "m1", "b"])
+        #expect(removed[HomeRows.continueWatching.id]?.isEmpty == true)
+    }
+}
+
+struct FeaturedRotationTests {
+    private let items = ["a", "b", "c", "d"].map { JellyfinItem(id: $0, name: $0.uppercased(), type: "Movie") }
+
+    @Test func staysOnTheSameTitleWhenTheTitlesComeBackInAnotherOrder() {
+        #expect(FeaturedRotation.position(of: "c", in: items) == 2)
+        // Continue Watching put a movie in progress first, as after playing it.
+        let reordered = [items[3], items[2], items[0], items[1]]
+        #expect(reordered[FeaturedRotation.position(of: "c", in: reordered)].id == "c")
+    }
+
+    @Test func startsAgainFromTheFirstWhenTheTitleShownIsGone() {
+        #expect(FeaturedRotation.position(of: "gone", in: items) == 0)
+        #expect(FeaturedRotation.position(of: nil, in: items) == 0)
+    }
+
+    @Test func turnsRoundFromTheEndToTheStart() {
+        #expect(FeaturedRotation.id(after: "c", by: 1, in: items) == "d")
+        #expect(FeaturedRotation.id(after: "d", by: 1, in: items) == "a")
+        #expect(FeaturedRotation.id(after: "a", by: -1, in: items) == "d")
+        #expect(FeaturedRotation.id(after: nil, by: 1, in: items) == "b")
+        #expect(FeaturedRotation.id(after: "a", by: 1, in: []) == nil)
+    }
+}
+
+struct HeroTests {
+    @Test func takesAtMostAShareOfAShortScreen() {
+        #if os(tvOS)
+        #expect(HeroBackdrop.height(820, visible: 1080) == 820)
+        #else
+        // An iPhone held upright, then sideways.
+        #expect(HeroBackdrop.height(440, visible: 874) == 440)
+        #expect(HeroBackdrop.height(440, visible: 402) == 241)
+        // Before the screen is measured.
+        #expect(HeroBackdrop.height(440, visible: 0) == 440)
+        #endif
+    }
+
+    @Test func factsEndWithAsManyGenresAsFit() {
+        var movie = JellyfinItem(id: "m", name: "Movie", type: "Movie")
+        movie.productionYear = 2024
+        movie.officialRating = "PG-13"
+        movie.communityRating = 7.8
+        movie.genres = ["Science Fiction", "Drama", "Mystery", "Thriller"]
+        #expect(FactsLine.facts(for: movie, genres: 1).map(\.text) == ["2024", "PG-13", "★ 7.8", "Science Fiction"])
+        let wide = FactsLine.facts(for: movie, genres: 3)
+        #expect(wide.map(\.text) == ["2024", "PG-13", "★ 7.8", "Science Fiction", "Drama", "Mystery"])
+        #expect(wide.map(\.isGenre) == [false, false, false, true, true, true])
+    }
 }
 
 struct ArtworkTests {
@@ -378,6 +522,46 @@ struct ArtworkTests {
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.dataIsEmpty))
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.imageRequestMissing))
         #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.cancelled))
+        let context = ImageDecodingContext(request: ImageRequest(url: nil), data: Data())
+        #expect(Artwork.isWorthRetrying(ImagePipeline.Error.decodingFailed(decoder: ImageDecoders.Empty(), context: context, error: IncompleteImage())))
+        #expect(!Artwork.isWorthRetrying(ImagePipeline.Error.decodingFailed(decoder: ImageDecoders.Empty(), context: context, error: ImageDecodingError.unknown)))
+    }
+
+    /// A picture of noise, which compresses poorly, so its file is a good deal bigger than the
+    /// cut-off download that was found cached: 24,576 bytes of an 80,629-byte logo.
+    private static func noise(as type: String) throws -> Data {
+        let size = 256
+        var random = SeededRandom(seed: 3)
+        var pixels = (0..<size * size * 4).map { _ in UInt8.random(in: 0...255, using: &random) }
+        let image = try #require(pixels.withUnsafeMutableBytes { bytes in
+            CGContext(data: bytes.baseAddress, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        })
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, type as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    @Test func aPictureCutOffPartwayIsIncomplete() throws {
+        let png = try Self.noise(as: "public.png")
+        #expect(png.count > 24_576)
+        #expect(ImageData.isComplete(png))
+        #expect(!ImageData.isComplete(png.prefix(24_576)))
+        let jpeg = try Self.noise(as: "public.jpeg")
+        #expect(ImageData.isComplete(jpeg))
+        #expect(!ImageData.isComplete(jpeg.prefix(jpeg.count / 2)))
+        #expect(!ImageData.isComplete(Data()))
+    }
+
+    @Test func theDecoderTurnsDownAPictureCutOffPartway() throws {
+        let png = try Self.noise(as: "public.png")
+        let context = ImageDecodingContext(request: ImageRequest(url: nil), data: png)
+        let decoder = try #require(ImageDecoderRegistry.shared.decoder(for: context))
+        let complete = CompleteImageDecoder(base: decoder, request: context.request)
+        #expect(throws: IncompleteImage.self) { try complete.decode(png.prefix(24_576)) }
+        #expect(throws: Never.self) { try complete.decode(png) }
     }
 
     @Test func waitsLongerEachTimeUpToHalfAMinute() {

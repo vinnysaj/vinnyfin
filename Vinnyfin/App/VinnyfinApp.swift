@@ -31,11 +31,13 @@ struct VinnyfinApp: App {
         #if !os(tvOS)
         .commands {
             #if os(macOS)
-            CommandGroup(replacing: .newItem) {
+            // After New Window, which opens another library window.
+            CommandGroup(after: .newItem) {
                 Button("Open File…") { appDelegate.openFilePanel() }
                     .keyboardShortcut("o")
             }
             #endif
+            SidebarCommands()
             AppCommands()
             #if os(macOS)
             PortableTVCommands(tv: appDelegate.portableTV)
@@ -81,7 +83,6 @@ struct VinnyfinApp: App {
         Settings {
             SettingsView()
                 .withAppEnvironment(appDelegate)
-                .frame(minWidth: 520, minHeight: 560)
         }
         #endif
     }
@@ -181,6 +182,7 @@ final class AppDelegate: NSObject {
 
     private func launched() {
         ImageCache.configure()
+        StreamingNetwork.follow()
         if let problem = accounts.savedSignInProblem { messages.show(problem) }
         #if os(iOS) || os(macOS)
         if let problem = accounts.sharingProblem { messages.show(problem) }

@@ -54,6 +54,9 @@ final class PlayerCoordinator {
         #endif
     }
 
+    /// The playback is in Picture in Picture.
+    var isInPictureInPicture: Bool { presented?.isInPictureInPicture ?? false }
+
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let history: WatchHistory

@@ -3,7 +3,8 @@ import Observation
 
 /// A list from the server of any length, loaded a page at a time around what's on screen: it
 /// opens with its first page, holds a few pages however long it is, and sorted by name learns
-/// where each letter starts without loading the rest.
+/// where each letter starts without loading the rest. A shuffled list learns its whole order
+/// with its first page, a few bytes a title, and asks for each page by the ids in it.
 @MainActor @Observable
 final class PagedItems {
     static let pageSize = 100
@@ -22,11 +23,14 @@ final class PagedItems {
     @ObservationIgnored private let client: JellyfinClient
     @ObservationIgnored private let userId: String
     @ObservationIgnored private var window: PageWindow?
-    @ObservationIgnored private var lastShown = 0
+    /// The position that last came on screen.
+    @ObservationIgnored private(set) var lastShown = 0
     /// Pages that failed, left alone until `retry()` so scrolling doesn't keep asking for them.
     @ObservationIgnored private var failed: Set<Int> = []
     @ObservationIgnored private var isCancelled = false
     @ObservationIgnored private var indexing: Task<Void, Never>?
+    /// A shuffled list's ids in order, from its first page on.
+    @ObservationIgnored private var order: [String]?
     @ObservationIgnored private lazy var queue = LoadQueue<Int>(width: Self.width) { [weak self] page in
         await self?.loadPage(page)
     }
@@ -54,13 +58,29 @@ final class PagedItems {
 
     /// The first page, which says how long the list is; sorted by name, the index then loads
     /// behind it. What goes wrong is kept in `problem`; cancelled, the list stays empty.
-    func load() async {
+    ///
+    /// A list loaded to take the place of `previous`, the same list scrolled to `position`, has
+    /// the pages around that position too by the time it's done, so it can go on screen where
+    /// the other was without its titles there turning back into placeholders. It keeps the
+    /// other's index while the list is as long as it was.
+    func load(around position: Int = 0, replacing previous: PagedItems? = nil) async {
         do {
-            let page = try await client.page(of: source, userId: userId, startIndex: 0, limit: Self.pageSize)
-            window = PageWindow(pageSize: Self.pageSize, count: page.totalRecordCount)
+            order = nil
+            let page = try await fetch(startIndex: 0, limit: Self.pageSize)
+            let window = PageWindow(pageSize: Self.pageSize, count: page.totalRecordCount)
+            self.window = window
             pages = [0: page.items]
-            count = page.totalRecordCount
             problem = nil
+            lastShown = position
+            if window.page(containing: position) > 0 {
+                await withTaskGroup(of: Void.self) { group in
+                    for around in window.pagesToLoad(around: position) where around != 0 {
+                        group.addTask { await self.loadPage(around) }
+                    }
+                }
+            }
+            count = page.totalRecordCount
+            if let previous, previous.count == count, let index = previous.index { self.index = index }
             loadIndex()
         } catch {
             if !error.isCancellation { problem = error.localizedDescription }
@@ -169,7 +189,7 @@ final class PagedItems {
         guard let window else { return }
         let range = window.range(of: page)
         do {
-            let result = try await client.page(of: source, userId: userId, startIndex: range.lowerBound, limit: range.count)
+            let result = try await fetch(startIndex: range.lowerBound, limit: range.count)
             // Scrolled far away meanwhile: the page would be let go at once.
             guard !isCancelled, window.keeps(page, around: lastShown) else { return }
             pages[page] = result.items
@@ -178,5 +198,22 @@ final class PagedItems {
             failed.insert(page)
             problem = error.localizedDescription
         }
+    }
+
+    /// A page of the list: for a shuffled one, the titles of its ids there in the order, which
+    /// the first page learns.
+    private func fetch(startIndex: Int, limit: Int) async throws -> ItemsPage {
+        guard case .shuffled(let query, let seed) = source else {
+            return try await client.page(of: source, userId: userId, startIndex: startIndex, limit: limit)
+        }
+        let order: [String]
+        if let known = self.order {
+            order = known
+        } else {
+            order = try await client.shuffledIds(userId: userId, query, seed: seed)
+            self.order = order
+        }
+        let range = min(startIndex, order.count)..<min(startIndex + limit, order.count)
+        return ItemsPage(items: try await client.items(userId: userId, query, inOrder: Array(order[range])), totalRecordCount: order.count)
     }
 }

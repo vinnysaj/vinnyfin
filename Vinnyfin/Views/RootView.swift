@@ -348,6 +348,13 @@ struct MainTabs: View {
             }
             .badge(downloads.jobs.count { $0.status == .active })
             #endif
+            #if os(iOS) || os(visionOS)
+            if Self.hasSettingsTab {
+                Tab("Settings", systemImage: "gear", value: .settings) {
+                    SettingsView()
+                }
+            }
+            #endif
             Tab(value: .search, role: .search) {
                 #if os(tvOS)
                 SearchView()
@@ -368,6 +375,18 @@ struct MainTabs: View {
             self.linkedItem = nil
         }
     }
+
+    #if os(iOS) || os(visionOS)
+    /// Settings is a tab where there's a sidebar to hold it, as on Apple TV: on iPad and Vision
+    /// Pro. On iPhone it opens from Home, and on the Mac in a window of its own.
+    private static var hasSettingsTab: Bool {
+        #if os(visionOS)
+        true
+        #else
+        UIDevice.current.userInterfaceIdiom == .pad
+        #endif
+    }
+    #endif
 
     #if !os(tvOS)
     private func go(_ command: TabCommand) {

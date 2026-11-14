@@ -83,7 +83,6 @@ struct VinnyfinApp: App {
         Settings {
             SettingsView()
                 .withAppEnvironment(appDelegate)
-                .frame(minWidth: 520, minHeight: 560)
         }
         #endif
     }

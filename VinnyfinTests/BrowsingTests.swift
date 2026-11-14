@@ -459,6 +459,56 @@ struct HomeFeedTests {
     }
 }
 
+struct FeaturedRotationTests {
+    private let items = ["a", "b", "c", "d"].map { JellyfinItem(id: $0, name: $0.uppercased(), type: "Movie") }
+
+    @Test func staysOnTheSameTitleWhenTheTitlesComeBackInAnotherOrder() {
+        #expect(FeaturedRotation.position(of: "c", in: items) == 2)
+        // Continue Watching put a movie in progress first, as after playing it.
+        let reordered = [items[3], items[2], items[0], items[1]]
+        #expect(reordered[FeaturedRotation.position(of: "c", in: reordered)].id == "c")
+    }
+
+    @Test func startsAgainFromTheFirstWhenTheTitleShownIsGone() {
+        #expect(FeaturedRotation.position(of: "gone", in: items) == 0)
+        #expect(FeaturedRotation.position(of: nil, in: items) == 0)
+    }
+
+    @Test func turnsRoundFromTheEndToTheStart() {
+        #expect(FeaturedRotation.id(after: "c", by: 1, in: items) == "d")
+        #expect(FeaturedRotation.id(after: "d", by: 1, in: items) == "a")
+        #expect(FeaturedRotation.id(after: "a", by: -1, in: items) == "d")
+        #expect(FeaturedRotation.id(after: nil, by: 1, in: items) == "b")
+        #expect(FeaturedRotation.id(after: "a", by: 1, in: []) == nil)
+    }
+}
+
+struct HeroTests {
+    @Test func takesAtMostAShareOfAShortScreen() {
+        #if os(tvOS)
+        #expect(HeroBackdrop.height(820, visible: 1080) == 820)
+        #else
+        // An iPhone held upright, then sideways.
+        #expect(HeroBackdrop.height(440, visible: 874) == 440)
+        #expect(HeroBackdrop.height(440, visible: 402) == 241)
+        // Before the screen is measured.
+        #expect(HeroBackdrop.height(440, visible: 0) == 440)
+        #endif
+    }
+
+    @Test func factsEndWithAsManyGenresAsFit() {
+        var movie = JellyfinItem(id: "m", name: "Movie", type: "Movie")
+        movie.productionYear = 2024
+        movie.officialRating = "PG-13"
+        movie.communityRating = 7.8
+        movie.genres = ["Science Fiction", "Drama", "Mystery", "Thriller"]
+        #expect(FactsLine.facts(for: movie, genres: 1).map(\.text) == ["2024", "PG-13", "★ 7.8", "Science Fiction"])
+        let wide = FactsLine.facts(for: movie, genres: 3)
+        #expect(wide.map(\.text) == ["2024", "PG-13", "★ 7.8", "Science Fiction", "Drama", "Mystery"])
+        #expect(wide.map(\.isGenre) == [false, false, false, true, true, true])
+    }
+}
+
 struct ArtworkTests {
     @Test func loadsAgainOnlyWhatTheServerMightSendNextTime() {
         func loading(_ failure: any Error) -> ImagePipeline.Error { .dataLoadingFailed(error: failure) }

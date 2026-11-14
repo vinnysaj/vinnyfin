@@ -183,6 +183,7 @@ final class AppDelegate: NSObject {
 
     private func launched() {
         ImageCache.configure()
+        StreamingNetwork.follow()
         if let problem = accounts.savedSignInProblem { messages.show(problem) }
         #if os(iOS) || os(macOS)
         if let problem = accounts.sharingProblem { messages.show(problem) }

@@ -134,13 +134,15 @@ struct PictureTouches: ViewModifier {
                 onHoldEnded()
             }
             .simultaneousGesture(
-                DragGesture(minimumDistance: 16)
+                // In the screen's coordinates: the picture moves down with the finger, so in its
+                // own the finger would seem to go half as far.
+                DragGesture(minimumDistance: 16, coordinateSpace: .global)
                     .onChanged { value in
                         guard canPull, !isHolding else { return }
                         let down = value.translation.height
-                        // Mostly down; sideways or up, the picture stays.
-                        guard down > 0, down > abs(value.translation.width) || pull > 0 else { return }
-                        pull = down
+                        // Started mostly down; sideways or up, the picture stays.
+                        guard pull > 0 || down > abs(value.translation.width) else { return }
+                        pull = max(0, down)
                     }
                     .onEnded { value in
                         guard pull > 0 else { return }

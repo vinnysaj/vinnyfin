@@ -168,8 +168,9 @@ struct RootView: View {
         // Links and handed-off titles open in the window that's open, rather than in a new one.
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         #endif
-        // Runs while the app is open, and stops as it goes to the background.
-        .task(id: scenePhase == .background) {
+        // Runs while the app is open, and stops as it goes to the background. Another sign-in
+        // starts it over, to send what that one watched offline and plan its smart downloads.
+        .task(id: OpenWork(isOpen: scenePhase != .background, signIn: accounts.account?.tokenKey)) {
             guard scenePhase != .background else {
                 #if os(tvOS)
                 TopShelf.reload()
@@ -449,4 +450,10 @@ extension AppSettings.Appearance {
         case .dark: .dark
         }
     }
+}
+
+/// What the work done while the app is open depends on: whether it's open, and who's signed in.
+private struct OpenWork: Equatable {
+    let isOpen: Bool
+    let signIn: String?
 }

@@ -144,7 +144,7 @@ final class AppDelegate: NSObject {
     #else
     let accounts = AccountStore()
     #endif
-    let history = WatchHistory()
+    private(set) lazy var history = WatchHistory { [accounts] in accounts.account?.tokenKey }
     let messages = AppMessages()
     let links = IncomingLinks()
     private(set) lazy var knownServers = KnownServers(accounts: accounts, cloud: NSUbiquitousKeyValueStore.default)

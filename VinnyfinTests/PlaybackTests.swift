@@ -250,6 +250,105 @@ struct WatchHistoryTests {
         #expect(reloaded.entry(for: "episode")?.played == true)
         #expect(reloaded.problem == nil)
     }
+
+    /// Who's signed in, as the app's account store would say.
+    private final class SignedIn {
+        var key: String?
+        init(_ key: String?) { self.key = key }
+    }
+
+    private func makeHistory(file: URL? = nil, signedIn: SignedIn) -> WatchHistory {
+        WatchHistory(file: file ?? FileManager.default.temporaryDirectory.appending(path: "WatchHistory-\(UUID().uuidString).json"),
+                     signIn: { signedIn.key })
+    }
+
+    @Test func keepsEachPersonsPlaceOnOneServer() {
+        let signedIn = SignedIn("server/alex")
+        let history = makeHistory(signedIn: signedIn)
+        history.record(key: "film", position: 600, duration: 6000, needsSync: true)
+        signedIn.key = "server/sam"
+        #expect(history.entry(for: "film") == nil)
+        #expect(!history.hasPendingSync)
+        history.record(key: "film", position: 1200, duration: 6000, needsSync: true)
+        #expect(history.resumePosition(for: "film") == 1200)
+        signedIn.key = "server/alex"
+        #expect(history.resumePosition(for: "film") == 600)
+        #expect(history.hasPendingSync)
+    }
+
+    @Test func keepsFilesOnThisDeviceForEveryone() {
+        let signedIn = SignedIn("server/alex")
+        let history = makeHistory(signedIn: signedIn)
+        let file = WatchHistory.fileKey(name: "Home Movie.mkv", size: 42)
+        history.record(key: file, position: 300, duration: 1000, needsSync: false)
+        signedIn.key = "other-server/sam"
+        #expect(history.resumePosition(for: file) == 300)
+    }
+
+    @Test func sendsOnlyWhatThePersonSignedInWatchedOffline() async {
+        let signedIn = SignedIn("server/alex")
+        let history = makeHistory(signedIn: signedIn)
+        let alexs = "alex-\(UUID().uuidString)", sams = "sam-\(UUID().uuidString)"
+        history.record(key: alexs, position: 600, duration: 6000, needsSync: true)
+        signedIn.key = "server/sam"
+        history.record(key: sams, position: 600, duration: 6000, needsSync: true)
+
+        await history.syncPending(using: HistorySyncStub.client, userId: "sam")
+        #expect(HistorySyncStub.sent(alexs) == 0)
+        #expect(HistorySyncStub.sent(sams) == 1)
+        #expect(!history.hasPendingSync)
+        signedIn.key = "server/alex"
+        #expect(history.hasPendingSync)
+        #expect(history.entry(for: alexs)?.needsSync == true)
+    }
+
+    @Test func givesWhatWasKeptBeforeSignInsWereToldApartToWhoeverSyncsFirst() async {
+        let file = FileManager.default.temporaryDirectory.appending(path: "WatchHistory-\(UUID().uuidString).json")
+        let earlier = "earlier-\(UUID().uuidString)"
+        WatchHistory(file: file).record(key: earlier, position: 600, duration: 6000, needsSync: true)
+
+        let signedIn = SignedIn("server/alex")
+        let history = makeHistory(file: file, signedIn: signedIn)
+        #expect(history.resumePosition(for: earlier) == 600)
+        await history.syncPending(using: HistorySyncStub.client, userId: "alex")
+        #expect(HistorySyncStub.sent(earlier) == 1)
+        #expect(history.resumePosition(for: earlier) == 600)
+        signedIn.key = "server/sam"
+        #expect(history.entry(for: earlier) == nil)
+        signedIn.key = "server/alex"
+        #expect(WatchHistory(file: file, signIn: { signedIn.key }).resumePosition(for: earlier) == 600)
+    }
+}
+
+/// A server that takes every position it's sent, at a host of its own, so it answers only the
+/// watch history's tests.
+nonisolated final class HistorySyncStub: URLProtocol {
+    private static let host = "watch-history.test"
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var paths: [String] = []
+    private static let registered: Void = { URLProtocol.registerClass(HistorySyncStub.self) }()
+
+    @MainActor static var client: JellyfinClient {
+        _ = registered
+        return JellyfinClient(serverURL: URL(string: "https://\(host)")!, deviceId: "d", deviceName: "iPhone", token: "tok")
+    }
+
+    /// How many times the server was sent a position for `itemId`.
+    static func sent(_ itemId: String) -> Int {
+        lock.withLock { paths.filter { $0.contains("/\(itemId)/") }.count }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host() == host }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let response = HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil) else { return }
+        Self.lock.withLock { Self.paths.append(url.path()) }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 struct JellyfinFormatTests {

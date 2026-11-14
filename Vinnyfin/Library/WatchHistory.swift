@@ -21,14 +21,23 @@ final class WatchHistory {
     nonisolated static let minimumResumeFraction = 0.05
     nonisolated static let playedFraction = 0.9
 
+    /// Server items are kept per sign-in, as two people on one server share the items' ids: under
+    /// `"<sign-in>|<item id>"`, the sign-in being its `AccountStore.Account.tokenKey`. Files on this
+    /// device are everyone's, under their own key. An item kept before sign-ins were told apart is
+    /// under its id alone until the sign-in in use takes it over, as it syncs.
     private(set) var entries: [String: Entry] = [:]
     /// Why the history couldn't be loaded or saved, to show until dismissed.
     var problem: String?
 
     @ObservationIgnored private let file: URL
+    /// The sign-in in use, whose server items are the ones read, recorded and sent: its
+    /// `AccountStore.Account.tokenKey`, or nil while signed out.
+    @ObservationIgnored private let signIn: @MainActor () -> String?
 
-    init(file: URL = URL.applicationSupportDirectory.appending(path: "WatchHistory.json")) {
+    init(file: URL = URL.applicationSupportDirectory.appending(path: "WatchHistory.json"),
+         signIn: @escaping @MainActor () -> String? = { nil }) {
         self.file = file
+        self.signIn = signIn
         guard FileManager.default.fileExists(atPath: file.path) else { return }
         do {
             entries = try JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: file))
@@ -43,11 +52,14 @@ final class WatchHistory {
         "file:\(name):\(size)"
     }
 
-    func entry(for key: String) -> Entry? { entries[key] }
+    /// The sign-in in use's entry for a server item, or a file's.
+    func entry(for key: String) -> Entry? {
+        entries[storageKey(key)] ?? (Self.isFile(key) ? nil : entries[key])
+    }
 
     /// Seconds to resume from, or nil to start at the beginning.
     func resumePosition(for key: String) -> Double? {
-        guard let entry = entries[key], !entry.played, entry.position > 0 else { return nil }
+        guard let entry = entry(for: key), !entry.played, entry.position > 0 else { return nil }
         return entry.position
     }
 
@@ -55,32 +67,72 @@ final class WatchHistory {
         let played = Self.isPlayed(position: position, duration: duration)
         let kept = played ? 0 : Self.isStarted(position: position, duration: duration) ? position : 0
         // A report the server took supersedes anything still queued for it.
-        entries[key] = Entry(position: kept, duration: duration, played: played, updatedAt: now, needsSync: needsSync)
-        save()
+        store(Entry(position: kept, duration: duration, played: played, updatedAt: now, needsSync: needsSync), for: key)
     }
 
     func markPlayed(_ played: Bool, key: String, needsSync: Bool, now: Date = .now) {
-        var entry = entries[key] ?? Entry(position: 0, duration: nil, played: played, updatedAt: now, needsSync: needsSync)
+        var entry = entry(for: key) ?? Entry(position: 0, duration: nil, played: played, updatedAt: now, needsSync: needsSync)
         entry.played = played
         entry.position = 0
         entry.updatedAt = now
         entry.needsSync = needsSync
-        entries[key] = entry
+        store(entry, for: key)
+    }
+
+    /// Keeps `entry` for the sign-in in use, in place of one kept before sign-ins were told apart.
+    private func store(_ entry: Entry, for key: String) {
+        let stored = storageKey(key)
+        entries[stored] = entry
+        if stored != key { entries[key] = nil }
         save()
     }
 
-    /// Sends what was watched offline to the server. Entries stay queued while it can't be
-    /// reached; one it refuses outright (the item is gone from the library) is dropped and said so.
+    private static func isFile(_ key: String) -> Bool { key.hasPrefix("file:") }
+
+    /// Where the sign-in in use keeps `key`.
+    private func storageKey(_ key: String) -> String {
+        guard !Self.isFile(key), let signIn = signIn() else { return key }
+        return signIn + "|" + key
+    }
+
+    /// Whether the entry kept under `stored` is the sign-in in use's to send: its own, or one
+    /// kept before sign-ins were told apart.
+    private func belongsToSignInInUse(_ stored: String) -> Bool {
+        guard !Self.isFile(stored) else { return false }
+        guard let signIn = signIn() else { return !stored.contains("|") }
+        return stored.hasPrefix(signIn + "|") || !stored.contains("|")
+    }
+
+    /// Gives the sign-in in use the server items kept before sign-ins were told apart.
+    private func adoptUnowned() {
+        guard let signIn = signIn() else { return }
+        let unowned = entries.keys.filter { !Self.isFile($0) && !$0.contains("|") }
+        guard !unowned.isEmpty else { return }
+        for key in unowned {
+            let entry = entries.removeValue(forKey: key)
+            let owned = signIn + "|" + key
+            if entries[owned] == nil { entries[owned] = entry }
+        }
+        save()
+    }
+
+    /// Sends what the sign-in in use watched offline to its server; other sign-ins' wait for
+    /// theirs. Entries stay queued while it can't be reached; one it refuses outright (the item
+    /// is gone from the library) is dropped and said so.
     func syncPending(using client: JellyfinClient, userId: String) async {
+        adoptUnowned()
+        guard let signIn = signIn() else { return }
+        let prefix = signIn + "|"
         var refused: [String] = []
-        for (key, entry) in entries where entry.needsSync && !key.hasPrefix("file:") {
+        for (stored, entry) in entries where entry.needsSync && stored.hasPrefix(prefix) {
+            let itemId = String(stored.dropFirst(prefix.count))
             do {
-                try await client.updateUserData(itemId: key, userId: userId, UserDataUpdate(
+                try await client.updateUserData(itemId: itemId, userId: userId, UserDataUpdate(
                     positionTicks: Int64(entry.position * 10_000_000), played: entry.played, lastPlayed: entry.updatedAt
                 ))
-                entries[key]?.needsSync = false
+                entries[stored]?.needsSync = false
             } catch JellyfinError.http(let status, let body) where (400..<500).contains(status) && status != 401 && status != 408 && status != 429 {
-                entries[key]?.needsSync = false
+                entries[stored]?.needsSync = false
                 refused.append(JellyfinError.message(status: status, body: body))
             } catch {
                 // Offline or the server is down; the next sync tries again.
@@ -93,7 +145,8 @@ final class WatchHistory {
         save()
     }
 
-    var hasPendingSync: Bool { entries.contains { !$0.key.hasPrefix("file:") && $0.value.needsSync } }
+    /// Whether the sign-in in use has anything watched offline still to send.
+    var hasPendingSync: Bool { entries.contains { $0.value.needsSync && belongsToSignInInUse($0.key) } }
 
     nonisolated static func isPlayed(position: Double, duration: Double?) -> Bool {
         guard let duration, duration > 0 else { return false }

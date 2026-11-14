@@ -190,7 +190,7 @@ struct RemoteScreen: View {
                     .accessibilityIdentifier("remote.subtitles")
                 }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.platformGlass)
             .disabled(remote.isStarting)
         }
     }
@@ -206,7 +206,7 @@ struct RemoteScreen: View {
                     .accessibilityIdentifier("remote.stop")
             }
         }
-        .buttonStyle(.bordered)
+        .buttonStyle(.platformGlass)
         .controlSize(.large)
         .padding(.top, 8)
     }

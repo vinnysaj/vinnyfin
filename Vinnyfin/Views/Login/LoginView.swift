@@ -484,6 +484,7 @@ private struct QuickConnectSheet: View {
                 .accessibilityIdentifier("login.quickConnectCode")
             ProgressView("Waiting for approval…")
             Button("Cancel", role: .cancel, action: onCancel)
+                .buttonStyle(.platformGlass)
         }
         .padding(40)
         // The whole screen for text too large for half of it.

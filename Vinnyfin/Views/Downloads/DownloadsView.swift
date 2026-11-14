@@ -114,12 +114,9 @@ struct DownloadsView: View {
         } description: {
             Text("Download movies and episodes to watch them offline, or open a video file from this device.")
         } actions: {
-            Button {
-                importing = true
-            } label: {
-                // A touch target's height: the link alone is a line of text high.
-                Text("Open a File…").frame(minHeight: 44).contentShape(.rect)
-            }
+            Button("Open a File…") { importing = true }
+                .buttonStyle(.platformGlass)
+                .controlSize(.large)
         }
     }
 

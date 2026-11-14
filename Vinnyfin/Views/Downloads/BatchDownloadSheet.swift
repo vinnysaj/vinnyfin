@@ -122,11 +122,13 @@ struct BatchDownloadSheet: View {
                 Label(failure.message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
-                Button("Try Again", systemImage: "arrow.clockwise") {
+                // Glass, it's a button of its own rather than the whole row.
+                Button("Try Again") {
                     details[episode.id] = nil
                     Task { await load(episode) }
                 }
-                .font(.caption)
+                .buttonStyle(.platformGlass)
+                .controlSize(.small)
             }
         case .success(let detail):
             let sources = detail.mediaSources ?? []

@@ -1,12 +1,37 @@
 import SwiftUI
 
-/// The A–Z strip down the side of a library. Tap a letter, or slide along the strip, to jump.
+/// The A–Z strip down the leading side of a library. Tap a letter, or slide along the strip, to
+/// jump; on Apple TV, move left from the grid to it and press one. It's on the leading side,
+/// clear of the scroll indicator on the trailing one, which takes touches and clicks there
+/// while it shows: the letters under it would scrub the grid instead of jumping.
 struct AlphabetIndex: View {
     /// Letters that have a section; the rest are dimmed and jump to the next one.
     let available: Set<String>
+    /// On Apple TV, the letter of the title focus was last on in the grid, where focus comes in.
+    var current: String?
     let onSelect: (String) -> Void
 
+    /// The width of the strip at the grid's side. Off Apple TV all of it takes touches, wider
+    /// than the letters, which alone make a target too narrow to hit reliably.
+    static var width: CGFloat {
+        #if os(tvOS)
+        60
+        #else
+        44
+        #endif
+    }
+
     @State private var active: String?
+    #if os(tvOS)
+    @FocusState private var focusedLetter: String?
+    /// Bounds the strip's default focus, so it's the strip's to take when focus comes in.
+    @Namespace private var focusScope
+    #else
+    /// Where the letters are laid out, on screen.
+    @State private var layoutTop: CGFloat = 0
+    /// Where they were as the finger came down, kept until it lifts.
+    @State private var heldTop: CGFloat?
+    #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
     private let letters = LibraryIndex.alphabet
@@ -25,10 +50,18 @@ struct AlphabetIndex: View {
                         .foregroundStyle(available.contains(letter) ? .primary : dimmed)
                 }
                 .buttonStyle(IndexLetterStyle())
+                .focused($focusedLetter, equals: letter)
                 .accessibilityIdentifier("index.\(letter)")
             }
         }
+        .frame(width: Self.width)
+        // Down to the bottom of the screen, so focus moving left from any card in the grid's
+        // first column comes here, not just from those beside the letters.
+        .frame(maxHeight: .infinity, alignment: .top)
         .focusSection()
+        .focusScope(focusScope)
+        // Rather than whichever letter is level with the card focus leaves.
+        .defaultFocus($focusedLetter, current, priority: .userInitiated)
         #else
         GeometryReader { geometry in
             let rowHeight = max(9, min(17, (geometry.size.height - 16) / CGFloat(letters.count)))
@@ -51,32 +84,42 @@ struct AlphabetIndex: View {
             .background {
                 if active != nil { Capsule().fill(.thinMaterial) }
             }
+            .frame(width: Self.width)
             .contentShape(.rect)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        if heldTop == nil { heldTop = layoutTop }
                         let position = Int((value.location.y - 8) / rowHeight)
                         select(letters[min(letters.count - 1, max(0, position))])
                     }
                     .onEnded { _ in
-                        withAnimation(.easeOut(duration: 0.25)) { active = nil }
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            active = nil
+                            heldTop = nil
+                        }
                     }
             )
-            .overlay(alignment: .trailing) {
+            .overlay(alignment: .leading) {
                 if let active {
                     Text(active)
                         .font(.system(size: 40, weight: .bold, design: .rounded))
                         .frame(width: 72, height: 72)
                         .platformGlass(in: .rect(cornerRadius: 18))
-                        .offset(x: -48)
+                        .offset(x: Self.width + 4)
                         .motionTransition(.scale.combined(with: .opacity), reduceMotion: reduceMotion)
                         .allowsHitTesting(false)
                 }
             }
+            // Held still under the finger. A jump from the top of the list collapses the large
+            // title, and back to the top expands it, which moves the strip, centered between
+            // the bars, by half the title's height: the finger would be on another letter.
+            .offset(y: heldTop.map { $0 - layoutTop } ?? 0)
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { layoutTop = $0 }
             .frame(maxHeight: .infinity, alignment: .center)
             .sensoryFeedback(.selection, trigger: active)
         }
-        .frame(width: 26)
+        .frame(width: Self.width)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Index")
         #endif

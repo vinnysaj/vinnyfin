@@ -2,7 +2,7 @@ import SwiftUI
 
 /// A list in full, as a grid of cards: every movie or show, or everything a Home row samples.
 /// It loads a page at a time around what's on screen, so it opens at once and scrolls the same
-/// at any length. Sorted by name it has an A–Z index down the side.
+/// at any length. Sorted by name it has an A–Z index down the leading side.
 struct LibraryGridView: View {
     enum Sort: String, CaseIterable, Identifiable {
         case name, dateAdded, releaseDate, rating, lastPlayed
@@ -88,6 +88,8 @@ struct LibraryGridView: View {
     @State private var columnCount: Int?
     /// The positions the grid holds.
     @State private var focusWindow = FocusWindow()
+    /// The index's letter for the title focus was last on in the grid.
+    @State private var focusedLetter: String?
     #endif
 
     init(list: BrowseList) {
@@ -113,29 +115,35 @@ struct LibraryGridView: View {
                     grid(items, count: count)
                 }
             }
-            .padding(.horizontal, Metrics.edge)
-            .padding(Self.indexEdge, showsIndex ? indexWidth + indexInset : 0)
+            .padding(.leading, leadingMargin)
+            .padding(.trailing, Metrics.edge)
             .padding(.bottom, Metrics.edge)
         }
         .scrollPosition($position, anchor: .top)
         #if os(tvOS)
+        .scrollTargetBehavior(VerticalScrollBehavior())
         .onScrollPhaseChange { _, phase in
             if phase == .idle, let index = focusedIndex, let columnCount, let count = items?.count {
                 focusWindow.follow(index, count: count, columns: columnCount)
             }
         }
+        .onChange(of: focusedIndex) { _, index in
+            guard let index, let letter = items?.index?.letter(at: index), letter != focusedLetter else { return }
+            focusedLetter = letter
+        }
         #endif
         // A new sort or filter starts at the top.
         .id(source)
-        .overlay(alignment: Self.indexEdge == .leading ? .leading : .trailing) {
+        .overlay(alignment: .leading) {
             if showsIndex, let items {
                 // Every letter is live until the server's counts say which have titles.
-                AlphabetIndex(available: items.index.map { Set($0.sections.map(\.letter)) } ?? Set(LibraryIndex.alphabet)) { letter in
+                AlphabetIndex(available: items.index.map { Set($0.sections.map(\.letter)) } ?? Set(LibraryIndex.alphabet),
+                              current: currentLetter) { letter in
                     jump(to: letter, in: items)
                 }
                 .padding(.vertical, 12)
                 .padding(.top, indexTopInset)
-                .padding(Self.indexEdge, indexInset)
+                .padding(.leading, indexInset)
             }
         }
         .overlay { status }
@@ -187,14 +195,6 @@ struct LibraryGridView: View {
         }
     }
 
-    private var indexWidth: CGFloat {
-        #if os(tvOS)
-        60
-        #else
-        22
-        #endif
-    }
-
     /// Room above the index for Apple TV's toolbar, which floats over the grid.
     private var indexTopInset: CGFloat {
         #if os(tvOS)
@@ -204,22 +204,32 @@ struct LibraryGridView: View {
         #endif
     }
 
-    /// The side the index has its column on. Apple TV's is the leading one, where focus goes
-    /// from the grid toward the sidebar.
-    private static var indexEdge: Edge.Set {
-        #if os(tvOS)
-        .leading
-        #else
-        .trailing
-        #endif
-    }
-
     /// The index's distance from the screen's edge: on Apple TV, inside the overscan margin.
+    /// Elsewhere its strip, wider than its letters, starts at the edge.
     private var indexInset: CGFloat {
         #if os(tvOS)
         Metrics.edge
         #else
-        4
+        0
+        #endif
+    }
+
+    /// The grid's leading margin, which with the index leaves room for it.
+    private var leadingMargin: CGFloat {
+        guard showsIndex else { return Metrics.edge }
+        #if os(tvOS)
+        return indexInset + AlphabetIndex.width + Metrics.edge
+        #else
+        return AlphabetIndex.width
+        #endif
+    }
+
+    /// On Apple TV, the letter focus comes into the index at: that of the title it was last on.
+    private var currentLetter: String? {
+        #if os(tvOS)
+        focusedLetter
+        #else
+        nil
         #endif
     }
 

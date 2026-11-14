@@ -269,15 +269,42 @@ struct CardPlaceholder: View {
 }
 
 /// A titled row of cards that scrolls sideways. With a list to see all of, its title leads
-/// there; on Apple TV, where focus moves along the cards, a card at the row's end does.
+/// there; on Apple TV, where focus moves along the cards, a card at the row's end does. Until its
+/// items are in, the shapes of their cards stand in, as tall as the row will be.
+///
+/// On Apple TV the row scrolls by whole cards (see `CardRowScrollBehavior`), and coming back
+/// into it from above or below, focus goes to the card it was last on, scrolled as it was.
 struct Shelf<Item: Identifiable, Card: View>: View {
     let title: String
     var seeAll: BrowseList?
-    let items: [Item]
+    /// Nil while they load.
+    let items: [Item]?
     let cardWidth: CGFloat
+    /// The shape of the cards that stand in while the items load.
+    var placeholderStyle: BrowseList.Style = .poster
     @ViewBuilder let card: (Item) -> Card
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityShowButtonShapes) private var showsButtonShapes
+    #if os(tvOS)
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var focus: Focus?
+    /// Where focus was in the row, kept by the page of rows the row is on, or else by the row.
+    @Environment(\.rowFocusMemory) private var pageMemory
+    @State private var ownMemory = RowFocusMemory()
+    @State private var position = ScrollPosition()
+    /// Bounds the row's default focus, so it's the row's to take when focus comes in.
+    @Namespace private var focusScope
+
+    private enum Focus: Hashable {
+        case placeholder(Int), item(Item.ID), seeAll
+
+        var isPlaceholder: Bool {
+            if case .placeholder = self { true } else { false }
+        }
+    }
+    #endif
+
+    private static var placeholderCount: Int { 8 }
 
     var body: some View {
         let cardWidth = dynamicTypeSize.cardWidth(cardWidth)
@@ -287,14 +314,33 @@ struct Shelf<Item: Identifiable, Card: View>: View {
                 .accessibilityAddTraits(.isHeader)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: Metrics.gridSpacing) {
-                    ForEach(items) { item in
-                        card(item).frame(width: cardWidth)
+                    ForEach(items ?? []) { item in
+                        card(item)
+                            .frame(width: cardWidth)
+                            #if os(tvOS)
+                            .focused($focus, equals: .item(item.id))
+                            #endif
+                    }
+                    ForEach(placeholderSlots, id: \.self) { slot in
+                        CardPlaceholder(style: placeholderStyle)
+                            .frame(width: cardWidth)
+                            #if os(tvOS)
+                            // Holds focus while the row loads, so focus moving down the page
+                            // doesn't pass over the row or leave the page for the sidebar.
+                            .focusable()
+                            .focused($focus, equals: .placeholder(slot))
+                            // Brightens, and lifts as a card does, to show focus is on it.
+                            .brightness(focus == .placeholder(slot) ? 0.15 : 0)
+                            .scaleEffect(focus == .placeholder(slot) && !reduceMotion ? 1.1 : 1)
+                            .animation(.easeOut(duration: 0.15), value: focus == .placeholder(slot))
+                            #endif
                     }
                     #if os(tvOS)
-                    if let seeAll {
+                    if let seeAll, items != nil {
                         NavigationLink(value: seeAll) { SeeAllCard(style: seeAll.style) }
                             .buttonStyle(.artwork)
                             .frame(width: cardWidth)
+                            .focused($focus, equals: .seeAll)
                             .accessibilityIdentifier("shelf.\(title).all")
                     }
                     #endif
@@ -306,13 +352,53 @@ struct Shelf<Item: Identifiable, Card: View>: View {
                 #endif
             }
             .scrollIndicators(.hidden)
-            .scrollTargetBehavior(.viewAligned)
             .scrollClipDisabled()
             #if os(tvOS)
+            .scrollTargetBehavior(CardRowScrollBehavior(stride: cardWidth + Metrics.gridSpacing) { [memory] in memory.offset = $0 })
+            .scrollPosition($position)
+            // Made again by the page's lazy stack, scrolled as it was left.
+            .onAppear { if memory.offset > 0 { position.scrollTo(x: memory.offset) } }
             .focusSection()
+            .focusScope(focusScope)
+            .defaultFocus($focus, memory.focus as? Focus, priority: .userInitiated)
+            .onChange(of: focus) { _, focus in
+                if let focus, !focus.isPlaceholder { memory.focus = focus }
+            }
+            .onChange(of: items == nil) { _, loading in
+                if !loading { focusReplacement() }
+            }
+            #else
+            .scrollTargetBehavior(.viewAligned)
+            .scrollDisabled(items == nil)
             #endif
         }
     }
+
+    /// The slots that hold a stand-in: all of them while the items load, and on Apple TV, once
+    /// they're in, the one focus is on until it moves to the card that took its place. Taking
+    /// the stand-in away under focus would send focus somewhere else on the page.
+    private var placeholderSlots: [Int] {
+        if items == nil { return Array(0..<Self.placeholderCount) }
+        #if os(tvOS)
+        if case .placeholder(let slot) = focus { return [slot] }
+        #endif
+        return []
+    }
+
+    #if os(tvOS)
+    private var memory: RowFocusMemory { pageMemory ?? ownMemory }
+
+    /// Moves focus from the stand-in it's on to the card that came in at its place, or the
+    /// nearest; See All, or nowhere in the row, when no cards came.
+    private func focusReplacement() {
+        guard case .placeholder(let slot) = focus else { return }
+        if let items, !items.isEmpty {
+            focus = .item(items[min(slot, items.count - 1)].id)
+        } else {
+            focus = seeAll == nil ? nil : .seeAll
+        }
+    }
+    #endif
 
     @ViewBuilder private var header: some View {
         let text = Text(title).font(.title3.weight(.semibold))
@@ -337,30 +423,6 @@ struct Shelf<Item: Identifiable, Card: View>: View {
         } else {
             text
         }
-        #endif
-    }
-}
-
-/// A row's title and the shapes of its cards while they load, as tall as the row will be.
-struct ShelfPlaceholder: View {
-    private struct Slot: Identifiable {
-        let id: Int
-    }
-
-    let title: String
-    let style: BrowseList.Style
-
-    var body: some View {
-        Shelf(title: title, items: (0..<8).map(Slot.init), cardWidth: style.cardWidth) { _ in
-            CardPlaceholder(style: style)
-                #if os(tvOS)
-                // Holds focus while the row loads, so it goes to Home rather than the sidebar.
-                .focusable()
-                #endif
-        }
-        #if !os(tvOS)
-        // On Apple TV that would keep focus from the cards too.
-        .scrollDisabled(true)
         #endif
     }
 }

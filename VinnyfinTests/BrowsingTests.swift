@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Nuke
 import Testing
@@ -86,6 +87,64 @@ struct LibraryIndexTests {
         #expect(LibraryIndex.boundary(for: "M") == "m")
         #expect(LibraryIndex.boundary(for: "#") == nil)
         #expect(LibraryIndex.boundary(for: "?") == nil)
+    }
+
+    @Test func aPositionIsInItsSectionsLetter() {
+        let index = Self.index(leading: 3, ["A": 5, "C": 2])
+        #expect(index.letter(at: 0) == "#")
+        #expect(index.letter(at: 3) == "A")
+        #expect(index.letter(at: 7) == "A")
+        #expect(index.letter(at: 8) == "C")
+        #expect(index.letter(at: 10) == nil)
+    }
+}
+
+struct CardRowScrollTests {
+    /// A 230-point card and the 48 points after it.
+    private let stride: CGFloat = 278
+
+    @Test func goesOnToTheNextCardStartInTheDirectionFocusMoved() {
+        // Focus moving right asks for just enough to show the card past the focused one.
+        #expect(CardRowScrollBehavior.offset(from: 0, toward: 120, stride: stride, limit: 5_000) == 278)
+        #expect(CardRowScrollBehavior.offset(from: 556, toward: 400, stride: stride, limit: 5_000) == 278)
+    }
+
+    @Test func staysOnACardStartAskedForOrARoundingErrorPastIt() {
+        #expect(CardRowScrollBehavior.offset(from: 0, toward: 556, stride: stride, limit: 5_000) == 556)
+        #expect(CardRowScrollBehavior.offset(from: 0, toward: 556.0004, stride: stride, limit: 5_000) == 556)
+        #expect(CardRowScrollBehavior.offset(from: 834, toward: 555.9996, stride: stride, limit: 5_000) == 556)
+    }
+
+    @Test func staysInsideTheRow() {
+        #expect(CardRowScrollBehavior.offset(from: 834, toward: 1_000, stride: stride, limit: 900) == 900)
+        #expect(CardRowScrollBehavior.offset(from: 278, toward: -20, stride: stride, limit: 900) == 0)
+        // A row narrower than the screen doesn't scroll.
+        #expect(CardRowScrollBehavior.offset(from: 0, toward: 40, stride: stride, limit: -300) == 0)
+    }
+
+    @Test func leavesAScrollThatGoesNowhereAlone() {
+        #expect(CardRowScrollBehavior.offset(from: 300, toward: 300, stride: stride, limit: 5_000) == 300)
+    }
+}
+
+struct RowHoldTests {
+    private let row = CGRect(x: 0, y: 1_500, width: 1_920, height: 520)
+
+    @Test func holdsARowsTopBelowTheMargin() {
+        #expect(RowHold.top.offset(for: row, top: 80, viewport: 1_080, content: 6_000) == 1_420)
+    }
+
+    @Test func scrollsTheFirstRowJustIntoViewUnderTheBanner() {
+        #expect(RowHold.whole.offset(for: row, top: 80, viewport: 1_080, content: 6_000) == 940)
+    }
+
+    @Test func staysInsideThePage() {
+        // The last row can't come up to the top: the page ends first.
+        #expect(RowHold.top.offset(for: row, top: 80, viewport: 1_080, content: 2_100) == 1_020)
+        // A row already in view at the top of the page leaves it there.
+        let first = CGRect(x: 0, y: 0, width: 1_920, height: 520)
+        #expect(RowHold.whole.offset(for: first, top: 80, viewport: 1_080, content: 6_000) == 0)
+        #expect(RowHold.top.offset(for: first, top: 80, viewport: 1_080, content: 6_000) == 0)
     }
 }
 

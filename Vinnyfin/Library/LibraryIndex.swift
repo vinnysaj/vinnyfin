@@ -48,6 +48,11 @@ nonisolated struct LibraryIndex: Sendable, Equatable {
         return letters.contains(lowercased) ? lowercased : nil
     }
 
+    /// The letter of the section a position is in; nil past the end of the list.
+    func letter(at position: Int) -> String? {
+        sections.first { $0.range.contains(position) }?.letter
+    }
+
     /// The section a letter jumps to: its own, or the next one that exists. "#" goes to the
     /// titles before "a", or failing those to the ones after "z".
     func section(for letter: String) -> Section? {

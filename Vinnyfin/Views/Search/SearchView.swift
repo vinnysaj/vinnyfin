@@ -12,8 +12,10 @@ struct SearchView: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var text = ""
-    /// What the results on screen were found for.
+    /// What the last search to finish, or to fail, was for: what the results on screen were
+    /// found for, or what `searchError` is about.
     @State private var searched = ""
     @State private var movies: [JellyfinItem] = []
     @State private var shows: [JellyfinItem] = []
@@ -23,38 +25,42 @@ struct SearchView: View {
     @State private var searchError: String?
     /// Try Again's presses, each of which searches again for the same text.
     @State private var retries = 0
+    #if os(tvOS)
+    /// Where the rows are, for holding the focused one in place.
+    @State private var rowLayout = RowPageLayout()
+    #endif
 
     var body: some View {
         NavigationStack(path: $path) {
             EdgeToEdgeScrollView {
-                LazyVStack(alignment: .leading, spacing: 30) {
-                    results(list("Movies", types: ["Movie"]), movies)
-                    results(list("Shows", types: ["Series"]), shows)
+                LazyVStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
+                    results("Movies", types: ["Movie"], movies)
+                    results("Shows", types: ["Series"], shows)
                     if !episodes.isEmpty {
                         Shelf(title: "Episodes", seeAll: list("Episodes", types: ["Episode"], style: .landscape),
                               items: episodes, cardWidth: Metrics.landscapeWidth) { item in
-                            NavigationLink(value: item) { LandscapeCard(item: item) }
+                            // Found by its own name, which leads.
+                            NavigationLink(value: item) { LandscapeCard(item: item, leadsWithEpisode: true) }
                                 .buttonStyle(.artwork)
                                 .titleMenu(item, onChange: replace)
                         }
+                        #if os(tvOS)
+                        .pageRow("Episodes", in: rowLayout)
+                        #endif
                     }
                 }
+                #if os(tvOS)
+                .rowPageContent(rowLayout)
+                #endif
                 .padding(.vertical, Metrics.edge)
             }
-            .overlay {
-                if let searchError {
-                    LoadFailureView(LoadFailure("Search Failed", message: searchError), systemImage: "exclamationmark.magnifyingglass") {
-                        retries += 1
-                    }
-                } else if text.isEmpty {
-                    ContentUnavailableView("Search Your Library", systemImage: "magnifyingglass",
-                                           description: Text("Find movies, shows and episodes by name."))
-                } else if isSearching, movies.isEmpty, shows.isEmpty, episodes.isEmpty {
-                    ProgressView()
-                } else if movies.isEmpty, shows.isEmpty, episodes.isEmpty {
-                    ContentUnavailableView.search(text: text)
-                }
-            }
+            #if os(tvOS)
+            .rowPage(rowLayout)
+            #elseif os(iOS) || os(macOS)
+            .scrollDismissesKeyboard(.immediately)
+            #endif
+            .overlay { status }
+            .pageBackground()
             .screenTitle("Search")
             #if os(tvOS)
             .alwaysSearchable(text: $text, prompt: "Movies, shows and episodes")
@@ -82,6 +88,25 @@ struct SearchView: View {
         let retries: Int
     }
 
+    @ViewBuilder private var status: some View {
+        switch SearchPhase(text: text, searched: searched, isSearching: isSearching,
+                           hasResults: !movies.isEmpty || !shows.isEmpty || !episodes.isEmpty, error: searchError) {
+        case .prompt:
+            ContentUnavailableView("Search Your Library", systemImage: "magnifyingglass",
+                                   description: Text("Find movies, shows and episodes by name."))
+        case .searching:
+            ProgressView()
+        case .results:
+            EmptyView()
+        case .noResults:
+            ContentUnavailableView.search(text: searched)
+        case .failed(let message):
+            LoadFailureView(LoadFailure("Search Failed", message: message), systemImage: "exclamationmark.magnifyingglass") {
+                retries += 1
+            }
+        }
+    }
+
     /// What was found, for VoiceOver, whose cursor stays in the search field as results come in:
     /// "3 movies, 1 show and 12 episodes", or "No results".
     private var resultsSummary: String {
@@ -101,19 +126,28 @@ struct SearchView: View {
         episodes = episodes.map(swap)
     }
 
-    @ViewBuilder private func results(_ list: BrowseList, _ items: [JellyfinItem]) -> some View {
+    /// A row of posters of one kind: "Movies", leading to all of them.
+    @ViewBuilder private func results(_ kind: String, types: [String], _ items: [JellyfinItem]) -> some View {
         if !items.isEmpty {
-            Shelf(title: list.title, seeAll: list, items: items, cardWidth: Metrics.posterWidth) { item in
+            Shelf(title: kind, seeAll: list(kind, types: types), items: items, cardWidth: Metrics.posterWidth) { item in
                 NavigationLink(value: item) { PosterCard(item: item) }
                     .buttonStyle(.artwork)
                     .titleMenu(item, onChange: replace)
             }
+            #if os(tvOS)
+            .pageRow(kind, in: rowLayout)
+            #endif
         }
     }
 
     /// Every match of one kind, for the row's title to open.
-    private func list(_ title: String, types: [String], style: BrowseList.Style = .poster) -> BrowseList {
-        BrowseList(title: title, source: .items(Self.query(types, term: searched)), style: style)
+    private func list(_ kind: String, types: [String], style: BrowseList.Style = .poster) -> BrowseList {
+        BrowseList(title: Self.seeAllTitle(kind, term: searched), source: .items(Self.query(types, term: searched)), style: style)
+    }
+
+    /// The title of every match of a kind: "Movies Matching “ferry”".
+    nonisolated static func seeAllTitle(_ kind: String, term: String) -> String {
+        "\(kind) Matching \u{201C}\(term)\u{201D}"
     }
 
     private static func query(_ types: [String], term: String) -> JellyfinClient.ItemQuery {
@@ -125,11 +159,12 @@ struct SearchView: View {
 
     private func search() async {
         guard let session else { return }
-        let term = text.trimmingCharacters(in: .whitespaces)
+        let term = SearchPhase.term(text)
         guard !term.isEmpty else {
             movies = []
             shows = []
             episodes = []
+            searched = ""
             searchError = nil
             return
         }
@@ -150,17 +185,62 @@ struct SearchView: View {
             async let movies = session.client.items(userId: session.userId, page(["Movie"]))
             async let shows = session.client.items(userId: session.userId, page(["Series"]))
             async let episodes = session.client.items(userId: session.userId, page(["Episode"]))
-            self.movies = try await movies.items
-            self.shows = try await shows.items
-            self.episodes = try await episodes.items
-            searched = term
-            searchError = nil
+            let found = try await (movies, shows, episodes)
+            // All the rows at once, with what they were found for.
+            withAnimation(reduceMotion ? nil : .default) {
+                self.movies = found.0.items
+                self.shows = found.1.items
+                self.episodes = found.2.items
+                searched = term
+                searchError = nil
+            }
             announce(resultsSummary)
         } catch {
-            if !error.isCancellation {
-                searchError = error.localizedDescription
-                announce("Search failed. \(error.localizedDescription)")
-            }
+            guard !error.isCancellation else { return }
+            self.movies = []
+            self.shows = []
+            self.episodes = []
+            searched = term
+            searchError = error.localizedDescription
+            announce("Search failed. \(error.localizedDescription)")
         }
+    }
+}
+
+/// What Search shows over its rows, from what's typed and how the search for it is going.
+/// "No Results" waits for the search for what's typed to finish: until then, as typing settles
+/// or the server answers, the results of what was typed before stay, or with none, a spinner.
+nonisolated enum SearchPhase: Equatable {
+    /// Nothing typed yet: what Search finds.
+    case prompt
+    /// Waiting on the search for what's typed, with nothing to show meanwhile.
+    case searching
+    /// Rows of what was found.
+    case results
+    /// Nothing matches what's typed.
+    case noResults
+    /// The search for what's typed failed, and why.
+    case failed(String)
+
+    /// `searched` is what the last search to finish or fail was for; `isSearching`, whether one
+    /// is waiting on the server; `hasResults`, whether there are rows to show; and `error`, why
+    /// the last search failed.
+    init(text: String, searched: String, isSearching: Bool, hasResults: Bool, error: String?) {
+        let term = Self.term(text)
+        let isSettled = searched == term && !isSearching
+        if term.isEmpty {
+            self = .prompt
+        } else if isSettled, let error {
+            self = .failed(error)
+        } else if hasResults {
+            self = .results
+        } else {
+            self = isSettled ? .noResults : .searching
+        }
+    }
+
+    /// What's searched for when `text` is typed.
+    static func term(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespaces)
     }
 }

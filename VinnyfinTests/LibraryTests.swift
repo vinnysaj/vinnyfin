@@ -436,3 +436,121 @@ struct IntentSummaryTests {
     }
 }
 #endif
+
+struct CardFitTests {
+    #if os(iOS)
+    /// A 402-point iPhone, less its margins, and less the A–Z index's strip as well.
+    @Test func aPhonesGridHoldsThreeColumnsDownTo340Points() {
+        func columns(_ width: CGFloat) -> Int {
+            CardFit.columns(in: width, minimum: Metrics.posterWidth, spacing: Metrics.gridSpacing)
+        }
+        #expect(columns(370) == 3)
+        #expect(columns(358) == 3)
+        #expect(columns(342) == 3)
+        #expect(columns(340) == 3)
+        #expect(columns(339) == 2)
+        #expect(columns(300) == 2)
+    }
+    #endif
+
+    @Test func fillsAGridWithAsManyColumnsAsFitAtTheMinimum() {
+        #expect(CardFit.columns(in: 1000, minimum: 156, spacing: 14) == 5)
+        #expect(CardFit.columns(in: 100, minimum: 156, spacing: 14) == 1)
+        #expect(CardFit.columns(in: 1720, minimum: 230, spacing: 48) == 6)
+    }
+
+    /// The cards visible from the first's leading edge to the row's trailing one.
+    private func visible(room: CGFloat, target: CGFloat, spacing: CGFloat = 14) -> Double {
+        let width = CardFit.rowCardWidth(room: room, target: target, spacing: spacing)
+        let whole = ((room + spacing) / (width + spacing)).rounded(.down)
+        return Double(whole + (room - whole * (width + spacing)) / width)
+    }
+
+    @Test func aPhonesRowShowsThreePostersAndAPartOfAFourth() {
+        // 402 and 375 points wide, the first card 16 in.
+        #expect(abs(visible(room: 386, target: 104) - 3.3) < 0.01)
+        #expect(abs(visible(room: 359, target: 104) - 3.3) < 0.01)
+        #expect(abs(CardFit.rowCardWidth(room: 386, target: 104, spacing: 14) - 104.2) < 0.1)
+    }
+
+    @Test func aPhonesRowShowsALandscapeCardAndAPartOfTheNext() {
+        #expect(abs(visible(room: 386, target: 270) - 1.3) < 0.01)
+    }
+
+    @Test func growsCardsALittleRatherThanCrowdingMoreIn() {
+        // 88-point cast photos fit three and a part across a 402-point phone at 104, not four at 77.
+        #expect(abs(CardFit.rowCardWidth(room: 386, target: 88, spacing: 14) - 104.2) < 0.1)
+        // Posters a third over would be too many, so a 375-point phone fits them narrower.
+        #expect(abs(CardFit.rowCardWidth(room: 359, target: 104, spacing: 14) - 96.1) < 0.1)
+    }
+
+    @Test func keepsCardsNearTheirWidthOnWideScreens() {
+        let width = CardFit.rowCardWidth(room: 1081, target: 156, spacing: 14)
+        #expect(width > 140 && width < 175)
+        let cards = visible(room: 1081, target: 156)
+        #expect(abs(cards - cards.rounded(.down) - 0.3) < 0.01)
+    }
+}
+
+struct LibraryTitleTests {
+    @Test func aListPickedByItsOrderIsRetitledInAnother() {
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: "SortName") == "Movies")
+        #expect(LibraryGridView.title(of: HomeRows.topShows.list, sortedBy: "DateLastContentAdded") == "Shows")
+        #expect(LibraryGridView.title(of: HomeRows.genre("Drama", type: "Movie").list, sortedBy: "SortName") == "Drama Movies")
+        #expect(LibraryGridView.title(of: HomeRows.somethingDifferent("Drama").list, sortedBy: "SortName")
+            == "Unwatched Drama Movies and Shows")
+    }
+
+    @Test func keepsItsTitleInItsOwnOrder() {
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: "DateCreated") == "Recently Added Movies")
+        #expect(LibraryGridView.title(of: HomeRows.recentMovies.list, sortedBy: nil) == "Recently Added Movies")
+    }
+
+    @Test func keepsTheTitleOfAListPickedByWhatsInIt() {
+        #expect(LibraryGridView.title(of: HomeRows.favorites.list, sortedBy: "DateCreated") == "Favorites")
+        #expect(LibraryGridView.title(of: .titles(with: Person(id: "p", name: "Ada Vale")), sortedBy: "SortName") == "Ada Vale")
+        let found = BrowseList(title: SearchView.seeAllTitle("Movies", term: "ferry"),
+                               source: .items(JellyfinClient.ItemQuery(types: ["Movie"], searchTerm: "ferry")))
+        #expect(LibraryGridView.title(of: found, sortedBy: "DateCreated") == "Movies Matching \u{201C}ferry\u{201D}")
+    }
+}
+
+struct SearchTests {
+    @Test func titlesEveryMatchOfAKindByWhatWasSearchedFor() {
+        #expect(SearchView.seeAllTitle("Movies", term: "ferry") == "Movies Matching \u{201C}ferry\u{201D}")
+        #expect(SearchView.seeAllTitle("Episodes", term: "the night") == "Episodes Matching \u{201C}the night\u{201D}")
+    }
+
+    @Test func neverSaysNoResultsBeforeTheSearchForWhatsTypedFinishes() {
+        // The first letter, waiting out the pause before the search.
+        #expect(SearchPhase(text: "p", searched: "", isSearching: false, hasResults: false, error: nil) == .searching)
+        // More letters after a search that found nothing.
+        #expect(SearchPhase(text: "port", searched: "p", isSearching: false, hasResults: false, error: nil) == .searching)
+        // The search for what's typed waiting on the server.
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: true, hasResults: false, error: nil) == .searching)
+        #expect(SearchPhase(text: "port ", searched: "port", isSearching: false, hasResults: false, error: nil) == .noResults)
+    }
+
+    @Test func keepsWhatWasFoundOnScreenWhileTheNextSearchRuns() {
+        #expect(SearchPhase(text: "por", searched: "po", isSearching: true, hasResults: true, error: nil) == .results)
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: false, hasResults: true, error: nil) == .results)
+    }
+
+    @Test func saysASearchFailedOnlyForWhatsTyped() {
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: false, hasResults: false, error: "Offline") == .failed("Offline"))
+        #expect(SearchPhase(text: "porta", searched: "port", isSearching: false, hasResults: false, error: "Offline") == .searching)
+        #expect(SearchPhase(text: "port", searched: "port", isSearching: true, hasResults: false, error: "Offline") == .searching)
+    }
+
+    @Test func promptsWithNothingTyped() {
+        #expect(SearchPhase(text: "  ", searched: "port", isSearching: false, hasResults: true, error: nil) == .prompt)
+    }
+
+    @Test func numbersAnEpisodeShortForItsSearchCard() {
+        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#))
+            == "S1, E1")
+        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#))
+            == "S2, E2–3")
+        #expect(LandscapeCard.shortCode(of: Samples.movie) == nil)
+    }
+}

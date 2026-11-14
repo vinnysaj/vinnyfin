@@ -158,7 +158,12 @@ struct PlayElsewhereSheet: View {
         } header: {
             Text("SharePlay")
         } footer: {
+            // Where there's Play On, its footer, below, names the server.
+            #if os(iOS) || os(macOS)
+            Text("Everyone watches from their own sign-in to the server, in step: pauses, seeks, speed and the next episode are shared.")
+            #else
             Text("Everyone watches from their own sign-in to \(activity.serverName), in step: pauses, seeks, speed and the next episode are shared.")
+            #endif
         }
     }
 
@@ -177,7 +182,8 @@ struct PlayElsewhereSheet: View {
                 ForEach(targets) { target in targetRow(target) }
                 ForEach(KnownDevice.absent(from: targets, in: known)) { device in knownRow(device) }
                 if targets.isEmpty, known.isEmpty {
-                    Text("No devices are open. Open vinnyfin on your Apple TV, signed in to \(serverName), and it shows up here.")
+                    // The footer says how one shows up.
+                    Text("No devices are open right now.")
                         .foregroundStyle(.secondary)
                 }
             }

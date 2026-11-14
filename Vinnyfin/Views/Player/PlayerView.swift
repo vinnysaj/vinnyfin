@@ -6,6 +6,9 @@ import AppKit
 #if os(visionOS)
 import Combine
 #endif
+#if DEBUG
+import OSLog
+#endif
 import SwiftUI
 
 /// The player: the picture edge to edge, subtitles over it, and controls that fade away while
@@ -39,6 +42,24 @@ struct PlayerView: View {
     @State private var bottomBarTop: CGFloat?
     /// Where the controls' top bar ends, in global coordinates.
     @State private var topBarBottom: CGFloat?
+    /// Where the up-next card starts while it shows, in global coordinates.
+    @State private var upNextCardTop: CGFloat?
+    /// A title is starting: from asking for it until its first frame.
+    @State private var isStartingTitle = true
+    /// Why the playback failed, last time it did.
+    @State private var failure = ""
+    /// Try Again was pressed a moment ago. The failure stays up meanwhile, saying so, rather than
+    /// flashing away and back when the new try fails at once.
+    @State private var isRetrying = false
+    #if os(iOS) || os(macOS)
+    @State private var externalPlayback = ExternalPlayback()
+    /// The AirPlay receiver that got only the sound, while that's being said.
+    @State private var soundOnlyReceiver: String?
+    @State private var soundOnlyTask: Task<Void, Never>?
+    #endif
+    #if os(macOS)
+    @State private var pointerIsOver = false
+    #endif
     #if os(tvOS)
     @FocusState private var focus: PlayerFocus?
     /// Try Again over a playback that failed, which takes focus from the controls as it appears.
@@ -62,6 +83,9 @@ struct PlayerView: View {
     #else
     private let fold: CGRect? = nil
     #endif
+    #if DEBUG
+    private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "player")
+    #endif
 
     var body: some View {
         ZStack {
@@ -82,6 +106,15 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                     .accessibilityHidden(true)
                     .accessibilityIgnoresInvertColors()
+                if let cover = pictureCover {
+                    inPictureArea {
+                        PlayerBackdrop(item: model.item,
+                                       coveredBelow: PlayerLayout.coveredBelow(clearsControls ? bottomBarTop : nil, upNextCardTop)) {
+                            coverCaption(cover)
+                        }
+                    }
+                    .transition(.opacity)
+                }
             }
             #if os(tvOS)
             if !controlsVisible {
@@ -122,7 +155,6 @@ struct PlayerView: View {
                 .gesture(MagnifyGesture().onEnded { pinched($0.magnification) })
                 #endif
             #endif
-            inPictureArea { statusOverlay }
             #if os(visionOS)
             // The controls are in an ornament below the window (see `controlsOrnament`).
             #else
@@ -148,6 +180,13 @@ struct PlayerView: View {
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
                                playElsewhere: playElsewhereAction)
+                    #if DEBUG
+                    .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in
+                        // Records a bottom inset that lifts the controls up the screen, such as a
+                        // keyboard's or the screen's width less its height, as it comes.
+                        Self.log.notice("Player controls' safe area insets: \(String(describing: insets), privacy: .public)")
+                    }
+                    #endif
                     .transition(.opacity)
             }
             #endif
@@ -163,27 +202,38 @@ struct PlayerView: View {
             }
             #endif
             // Over the controls' shading so captions stay bright; it takes no touches, and bottom
-            // captions move up out of the controls' way.
+            // captions move up out of the way of the controls and the up-next card.
             if showsPicture {
                 SubtitleOverlay(model: model, videoSize: fillsScreen ? nil : model.videoSize,
-                                controlsTop: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? bottomBarTop : nil)
+                                coveredBelow: PlayerLayout.coveredBelow(clearsControls ? bottomBarTop : nil, upNextCardTop))
                     .frame(height: fold?.minY)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea()
             }
             inPictureArea { extras }
+            // Over the controls, which stay up around it with nothing in it to act on.
+            inPictureArea { statusOverlay }
             if let notice = model.notice {
                 inPictureArea {
                     PlayerNotice(notice: notice, controlsBottom: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? topBarBottom : nil)
                 }
                 .motionTransition(.move(edge: .top).combined(with: .opacity), reduceMotion: reduceMotion)
             }
+            #if os(iOS) || os(macOS)
+            if let receiver = soundOnlyReceiver {
+                inPictureArea {
+                    AirPlaySoundOnlyNotice(receiverName: receiver, controlsBottom: clearsControls ? topBarBottom : nil)
+                }
+                .motionTransition(.move(edge: .top).combined(with: .opacity), reduceMotion: reduceMotion)
+            }
+            #endif
             if let panel {
-                let clearsControls = controlsVisible && fold == nil && Self.controlsArePictureOverlay
-                // Between the controls' bars, so the panel covers none of them.
+                // Between the controls' bars, so the panel covers none of them. Where the band
+                // between them is short, it has the height above the bottom bar.
+                let clearsTopBar = clearsControls && !controlsAreShort
                 GeometryReader { geometry in
                     let frame = geometry.frame(in: .global)
-                    let top = clearsControls ? topBarBottom.map { max(0, $0 - frame.minY) } ?? 0 : 0
+                    let top = clearsTopBar ? topBarBottom.map { max(0, $0 - frame.minY) } ?? 0 : 0
                     let bottom = clearsControls ? bottomBarTop.map { max(0, frame.maxY - $0) } ?? 60 : 60
                     TrackPanel(model: model, panel: panel, room: max(0, frame.height - top - bottom - 2 * Metrics.edge)) { closePanel() }
                         .padding(Metrics.edge)
@@ -197,6 +247,23 @@ struct PlayerView: View {
         .animation(.easeInOut(duration: 0.25), value: controlsVisible)
         .animation(.snappy, value: panel)
         .animation(.snappy, value: model.notice)
+        // The first frame comes up through the title's picture.
+        .animation(.easeInOut(duration: 0.5), value: pictureCover)
+        // The player has no text input, so nothing it shows should make room for a keyboard: a
+        // keyboard's region left from the screen before would lift the controls up the screen.
+        .ignoresSafeArea(.keyboard)
+        #if os(iOS) || os(macOS)
+        .animation(.snappy, value: soundOnlyReceiver)
+        .onAppear { externalPlayback.follow(model.engine) }
+        .onChange(of: externalPlayback.pictureStaysLocal) { _, local in
+            if local {
+                tellSoundOnly()
+            } else {
+                soundOnlyTask?.cancel()
+                soundOnlyReceiver = nil
+            }
+        }
+        #endif
         #if os(visionOS)
         // The window has no glass of its own; the picture takes its rounded shape.
         .clipShape(.rect(cornerRadius: 46))
@@ -218,8 +285,16 @@ struct PlayerView: View {
         #endif
         #if os(macOS)
         .onContinuousHover { phase in
-            if case .active = phase { showControls() }
+            switch phase {
+            case .active:
+                pointerIsOver = true
+                showControls()
+            case .ended:
+                pointerIsOver = false
+            }
         }
+        // The window's close, minimize and zoom buttons go with the controls, off the picture.
+        .background(WindowButtons(areHidden: !controlsVisible))
         #endif
         #if os(tvOS)
         .background {
@@ -302,10 +377,22 @@ struct PlayerView: View {
             case .preparing, .paused, .ended, .failed: showControls(autoHide: false)
             case .loading, .buffering: break
             }
+            // A new title starts over its picture until it plays, which it does only once its
+            // first frame is up. A new stream of the same title keeps the picture it had. The
+            // engine can pause on its way to the start position, and a playback watched together
+            // waits paused for the group, so a pause doesn't end the start.
+            switch status {
+            case .preparing: isStartingTitle = true
+            case .playing, .buffering, .ended: isStartingTitle = false
+            case .loading, .paused, .failed: break
+            }
             if case .failed(let message) = status {
+                failure = message
                 announce("Couldn't play this. \(message)")
                 #if os(tvOS)
-                retryFocused = true
+                // Once the card is up: focus can't go to a button that isn't there yet, and the
+                // controls would keep it on the timeline.
+                DispatchQueue.main.async { retryFocused = true }
                 #endif
             }
             #if os(iOS) || os(macOS)
@@ -313,7 +400,11 @@ struct PlayerView: View {
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await model.restoreAfterBackground() } }
+            guard phase == .active else { return }
+            Task { await model.restoreAfterBackground() }
+            // Back from the background the picture can take a while to return; the controls show
+            // meanwhile that playback carries on.
+            if model.isPlaying { showControls() }
         }
         .onChange(of: model.notice) { _, notice in
             if let notice { announce(notice.text) }
@@ -333,9 +424,10 @@ struct PlayerView: View {
         #if !os(tvOS)
         .sheet(isPresented: $showsPlayElsewhere) {
             PlayElsewhereSheet(subject: .playback(model), onHandedOver: onClose)
+                // Half the screen, the picture still playing above it.
+                .presentationDetents([.medium, .large])
         }
         #endif
-
         .task {
             #if !os(tvOS)
             hasKeyboardFocus = true
@@ -485,6 +577,59 @@ struct PlayerView: View {
     /// Below the fold the controls stay, off the picture.
     private var showsControls: Bool { controlsVisible || fold != nil }
 
+    /// The controls show over the picture, so what's along its top and bottom keeps clear of
+    /// their bars.
+    private var clearsControls: Bool { controlsVisible && fold == nil && Self.controlsArePictureOverlay }
+
+    /// The controls show over the picture with little height between their bars, nearly all of
+    /// it the transport's in the middle: an iPhone on its side, a short window. Apple TV has no
+    /// transport there.
+    private var controlsAreShort: Bool {
+        clearsControls && !Self.hasNoCenterButton && PlayerLayout.isShort(topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
+    }
+
+    private enum PictureCover: Equatable {
+        case starting
+        case airPlay(receiver: String)
+    }
+
+    /// Why the title's picture stands in for the video, when it does: the title is starting, or
+    /// AirPlay has the video on another screen.
+    private var pictureCover: PictureCover? {
+        #if os(iOS) || os(macOS)
+        if externalPlayback.isActive { return .airPlay(receiver: externalPlayback.receiverName) }
+        #endif
+        return isStartingTitle ? .starting : nil
+    }
+
+    @ViewBuilder private func coverCaption(_ cover: PictureCover) -> some View {
+        switch cover {
+        case .starting:
+            ZStack {
+                if let item = model.item { StartingTitle(item: item, isShort: controlsAreShort) }
+            }
+            .animation(.easeOut(duration: 0.3), value: model.item?.id)
+        case .airPlay(let receiver):
+            #if os(iOS) || os(macOS)
+            AirPlayCaption(receiverName: receiver)
+            #endif
+        }
+    }
+
+    #if os(iOS) || os(macOS)
+    /// Says for a few seconds that only the sound went to the AirPlay receiver.
+    private func tellSoundOnly() {
+        let receiver = externalPlayback.receiverName
+        soundOnlyReceiver = receiver
+        announce(AirPlaySoundOnlyNotice.message(receiver))
+        soundOnlyTask?.cancel()
+        soundOnlyTask = Task {
+            try? await Task.sleep(for: .seconds(8))
+            if !Task.isCancelled { soundOnlyReceiver = nil }
+        }
+    }
+    #endif
+
     /// In the cinema the picture and its subtitles are on the big screen instead.
     private var showsPicture: Bool {
         #if os(visionOS)
@@ -570,45 +715,90 @@ struct PlayerView: View {
     }
 
     @ViewBuilder private var statusOverlay: some View {
-        switch model.status {
-        case .preparing, .loading, .buffering:
-            // With the controls up, the play button shows this instead (on Apple TV there is none).
-            if !showsControls || Self.hasNoCenterButton {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
-                    .accessibilityLabel("Loading")
+        if let failure = shownFailure {
+            failureCard(failure)
+        } else {
+            switch model.status {
+            case .preparing, .loading, .buffering:
+                // With the controls up, the play button shows this instead (on Apple TV there is none).
+                if !showsControls || Self.hasNoCenterButton {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                        .accessibilityLabel("Loading")
+                }
+            default:
+                EmptyView()
             }
-        case .failed(let message):
-            VStack(spacing: 14) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
-                    .accessibilityHidden(true)
-                Text("Couldn't Play This").font(.title3.weight(.semibold))
-                    .accessibilityAddTraits(.isHeader)
-                Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
-                #if os(tvOS)
-                LoadFailureActions(alignment: .center, isProminent: true, retryFocus: $retryFocused, retry: retry) { failureActions }
-                    .focusSection()
-                #else
-                LoadFailureActions(alignment: .center, isProminent: true, retry: retry) { failureActions }
-                #endif
-            }
-            .padding(30)
-            .platformGlass(in: .rect(cornerRadius: 28))
-            .padding()
-        default:
-            EmptyView()
         }
     }
 
-    private func retry() {
-        Task { await model.retry() }
+    /// Why the playback failed, while it has, and through a try again's first moment.
+    private var shownFailure: String? {
+        switch model.status {
+        case .failed(let message): message
+        case .preparing, .loading: isRetrying ? failure : nil
+        default: nil
+        }
+    }
+
+    private func failureCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            // The spinner takes the symbol's place, and its room, so the card keeps its size.
+            Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
+                .opacity(isRetrying ? 0 : 1)
+                .overlay {
+                    if isRetrying {
+                        ProgressView()
+                            .controlSize(.large)
+                            .tint(.white)
+                    }
+                }
+                .accessibilityHidden(true)
+            Text(isRetrying ? "Trying Again…" : "Couldn't Play This").font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+            Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
+            #if os(tvOS)
+            LoadFailureActions(alignment: .center, isProminent: true, retryFocus: $retryFocused) {
+                retry { await model.retry() }
+            } more: {
+                failureActions
+            }
+            .focusSection()
+            #else
+            LoadFailureActions(alignment: .center, isProminent: true) {
+                retry { await model.retry() }
+            } more: {
+                failureActions
+            }
+            #endif
+        }
+        .padding(30)
+        .platformGlass(in: .rect(cornerRadius: 28))
+        .padding()
+        .accessibilityIdentifier("player.failure")
+    }
+
+    /// Long enough for a try that fails at once to read as a try.
+    private static let retryHold: Duration = .seconds(0.8)
+
+    /// Tries to play again by `attempt`, the failure staying up meanwhile for `retryHold`, with
+    /// a spinner in place of its symbol.
+    private func retry(_ attempt: @escaping () async -> Void) {
+        guard !isRetrying else { return }
+        isRetrying = true
+        announce("Trying again")
+        Task { await attempt() }
+        Task {
+            try? await Task.sleep(for: Self.retryHold)
+            isRetrying = false
+        }
     }
 
     /// The ways on from a failure besides Try Again.
     @ViewBuilder private var failureActions: some View {
         if model.item != nil, !model.isTranscoding {
-            Button("Play Through the Server") { Task { await model.retryTranscoded() } }
+            Button("Play Through the Server") { retry { await model.retryTranscoded() } }
         }
         Button("Close", action: onClose)
     }
@@ -619,29 +809,21 @@ struct PlayerView: View {
             let action = shownAction(at: model.clock.time)
             let upNext: JellyfinItem? = if case .upNext(let next) = action { next } else { nil }
             let skip: MediaSegment? = if case .skip(let segment) = action { segment } else { nil }
-            #if os(tvOS)
-            // Clear of the controls' bottom bar, however tall the TV's text makes it.
+            // Clear of the controls' bottom bar, however tall the text makes it.
             GeometryReader { geometry in
-                let clearOfControls = controlsVisible ? bottomBarTop.map { max(0, geometry.frame(in: .global).maxY - $0) + 24 } : nil
-                actionView(upNext: upNext, skip: skip)
-                    .padding(.bottom, clearOfControls ?? 40)
+                let bottom = fold != nil ? 16 : PlayerLayout.bottomPadding(containerMaxY: geometry.frame(in: .global).maxY,
+                                                                          bottomBarTop: clearsControls ? bottomBarTop : nil)
+                actionView(upNext: upNext, skip: skip,
+                           form: PlayerLayout.upNextForm(controlsVisible: clearsControls, isShort: controlsAreShort),
+                           width: geometry.size.width)
+                    #if os(tvOS)
+                    // Focus stays in an open panel, as the controls' bottom bar leaves it there.
+                    .disabled(panel != nil)
+                    #endif
+                    .padding(.horizontal, Metrics.playerInset)
+                    .padding(.bottom, bottom)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            }
-            .onChange(of: skip?.skipTitle) { _, title in
-                if let title { announce("\(title) available") }
-            }
-            .onChange(of: upNext?.id) {
-                if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
-            }
-            #else
-            VStack {
-                Spacer()
-                HStack(alignment: .bottom) {
-                    Spacer()
-                    actionView(upNext: upNext, skip: skip)
-                }
-                .padding(.horizontal, Metrics.playerInset)
-                .padding(.bottom, fold != nil ? 16 : controlsVisible && Self.controlsArePictureOverlay ? 130 : 40)
+                    .animation(reduceMotion ? nil : .snappy, value: upNext?.id ?? skip?.skipTitle)
             }
             // They come and go over the picture, where VoiceOver wouldn't find them in time.
             .onChange(of: skip?.skipTitle) { _, title in
@@ -650,17 +832,33 @@ struct PlayerView: View {
             .onChange(of: upNext?.id) {
                 if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
             }
-            #endif
         }
     }
 
-    @ViewBuilder private func actionView(upNext: JellyfinItem?, skip: MediaSegment?) -> some View {
+    /// The up-next card or the skip button, sliding in from the side and back out. `width` is the
+    /// screen's, which a wide one sizes the card by.
+    @ViewBuilder private func actionView(upNext: JellyfinItem?, skip: MediaSegment?, form: PlayerLayout.UpNextForm,
+                                         width: CGFloat) -> some View {
         if let upNext {
-            #if os(tvOS)
-            UpNextCard(model: model, episode: upNext, focus: $focus, isClickTarget: !controlsVisible)
-            #else
-            UpNextCard(model: model, episode: upNext)
-            #endif
+            ZStack {
+                switch form {
+                case .card:
+                    #if os(tvOS)
+                    UpNextCard(model: model, episode: upNext, focus: $focus, isClickTarget: !controlsVisible)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { upNextCardTop = $0 }
+                        .onDisappear { upNextCardTop = nil }
+                    #else
+                    UpNextCard(model: model, episode: upNext, width: PlayerLayout.upNextCardWidth(containerWidth: width))
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { upNextCardTop = $0 }
+                        .onDisappear { upNextCardTop = nil }
+                    #endif
+                case .pill:
+                    UpNextPill(model: model, episode: upNext)
+                        .frame(maxWidth: width * 0.6, alignment: .trailing)
+                }
+            }
+            .id(upNext.id)
+            .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
         } else if let segment = skip, let title = segment.skipTitle {
             Button {
                 model.seek(to: segment.end)
@@ -674,6 +872,8 @@ struct PlayerView: View {
             .focused($focus, equals: .action)
             #endif
             .accessibilityIdentifier("player.skip")
+            .id(segment.start)
+            .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
         }
     }
 
@@ -729,6 +929,9 @@ struct PlayerView: View {
         controlsCompact = false
         #endif
         controlsVisible = true
+        #if os(macOS)
+        NSCursor.setHiddenUntilMouseMoves(false)
+        #endif
         if autoHide { scheduleHide() } else { hideTask?.cancel() }
     }
 
@@ -737,6 +940,11 @@ struct PlayerView: View {
         guard model.isPlaying, !model.scrubbing.isActive, panel == nil, fold == nil else { return }
         controlsVisible = false
         holdsControls = false
+        #if os(macOS)
+        // The pointer goes with them, until it moves: over the picture only, and only with the
+        // app in front, as it would vanish over another app's window too.
+        if pointerIsOver, NSApp.isActive { NSCursor.setHiddenUntilMouseMoves(true) }
+        #endif
     }
 
     /// Hides the controls in a few seconds, unless they're held or VoiceOver or Switch Control is
@@ -756,6 +964,40 @@ extension EnvironmentValues {
     /// makes them; the player shows them on each.
     @Entry var playerControlsRequests = 0
 }
+
+#if os(macOS)
+/// Fades the player window's close, minimize and zoom buttons out and back in. The window's
+/// title bar is hidden, so they sit on the picture.
+private struct WindowButtons: NSViewRepresentable {
+    let areHidden: Bool
+
+    func makeNSView(context: Context) -> ButtonsView { ButtonsView() }
+
+    func updateNSView(_ view: ButtonsView, context: Context) {
+        view.areHidden = areHidden
+    }
+
+    final class ButtonsView: NSView {
+        var areHidden = false {
+            didSet { if areHidden != oldValue { apply(animated: true) } }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply(animated: false)
+        }
+
+        private func apply(animated: Bool) {
+            guard let window else { return }
+            let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap(window.standardWindowButton)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = animated ? 0.25 : 0
+                for button in buttons { button.animator().alphaValue = areHidden ? 0 : 1 }
+            }
+        }
+    }
+}
+#endif
 
 #if os(tvOS)
 /// The skip button or the up-next card's Play Now while a click on the picture takes it, with the
@@ -810,7 +1052,7 @@ private struct PlayerNotice: View {
 }
 
 /// The card offering the next episode near the end, counting down when it plays by itself. On
-/// Apple TV a click on the picture plays it, while the controls are hidden.
+/// Apple TV a click on the picture plays it, while the controls are hidden; Back hides it then.
 private struct UpNextCard: View {
     let model: PlayerModel
     let episode: JellyfinItem
@@ -818,25 +1060,36 @@ private struct UpNextCard: View {
     let focus: FocusState<PlayerFocus?>.Binding
     /// A click on the picture plays it.
     let isClickTarget: Bool
+    private let layout = Layout.tv
+    #else
+    /// From `PlayerLayout.upNextCardWidth(containerWidth:)`.
+    let width: CGFloat
+    private var layout: Layout { Layout(width: width) }
     #endif
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        AdaptiveStack(spacing: Layout.spacing) {
+        AdaptiveStack(spacing: layout.spacing) {
             // At the accessibility text sizes the words take the room.
             if !dynamicTypeSize.isAccessibilitySize {
-                Artwork(url: session?.landscape(episode, width: Layout.artworkPixels), aspectRatio: 16.0 / 9.0,
-                        cornerRadius: Layout.artworkRadius, placeholder: "play.rectangle")
-                    .frame(width: Layout.artworkWidth)
+                Artwork(url: session?.landscape(episode, width: layout.artworkPixels), aspectRatio: 16.0 / 9.0,
+                        cornerRadius: layout.artworkRadius, placeholder: "play.rectangle")
+                    .frame(width: layout.artworkWidth)
             }
-            VStack(alignment: .leading, spacing: Layout.lineSpacing) {
-                Text(model.upNextCountdown.map { "Next episode in \($0)" } ?? "Up Next")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
+            VStack(alignment: .leading, spacing: layout.lineSpacing) {
+                if let countdown = model.upNextCountdown {
+                    Text("Next episode in \(countdown)")
+                        .font(.title3.weight(.bold))
+                        .monospacedDigit()
+                        .contentTransition(.numericText(countsDown: true))
+                } else {
+                    Text("Up Next")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · "))
-                    .font(.subheadline.weight(.semibold))
+                    .font(layout.titleFont)
                     .lineLimit(dynamicTypeSize.lineLimit(2))
                 AdaptiveStack {
                     Button("Play Now") { Task { await model.play(episode) } }
@@ -846,13 +1099,23 @@ private struct UpNextCard: View {
                         .focused(focus, equals: .action)
                         #endif
                         .accessibilityIdentifier("player.playNext")
+                    #if os(tvOS)
+                    if isClickTarget {
+                        // Focus stays on the picture, where Hide can't be reached; Back hides it.
+                        Text("Press Back to Hide")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Button("Hide") { model.cancelUpNext() }
+                            .buttonStyle(.platformGlass)
+                            .focused(focus, equals: .hideUpNext)
+                    }
+                    #else
                     Button("Hide") { model.cancelUpNext() }
                         .buttonStyle(.platformGlass)
-                        #if os(tvOS)
-                        .focused(focus, equals: .hideUpNext)
-                        #endif
+                    #endif
                 }
-                .controlSize(Layout.buttonSize)
+                .controlSize(layout.buttonSize)
                 #if os(tvOS)
                 // Each button's words on one line: squeezed, they'd wrap a word or a letter a line.
                 .lineLimit(1)
@@ -861,36 +1124,74 @@ private struct UpNextCard: View {
                 #endif
             }
         }
-        .padding(Layout.padding)
-        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 640 : Layout.width, alignment: .leading)
-        .platformGlass(in: .rect(cornerRadius: Layout.radius))
+        .padding(layout.padding)
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? max(640, layout.width) : layout.width, alignment: .leading)
+        .platformGlass(in: .rect(cornerRadius: layout.radius))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.upNext")
     }
 
-    /// Apple TV's text is about twice the size, seen from across the room, and so is the card.
-    private enum Layout {
+    /// The phone's card is 440 points wide; a wider screen's is larger in proportion, its title
+    /// and buttons too. Apple TV's text is about twice the size, seen from across the room, and
+    /// so is its card.
+    private struct Layout {
+        let width: CGFloat
+        let artworkWidth: CGFloat
+        let artworkRadius: CGFloat
+        let spacing: CGFloat
+        let lineSpacing: CGFloat
+        let padding: CGFloat
+        let radius: CGFloat
+        let buttonSize: ControlSize
+        let titleFont: Font
+
+        var artworkPixels: Int { Int(artworkWidth * 3) }
+
         #if os(tvOS)
-        static let width: CGFloat = 860
-        static let artworkWidth: CGFloat = 320
-        static let artworkPixels = 640
-        static let artworkRadius: CGFloat = 16
-        static let spacing: CGFloat = 28
-        static let lineSpacing: CGFloat = 6
-        static let padding: CGFloat = 24
-        static let radius: CGFloat = 36
-        static let buttonSize = ControlSize.regular
+        static let tv = Layout(width: 860, artworkWidth: 320, artworkRadius: 16, spacing: 28, lineSpacing: 6, padding: 24,
+                               radius: 36, buttonSize: .regular, titleFont: .subheadline.weight(.semibold))
         #else
-        static let width: CGFloat = 440
-        static let artworkWidth: CGFloat = 150
-        static let artworkPixels = 480
-        static let artworkRadius: CGFloat = 8
-        static let spacing: CGFloat = 14
-        static let lineSpacing: CGFloat = 4
-        static let padding: CGFloat = 12
-        static let radius: CGFloat = 20
-        static let buttonSize = ControlSize.small
+        init(width: CGFloat) {
+            let isLarge = width >= 500
+            self.width = width
+            artworkWidth = (width * 0.34).rounded()
+            artworkRadius = isLarge ? 12 : 8
+            spacing = isLarge ? 18 : 14
+            lineSpacing = isLarge ? 6 : 4
+            padding = isLarge ? 16 : 12
+            radius = isLarge ? 26 : 20
+            buttonSize = isLarge ? .regular : .small
+            titleFont = (isLarge ? Font.headline : .subheadline).weight(.semibold)
+        }
         #endif
+    }
+}
+
+/// The up-next card as a slim button just above the timeline, where the controls leave no room
+/// for the card under the transport: what's next and, counting down, how soon. It plays it; the
+/// card, with Hide, comes back as the controls go.
+private struct UpNextPill: View {
+    let model: PlayerModel
+    let episode: JellyfinItem
+
+    var body: some View {
+        Button {
+            Task { await model.play(episode) }
+        } label: {
+            Label {
+                let when = Text(model.upNextCountdown.map { "Next in \($0)" } ?? "Up Next").fontWeight(.bold).monospacedDigit()
+                let what = Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · ")).fontWeight(.regular)
+                Text("\(when)  \(what)")
+            } icon: {
+                Image(systemName: "play.fill")
+            }
+            .lineLimit(1)
+        }
+        .buttonStyle(.platformGlassProminent)
+        .accessibilityLabel("Play Next Episode")
+        .accessibilityValue([model.upNextCountdown.map { "Starts in \($0)" }, episode.episodeCode, episode.name]
+            .compactMap(\.self).joined(separator: ", "))
+        .accessibilityIdentifier("player.playNext")
     }
 }
 

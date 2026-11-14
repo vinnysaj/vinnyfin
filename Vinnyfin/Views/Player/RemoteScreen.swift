@@ -124,7 +124,7 @@ struct RemoteScreen: View {
                 HStack {
                     Text(Scrubber.format(position))
                     Spacer()
-                    Text("-" + Scrubber.format(max(0, remote.duration - position)))
+                    Text(TimeLabel.remaining(remote.duration - position))
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)

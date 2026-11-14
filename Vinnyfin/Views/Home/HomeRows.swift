@@ -64,6 +64,12 @@ nonisolated enum HomeRows {
     /// The rows Home always starts with, filled by its first round of requests.
     static let leading = [continueWatching, recentMovies, recentShows]
 
+    /// What stands in for `leading` until the first round of requests comes back: Continue
+    /// Watching only when it had something in it last time, as it's most often empty for good.
+    static func placeholders(continueWatching hadItems: Bool) -> [HomeRow] {
+        hadItems ? leading : leading.filter { $0 != continueWatching }
+    }
+
     static func becauseYouWatched(_ title: JellyfinItem) -> HomeRow {
         row("becauseYouWatched.\(title.id)", "Because You Watched \(title.name)", .similar(toItemId: title.id))
     }
@@ -79,7 +85,7 @@ nonisolated enum HomeRows {
         }))
     }
 
-    /// The best of a genre not yet watched, movies and shows together.
+    /// The best of a genre nothing has been watched or started of, movies and shows together.
     static func somethingDifferent(_ genre: String) -> HomeRow {
         row("somethingDifferent.\(genre)", "Something Different: \(genre)", .items(query(["Movie", "Series"], sortBy: "CommunityRating") {
             $0.genres = [genre]
@@ -87,10 +93,24 @@ nonisolated enum HomeRows {
         }))
     }
 
+    /// Whether `item` belongs in the row `id` by the row's own rule, after its watch state changed:
+    /// Continue Watching holds nothing watched, and the favorites rows nothing that isn't one, or
+    /// for Unwatched Favorites, that's been watched. Other rows hold a title whatever its state.
+    static func fits(_ item: JellyfinItem, in id: HomeRow.ID) -> Bool {
+        switch id {
+        case continueWatching.id: !item.isPlayed
+        case favorites.id: item.isFavorite
+        case unwatchedFavorites.id: item.isFavorite && !item.isPlayed
+        default: true
+        }
+    }
+
     /// What the rows are made from.
     struct Inputs: Sendable {
         /// Movies and shows watched, newest first, with their genres.
         var watched: [JellyfinItem] = []
+        /// Movies and shows started or in Continue Watching, with their genres.
+        var started: [JellyfinItem] = []
         var favorites: [JellyfinItem] = []
         var movieGenres: [GenreSize] = []
         var showGenres: [GenreSize] = []
@@ -145,14 +165,16 @@ nonisolated enum HomeRows {
             .map { (name: $0.0.name, type: $0.1) }
     }
 
-    /// A genre, picked at random, of the least watched among those big enough for a row.
+    /// A genre, picked at random among those big enough for a row, that nothing watched, started
+    /// or in Continue Watching has, so the row holds none of those either. Without anything
+    /// watched yet, every genre would be different, and there's no row.
     static func differentGenre(_ inputs: Inputs, using random: inout some RandomNumberGenerator) -> String? {
-        let affinity = affinity(of: inputs.watched)
+        guard !inputs.watched.isEmpty else { return nil }
+        let affinity = affinity(of: inputs.watched + inputs.started)
         var sizes: [String: Int] = [:]
         for genre in inputs.movieGenres + inputs.showGenres { sizes[genre.name, default: 0] += genre.count }
-        let candidates = sizes.filter { $0.value >= minimumGenreSize }.keys.sorted()
-        guard let least = candidates.map({ affinity[$0, default: 0] }).min() else { return nil }
-        return candidates.filter { affinity[$0, default: 0] == least }.randomElement(using: &random)
+        let candidates = sizes.filter { $0.value >= minimumGenreSize && affinity[$0.key, default: 0] == 0 }.keys.sorted()
+        return candidates.randomElement(using: &random)
     }
 
     /// How many of the titles watched have each genre.

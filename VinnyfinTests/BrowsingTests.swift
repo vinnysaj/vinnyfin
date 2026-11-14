@@ -328,6 +328,38 @@ struct HomeRowsTests {
         #expect(HomeRows.differentGenre(HomeRows.Inputs(), using: &random) == nil)
     }
 
+    @Test func somethingDifferentNeedsSomethingWatchedFirst() {
+        var inputs = inputs
+        inputs.watched = []
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            #expect(HomeRows.differentGenre(inputs, using: &random) == nil)
+        }
+        #expect(!rows(inputs).contains { $0.id.hasPrefix("somethingDifferent.") })
+    }
+
+    @Test func somethingDifferentIsNeverAGenreWatchedOrStarted() {
+        var inputs = inputs
+        // Drama is the biggest by far, and watched once, the least of any genre watched.
+        inputs.watched = [Self.title("w", genres: ["Drama"])]
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            let genre = HomeRows.differentGenre(inputs, using: &random)
+            #expect(genre != nil && genre != "Drama")
+        }
+        // Every other genre big enough for a row is in something started or in Continue Watching.
+        inputs.started = [Self.title("s1", genres: ["Science Fiction", "Comedy"]), Self.title("s2", "Series", genres: ["Western"])]
+        for seed in UInt64(0)..<20 {
+            var random = SeededRandom(seed: seed)
+            #expect(HomeRows.differentGenre(inputs, using: &random) == nil)
+        }
+    }
+
+    @Test func continueWatchingStandsInOnlyWhenItHadTitles() {
+        #expect(HomeRows.placeholders(continueWatching: true).map(\.id) == ["continueWatching", "recentMovies", "recentShows"])
+        #expect(HomeRows.placeholders(continueWatching: false).map(\.id) == ["recentMovies", "recentShows"])
+    }
+
     @MainActor @Test func everyRowIsDistinctAndOpensAListItsGridCanSort() {
         let rows = rows(inputs)
         #expect(Set(rows.map(\.id)).count == rows.count)
@@ -363,6 +395,67 @@ struct HomeFeedTests {
         #expect(HomeFeed.hasNoTitles([HomeRows.recentMovies.id: [], HomeRows.recentShows.id: [], HomeRows.continueWatching.id: []]))
         #expect(!HomeFeed.hasNoTitles([HomeRows.recentMovies.id: [JellyfinItem(id: "m", name: "Movie", type: "Movie")]]))
         #expect(!HomeFeed.hasNoTitles([HomeRows.recentShows.id: [JellyfinItem(id: "s", name: "Show", type: "Series")]]))
+    }
+
+    private static func title(_ id: String, _ type: String = "Movie", played: Bool = false, favorite: Bool = false,
+                              resumeTicks: Int64? = nil) -> JellyfinItem {
+        var item = JellyfinItem(id: id, name: "Title \(id)", type: type)
+        item.userData = UserItemData(playbackPositionTicks: resumeTicks, isFavorite: favorite, played: played)
+        return item
+    }
+
+    @Test func aTitleWatchedLeavesContinueWatchingAndUnwatchedFavoritesOnly() {
+        var episode = Self.title("e1", "Episode", favorite: true, resumeTicks: 600_000_000)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.continueWatching.id: [Self.title("m1", resumeTicks: 1), episode, Self.title("m2", resumeTicks: 1)],
+            HomeRows.unwatchedFavorites.id: [episode],
+            HomeRows.recentlyWatched.id: [episode],
+            HomeRows.favorites.id: [episode],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        episode.userData?.played = true
+        episode.userData?.playbackPositionTicks = 0
+        let left = HomeFeed.replace(episode, in: &items, removed: &removed)
+
+        #expect(left == [HomeRows.continueWatching.id, HomeRows.unwatchedFavorites.id])
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["m1", "m2"])
+        #expect(items[HomeRows.unwatchedFavorites.id]?.isEmpty == true)
+        #expect(items[HomeRows.recentlyWatched.id]?.first?.isPlayed == true)
+        #expect(items[HomeRows.favorites.id]?.first?.isPlayed == true)
+    }
+
+    @Test func aTitleNoLongerAFavoriteLeavesTheFavoritesRows() {
+        var movie = Self.title("m1", favorite: true)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.favorites.id: [Self.title("a", favorite: true), movie],
+            HomeRows.unwatchedFavorites.id: [movie, Self.title("b", favorite: true)],
+            HomeRows.topMovies.id: [movie],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        movie.userData?.isFavorite = false
+        let left = HomeFeed.replace(movie, in: &items, removed: &removed)
+
+        #expect(left == [HomeRows.favorites.id, HomeRows.unwatchedFavorites.id])
+        #expect(items[HomeRows.favorites.id]?.map(\.id) == ["a"])
+        #expect(items[HomeRows.unwatchedFavorites.id]?.map(\.id) == ["b"])
+        #expect(items[HomeRows.topMovies.id]?.first?.isFavorite == false)
+    }
+
+    @Test func aChangeUndoneByTheServerPutsTheTitleBackWhereItWas() {
+        let movie = Self.title("m1", resumeTicks: 600_000_000)
+        var items: [HomeRow.ID: [JellyfinItem]] = [
+            HomeRows.continueWatching.id: [Self.title("a", resumeTicks: 1), movie, Self.title("b", resumeTicks: 1)],
+        ]
+        var removed: HomeFeed.Removals = [:]
+        var watched = movie
+        watched.userData?.played = true
+        _ = HomeFeed.replace(watched, in: &items, removed: &removed)
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["a", "b"])
+
+        let left = HomeFeed.replace(movie, in: &items, removed: &removed)
+        #expect(left.isEmpty)
+        #expect(items[HomeRows.continueWatching.id]?.map(\.id) == ["a", "m1", "b"])
+        #expect(removed[HomeRows.continueWatching.id]?.isEmpty == true)
     }
 }
 

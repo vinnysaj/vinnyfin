@@ -2,6 +2,7 @@ import AetherEngine
 import Foundation
 import Observation
 import OSLog
+import SwiftUI
 
 /// Starts playbacks and owns the one playback engine, which is built once and reused for every
 /// title, as the engine expects. On iPhone, iPad and Apple TV the player covers the app; on the
@@ -50,9 +51,29 @@ final class PlayerCoordinator {
         #if os(macOS) || os(visionOS)
         false
         #else
-        presented != nil
+        presented != nil && !isInPictureInPicture
         #endif
     }
+
+    /// On iPhone and iPad, the player is put away while its playback plays in Picture in Picture,
+    /// so the app can be browsed meanwhile; `presented` keeps the playback. The window's restore
+    /// button brings the player back, and its close button ends the playback.
+    private(set) var isInPictureInPicture = false
+
+    /// The playback the full-screen player shows: `presented`, but for while it plays in Picture
+    /// in Picture with the player put away.
+    var coverModel: PlayerModel? {
+        get { isInPictureInPicture ? nil : presented }
+        set { if newValue == nil, !isInPictureInPicture { presented = nil } }
+    }
+
+    #if os(iOS) || os(macOS)
+    /// Picture in Picture, for the playback on screen; kept here, so the window outlives a player
+    /// put away while it plays.
+    let pictureInPicture = PictureInPicture()
+    /// The window's restore, waiting for the player to be back on screen to take the picture.
+    @ObservationIgnored private var pendingRestore: ((Bool) -> Void)?
+    #endif
 
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let settings: AppSettings
@@ -72,6 +93,9 @@ final class PlayerCoordinator {
         self.downloads = downloads
         self.smartDownloads = smartDownloads
         self.localLibrary = localLibrary
+        #if os(iOS) || os(macOS)
+        followPictureInPicture()
+        #endif
     }
     #else
     init(accounts: AccountStore, settings: AppSettings, history: WatchHistory) {
@@ -121,6 +145,8 @@ final class PlayerCoordinator {
         case .pause: model.pause()
         case .unpause: model.play()
         case .togglePause: model.togglePlayPause()
+        // Put away, the player isn't there to close itself.
+        case .stop where isInPictureInPicture: Task { await dismiss() }
         case .stop: stopRequest = model.id
         case .seek(let seconds): model.seek(to: seconds)
         case .skip(let seconds): model.skip(by: seconds)
@@ -146,15 +172,64 @@ final class PlayerCoordinator {
     }
 
     private func present(_ request: PlaybackRequest) async {
-        if let presented { await presented.close() }
+        // One engine plays one thing: what plays in Picture in Picture ends too.
+        await dismiss()
         presented = makeModel(for: request)
     }
 
     func dismiss() async {
         guard let model = presented else { return }
         presented = nil
+        isInPictureInPicture = false
+        #if os(iOS) || os(macOS)
+        pictureInPicture.close()
+        pendingRestore?(false)
+        pendingRestore = nil
+        #endif
         await model.close()
     }
+
+    #if os(iOS) || os(macOS)
+    private func followPictureInPicture() {
+        pictureInPicture.onStart = { [weak self] in self?.pictureInPictureStarted() }
+        pictureInPicture.onRestore = { [weak self] done in
+            guard let self else { return done(false) }
+            self.restoreFromPictureInPicture(done)
+        }
+        pictureInPicture.onClose = { [weak self] in self?.pictureInPictureClosed() }
+    }
+
+    /// On iPhone and iPad the player is put away once the window has the picture.
+    private func pictureInPictureStarted() {
+        #if os(iOS)
+        guard presented != nil else { return }
+        isInPictureInPicture = true
+        #endif
+    }
+
+    /// The window's restore button: the player comes back at once, without its slide, as the
+    /// window flies back into it, and takes the picture back once it's on screen.
+    private func restoreFromPictureInPicture(_ done: @escaping (Bool) -> Void) {
+        guard isInPictureInPicture, presented != nil else { return done(presented != nil) }
+        pendingRestore?(false)
+        pendingRestore = done
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) { isInPictureInPicture = false }
+    }
+
+    /// The player is on screen: a restore waiting for it completes.
+    func playerAppeared() {
+        pendingRestore?(true)
+        pendingRestore = nil
+    }
+
+    /// The window's own close button ends the playback, its player put away.
+    private func pictureInPictureClosed() {
+        guard isInPictureInPicture else { return }
+        Task { await dismiss() }
+    }
+    #endif
 
     /// A model for `request`, on the shared engine. Nil when the engine can't be built.
     func makeModel(for request: PlaybackRequest) -> PlayerModel? {

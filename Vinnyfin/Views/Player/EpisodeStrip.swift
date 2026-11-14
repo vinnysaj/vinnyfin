@@ -1,17 +1,27 @@
-#if os(iOS) || os(visionOS)
 import SwiftUI
 
-/// The show's episodes in the player's controls, below the fold of an iPhone Duo standing half
-/// open and under Vision Pro's window: a season at a time, starting from the one playing.
-/// Tapping one plays it in place. Offline, the show's downloads.
-struct EpisodeStrip: View {
+/// The show's episodes in the player, a season at a time, starting from the one playing, which
+/// is marked and in view: in a row below the fold of an iPhone Duo standing half open, under
+/// Vision Pro's window, in the Episodes panel's drawer and on Apple TV's Episodes tab, and as a
+/// list in the panel's sheet on a phone held upright. Picking one plays it in place. Offline, the
+/// show's downloads.
+struct EpisodeStrip<Accessory: View>: View {
     let model: PlayerModel
     let playing: JellyfinItem
+    var axis: Axis = .horizontal
+    /// Smaller cards, for a short screen.
+    var isCompact = false
     /// Called as it's scrolled or used, so controls that fade stay up meanwhile.
     var onInteraction: () -> Void = {}
+    /// Called as an episode is picked to play.
+    var onPlay: () -> Void = {}
+    /// At the end of the season's row: the panel's own buttons.
+    @ViewBuilder var accessory: () -> Accessory
 
     @Environment(\.session) private var session
+    #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
+    #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var seasons: [JellyfinItem] = []
@@ -19,41 +29,79 @@ struct EpisodeStrip: View {
     @State private var episodes: [JellyfinItem] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: Self.headerSpacing) {
             header
             ScrollViewReader { proxy in
-                ScrollView(.horizontal) {
-                    LazyHStack(alignment: .top, spacing: 12) {
-                        ForEach(episodes) { episode in
-                            Button {
-                                onInteraction()
-                                Task { await model.play(episode) }
-                            } label: {
-                                card(episode)
-                            }
-                            .buttonStyle(.artwork)
-                            .id(episode.id)
-                            .accessibilityIdentifier("episodes.episode.\(episode.indexNumber ?? 0)")
-                        }
-                    }
-                    .scrollTargetLayout()
+                Group {
+                    if axis == .horizontal { row } else { list }
                 }
-                .scrollIndicators(.hidden)
-                .scrollTargetBehavior(.viewAligned)
-                .contentMargins(.horizontal, Metrics.playerInset, for: .scrollContent)
                 .onScrollPhaseChange { _, phase in
                     if phase.isScrolling { onInteraction() }
                 }
-                .onChange(of: episodes) { proxy.scrollTo(playing.id, anchor: .leading) }
-                .onChange(of: playing.id) { withAnimation { proxy.scrollTo(playing.id, anchor: .leading) } }
+                .onChange(of: episodes) { scrollIntoView(proxy) }
+                .onChange(of: playing.id) { withAnimation { scrollIntoView(proxy) } }
             }
         }
         .task(id: playing.seriesId) { await loadSeasons() }
         .task(id: seasonId) { await loadEpisodes() }
+        // The next episode can be the next season's first.
+        .onChange(of: playing.seasonId) { _, season in seasonId = season }
+    }
+
+    private func scrollIntoView(_ proxy: ScrollViewProxy) {
+        guard let id = EpisodesLayout.inView(among: episodes, playing: playing) else { return }
+        proxy.scrollTo(id, anchor: axis == .horizontal ? .leading : .top)
+    }
+
+    private var row: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(alignment: .top, spacing: Self.cardSpacing) {
+                ForEach(episodes) { episode in
+                    button(episode) { card(episode) }
+                }
+            }
+            .scrollTargetLayout()
+            #if os(tvOS)
+            // Room for the card with focus to lift.
+            .padding(.vertical, 24)
+            #endif
+        }
+        .scrollIndicators(.hidden)
+        .scrollTargetBehavior(.viewAligned)
+        .contentMargins(.horizontal, Self.inset, for: .scrollContent)
+        #if os(tvOS)
+        .scrollClipDisabled()
+        .focusSection()
+        #endif
+    }
+
+    private var list: some View {
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                ForEach(episodes) { episode in
+                    button(episode) { listRow(episode) }
+                }
+            }
+            .padding(.bottom, 12)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func button(_ episode: JellyfinItem, @ViewBuilder label: () -> some View) -> some View {
+        Button {
+            onInteraction()
+            onPlay()
+            Task { await model.play(episode) }
+        } label: {
+            label()
+        }
+        .buttonStyle(.artwork)
+        .id(episode.id)
+        .accessibilityIdentifier("episodes.episode.\(episode.indexNumber ?? 0)")
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 12) {
             if seasons.count > 1 {
                 Menu {
                     Picker("Season", selection: $seasonId) {
@@ -65,14 +113,21 @@ struct EpisodeStrip: View {
                         Image(systemName: "chevron.down").font(.caption.weight(.bold))
                     }
                 }
+                #if os(macOS)
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                #endif
                 .accessibilityIdentifier("episodes.season")
             } else {
                 Text(seasonName)
             }
-            Spacer()
+            Spacer(minLength: 0)
+            accessory()
         }
         .font(.headline)
-        .padding(.horizontal, Metrics.playerInset)
+        .padding(.horizontal, Self.inset)
     }
 
     private var seasonName: String {
@@ -82,21 +137,8 @@ struct EpisodeStrip: View {
     private func card(_ episode: JellyfinItem) -> some View {
         let isPlaying = episode.id == playing.id
         return VStack(alignment: .leading, spacing: 6) {
-            Artwork(url: session?.client.imageURL(itemId: episode.id, tag: episode.primaryImageTag, maxWidth: 400),
-                    aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
-                .overlay(alignment: .bottom) {
-                    if let progress = episode.progress, !isPlaying { ProgressBar(fraction: progress).padding(6) }
-                }
-                .overlay {
-                    if isPlaying {
-                        RoundedRectangle(cornerRadius: 10).strokeBorder(.white, lineWidth: 2)
-                        Image(systemName: "waveform")
-                            .font(.title2.weight(.semibold))
-                            // Still with Reduce Motion: the stroke around it marks it.
-                            .symbolEffect(.variableColor.iterative, isActive: model.isPlaying && !reduceMotion)
-                            .shadow(radius: 4)
-                    }
-                }
+            still(episode, isPlaying: isPlaying)
+                .liftsUnderFocus()
             Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(dynamicTypeSize.lineLimit(1))
@@ -104,10 +146,55 @@ struct EpisodeStrip: View {
                 Text(runtime).font(.caption).foregroundStyle(.secondary)
             }
         }
-        .frame(width: dynamicTypeSize.cardWidth(168))
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isPlaying ? .isSelected : [])
-        .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
+        .frame(width: dynamicTypeSize.cardWidth(isCompact ? Self.compactCardWidth : Self.cardWidth))
+        .modifier(EpisodeAccessibility(episode: episode, isPlaying: isPlaying))
+    }
+
+    private func listRow(_ episode: JellyfinItem) -> some View {
+        let isPlaying = episode.id == playing.id
+        return HStack(alignment: .top, spacing: 12) {
+            still(episode, isPlaying: isPlaying)
+                .frame(width: 132)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(dynamicTypeSize.lineLimit(2))
+                if let runtime = episode.runtimeText {
+                    Text(runtime).font(.caption).foregroundStyle(.secondary)
+                }
+                if let overview = episode.overview, !overview.isEmpty {
+                    Text(overview).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(2))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Self.inset)
+        .padding(.vertical, 6)
+        .background(isPlaying ? AnyShapeStyle(.white.opacity(0.08)) : AnyShapeStyle(.clear))
+        .contentShape(.rect)
+        .modifier(EpisodeAccessibility(episode: episode, isPlaying: isPlaying))
+    }
+
+    /// The episode's still, with how far it was watched or that it was, and the one playing marked.
+    private func still(_ episode: JellyfinItem, isPlaying: Bool) -> some View {
+        Artwork(url: session?.client.imageURL(itemId: episode.id, tag: episode.primaryImageTag, maxWidth: Self.imagePixels),
+                aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
+            .overlay(alignment: .bottom) {
+                if let progress = episode.progress, !isPlaying { ProgressBar(fraction: progress).padding(6) }
+            }
+            .overlay(alignment: .topTrailing) {
+                if !isPlaying { WatchBadge(item: episode).padding(6) }
+            }
+            .overlay {
+                if isPlaying {
+                    RoundedRectangle(cornerRadius: Metrics.cardRadius).strokeBorder(.white, lineWidth: 2)
+                    Image(systemName: "waveform")
+                        .font(.title2.weight(.semibold))
+                        // Still with Reduce Motion: the stroke around it marks it.
+                        .symbolEffect(.variableColor.iterative, isActive: model.isPlaying && !reduceMotion)
+                        .shadow(radius: 4)
+                }
+            }
     }
 
     private func loadSeasons() async {
@@ -134,7 +221,77 @@ struct EpisodeStrip: View {
                 // Falls through to what's downloaded.
             }
         }
+        #if !os(tvOS)
         episodes = downloads.downloadedEpisodes(seriesId: seriesId)
+        #endif
+    }
+
+    private static var cardWidth: CGFloat {
+        #if os(tvOS)
+        360
+        #else
+        168
+        #endif
+    }
+
+    private static var compactCardWidth: CGFloat { 136 }
+
+    private static var cardSpacing: CGFloat {
+        #if os(tvOS)
+        40
+        #else
+        12
+        #endif
+    }
+
+    private static var headerSpacing: CGFloat {
+        #if os(tvOS)
+        0
+        #else
+        10
+        #endif
+    }
+
+    private static var imagePixels: Int {
+        #if os(tvOS)
+        720
+        #else
+        400
+        #endif
+    }
+
+    /// From the strip's sides to the first card: the player's inset, which on Apple TV is the
+    /// screen's own.
+    private static var inset: CGFloat {
+        #if os(tvOS)
+        0
+        #else
+        Metrics.playerInset
+        #endif
     }
 }
-#endif
+
+extension EpisodeStrip where Accessory == EmptyView {
+    init(model: PlayerModel, playing: JellyfinItem, axis: Axis = .horizontal, isCompact: Bool = false,
+         onInteraction: @escaping () -> Void = {}, onPlay: @escaping () -> Void = {}) {
+        self.init(model: model, playing: playing, axis: axis, isCompact: isCompact, onInteraction: onInteraction,
+                  onPlay: onPlay) { EmptyView() }
+    }
+}
+
+/// An episode in the strip as VoiceOver reads it: its name, with its number, whether it's the one
+/// playing, and how far it was watched.
+private struct EpisodeAccessibility: ViewModifier {
+    let episode: JellyfinItem
+    let isPlaying: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(episode.name)
+            .accessibilityValue([episode.spokenEpisodeCode, isPlaying ? "playing" : nil, WatchBadge.spokenState(of: episode),
+                                 episode.progress.map(ProgressBar.spoken)].compactMap(\.self).joined(separator: ", "))
+            .accessibilityAddTraits(isPlaying ? .isSelected : [])
+            .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
+    }
+}

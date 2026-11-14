@@ -64,6 +64,9 @@ struct PlayerView: View {
     @FocusState private var focus: PlayerFocus?
     /// Try Again over a playback that failed, which takes focus from the controls as it appears.
     @FocusState private var retryFocused: Bool
+    /// The lighter stream offered while the sound plays with no picture, which takes focus from
+    /// the controls as it appears.
+    @FocusState private var offerFocused: Bool
     /// The controls show just the timeline, as the remote moves it while they were hidden.
     @State private var controlsCompact = false
     @State private var touchSurface = TouchSurface()
@@ -73,13 +76,14 @@ struct PlayerView: View {
     #else
     @FocusState private var hasKeyboardFocus: Bool
     #endif
-    #if os(iOS) || os(macOS)
-    @State private var pictureInPicture = PictureInPicture()
-    #endif
     #if os(iOS)
     @State private var orientationLock = PlayerOrientationLock()
     /// The fold across the screen of an iPhone Duo standing half open, in window coordinates.
     @State private var fold: CGRect?
+    /// The whole screen's size, which the episodes' sheet fills the part below the picture of.
+    @State private var screenSize: CGSize = .zero
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     #else
     private let fold: CGRect? = nil
     #endif
@@ -98,6 +102,7 @@ struct PlayerView: View {
                     #if os(iOS)
                     .onGeometryChange(for: CGRect?.self) { Self.fold(in: $0) } action: { fold = $0 }
                     .onGeometryChange(for: Bool.self) { $0.size.width > $0.size.height } action: { orientationLock.windowChanged(isWide: $0) }
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { screenSize = $0 }
                     #endif
                 #endif
                 PlayerSurface(engine: model.engine)
@@ -227,7 +232,21 @@ struct PlayerView: View {
                 .motionTransition(.move(edge: .top).combined(with: .opacity), reduceMotion: reduceMotion)
             }
             #endif
-            if let panel {
+            if panel == .quality {
+                qualityPanel
+            }
+            #if os(iOS) || os(macOS)
+            if panel == .episodes, !showsEpisodesInSheet, let item = model.item {
+                episodesDrawer(item)
+            }
+            #endif
+            #if os(iOS)
+            // What the episodes' sheet is presented from: the player has a sheet of its own.
+            Color.clear
+                .frame(width: 0, height: 0)
+                .sheet(isPresented: episodesSheet) { episodesSheetContent }
+            #endif
+            if let panel, panel.isTrackPanel {
                 // Between the controls' bars, so the panel covers none of them. Where the band
                 // between them is short, it has the height above the bottom bar.
                 let clearsTopBar = clearsControls && !controlsAreShort
@@ -396,7 +415,7 @@ struct PlayerView: View {
                 #endif
             }
             #if os(iOS) || os(macOS)
-            pictureInPicture.attach(to: model)
+            coordinator.pictureInPicture.attach(to: model)
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
@@ -408,6 +427,14 @@ struct PlayerView: View {
         }
         .onChange(of: model.notice) { _, notice in
             if let notice { announce(notice.text) }
+        }
+        .onChange(of: model.pictureOffer) { _, offer in
+            guard offer != nil else { return }
+            announce("The picture can't keep up. \(offer?.action ?? "")?")
+            #if os(tvOS)
+            // Once the card is up, as for a failure's Try Again.
+            DispatchQueue.main.async { offerFocused = true }
+            #endif
         }
         // Turned on mid-playback, they'd need the controls to stay.
         .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
@@ -427,6 +454,11 @@ struct PlayerView: View {
                 // Half the screen, the picture still playing above it.
                 .presentationDetents([.medium, .large])
         }
+        #endif
+        .onAppear(perform: appeared)
+        #if os(macOS)
+        // The window's playback ends with it.
+        .onDisappear { coordinator.pictureInPicture.close() }
         #endif
         .task {
             #if !os(tvOS)
@@ -588,6 +620,130 @@ struct PlayerView: View {
         clearsControls && !Self.hasNoCenterButton && PlayerLayout.isShort(topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
     }
 
+    /// A player that comes back for its playback, as from Picture in Picture, finds it under way:
+    /// the title's picture and the fill it had carry on, and the window hands the picture back.
+    private func appeared() {
+        isStartingTitle = model.status == .preparing
+        fillsScreen = model.engine.videoGravity == .resizeAspectFill
+        #if os(iOS) || os(macOS)
+        coordinator.playerAppeared()
+        #endif
+    }
+
+    // MARK: Episodes and quality
+
+    /// The Quality panel by its button: below the controls' top bar where the button is, over
+    /// the bottom bar where the band between them is short; on Apple TV, whose button is along
+    /// the bottom, and on Vision Pro, where the controls are below the window, above the bottom.
+    private var qualityPanel: some View {
+        GeometryReader { geometry in
+            let frame = geometry.frame(in: .global)
+            let top = clearsControls && Self.qualityButtonIsAtTop ? topBarBottom.map { max(0, $0 - frame.minY) } ?? 0 : 0
+            let bottom = !clearsControls ? 60 : controlsAreShort && Self.qualityButtonIsAtTop ? 0
+                : bottomBarTop.map { max(0, frame.maxY - $0) } ?? 60
+            QualityPanel(model: model, room: max(0, frame.height - top - bottom - 2 * Metrics.edge)) { closePanel() }
+                .padding(Metrics.edge)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: Self.qualityButtonIsAtTop && clearsControls ? .topTrailing : .bottomTrailing)
+                .padding(.top, top)
+                .padding(.bottom, bottom)
+        }
+        .motionTransition(.move(edge: .trailing).combined(with: .opacity), reduceMotion: reduceMotion)
+    }
+
+    /// The Quality button is in the controls' top bar, but on Apple TV, whose top bar takes no focus.
+    private static var qualityButtonIsAtTop: Bool {
+        #if os(tvOS) || os(visionOS)
+        false
+        #else
+        true
+        #endif
+    }
+
+    #if os(iOS) || os(macOS)
+    private var episodesForm: EpisodesLayout.Form {
+        #if os(iOS)
+        EpisodesLayout.form(isCompactWidth: horizontalSizeClass == .compact, isCompactHeight: verticalSizeClass == .compact,
+                            isShortBand: controlsAreShort)
+        #else
+        EpisodesLayout.form(isCompactWidth: false, isCompactHeight: false, isShortBand: controlsAreShort)
+        #endif
+    }
+
+    private var showsEpisodesInSheet: Bool { episodesForm == .sheet }
+
+    /// The episodes along the bottom: above the controls' bottom bar, or over it, smaller, where
+    /// the band between the bars is short.
+    private func episodesDrawer(_ item: JellyfinItem) -> some View {
+        let form = episodesForm
+        return GeometryReader { geometry in
+            let frame = geometry.frame(in: .global)
+            let bottom = form == .rail || !clearsControls ? 0 : bottomBarTop.map { max(0, frame.maxY - $0) } ?? 0
+            EpisodesPanel(model: model, playing: item, form: form, onInteraction: scheduleHide) { closePanel() }
+                .padding(.horizontal, Metrics.playerInset)
+                .padding(.bottom, bottom + 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .motionTransition(.move(edge: .bottom).combined(with: .opacity), reduceMotion: reduceMotion)
+    }
+    #endif
+
+    #if os(iOS)
+    private var episodesSheet: Binding<Bool> {
+        Binding {
+            panel == .episodes && showsEpisodesInSheet
+        } set: { shown in
+            // Swiped away. Turned on its side instead, the drawer takes over.
+            if !shown, panel == .episodes, showsEpisodesInSheet { closePanel() }
+        }
+    }
+
+    @ViewBuilder private var episodesSheetContent: some View {
+        if let item = model.item {
+            EpisodesPanel(model: model, playing: item, form: .sheet) { closePanel() }
+                .presentationDetents([.height(episodesSheetHeight), .large])
+                // The picture above it goes on taking taps, for its transport.
+                .presentationBackgroundInteraction(.enabled(upThrough: .height(episodesSheetHeight)))
+                .presentationDragIndicator(.visible)
+                .preferredColorScheme(.dark)
+        }
+    }
+
+    private var episodesSheetHeight: CGFloat {
+        EpisodesLayout.sheetHeight(screen: screenSize, videoSize: fillsScreen ? nil : model.videoSize)
+    }
+    #endif
+
+    /// While the sound plays with no picture: a lighter way to play the title, or waiting on.
+    private func pictureOfferCard(_ offer: PictureOffer) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "video.slash").font(.largeTitle).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("The Picture Can't Keep Up").font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+            Text("The sound is playing, but this \(Device.name) can't show this version's picture fast enough.")
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
+            AdaptiveStack {
+                Button(offer.action) { model.takePictureOffer() }
+                    .buttonStyle(.platformGlassProminent)
+                    #if os(tvOS)
+                    .focused($offerFocused)
+                    #endif
+                    .accessibilityIdentifier("player.pictureOffer.take")
+                Button("Keep Waiting") { model.declinePictureOffer() }
+                    .buttonStyle(.platformGlass)
+            }
+            #if os(tvOS)
+            .focusSection()
+            #endif
+        }
+        .padding(30)
+        .platformGlass(in: .rect(cornerRadius: 28))
+        .padding()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.pictureOffer")
+    }
+
     private enum PictureCover: Equatable {
         case starting
         case airPlay(receiver: String)
@@ -697,9 +853,10 @@ struct PlayerView: View {
         #endif
     }
 
-    private var pictureInPictureAction: (() -> Void)? {
+    /// The Picture in Picture button, on iPhone, iPad and the Mac.
+    private var pictureInPictureAction: PictureInPictureButton? {
         #if os(iOS) || os(macOS)
-        pictureInPicture.isPossible ? { pictureInPicture.toggle() } : nil
+        coordinator.pictureInPicture.button
         #else
         nil
         #endif
@@ -717,6 +874,8 @@ struct PlayerView: View {
     @ViewBuilder private var statusOverlay: some View {
         if let failure = shownFailure {
             failureCard(failure)
+        } else if let offer = model.pictureOffer {
+            pictureOfferCard(offer)
         } else {
             switch model.status {
             case .preparing, .loading, .buffering:
@@ -890,6 +1049,9 @@ struct PlayerView: View {
         case .nextEpisode:
             guard let next = model.nextEpisode else { return }
             Task { await model.play(next) }
+        case .episodes:
+            guard model.item?.isEpisode == true, fold == nil else { return }
+            panel = panel == .episodes ? nil : .episodes
         case .fullScreen:
             #if os(macOS)
             NSApplication.shared.keyWindow?.toggleFullScreen(nil)
@@ -1196,90 +1358,6 @@ private struct UpNextPill: View {
 }
 
 #if os(iOS) || os(macOS)
-/// Picture in Picture for whichever layer the engine draws into: AVPlayer's on the native path,
-/// the sample-buffer layer on the software path. The playback hands its subtitles to the system
-/// while the window is up, where the overlay isn't drawn.
-@Observable
-final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
-    private(set) var isPossible = false
-    private(set) var isActive = false
-    @ObservationIgnored private var controller: AVPictureInPictureController?
-    @ObservationIgnored private weak var model: PlayerModel?
-    @ObservationIgnored private weak var engine: AetherEngine?
-    @ObservationIgnored private var attachedLayer: AnyObject?
-    @ObservationIgnored private var possibleObservation: NSKeyValueObservation?
-
-    /// Builds the controller for the layer the playback's engine is drawing into now.
-    func attach(to model: PlayerModel) {
-        guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-        self.model = model
-        let engine = model.engine
-        self.engine = engine
-        let controller: AVPictureInPictureController?
-        if let layer = engine.nativePlayerLayer {
-            guard attachedLayer !== layer else { return }
-            attachedLayer = layer
-            controller = AVPictureInPictureController(playerLayer: layer)
-        } else if let source = engine.softwarePiPSource {
-            guard attachedLayer !== source.layer else { return }
-            attachedLayer = source.layer
-            controller = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: source.layer, playbackDelegate: self))
-        } else {
-            return
-        }
-        controller?.delegate = self
-        #if os(iOS)
-        controller?.canStartPictureInPictureAutomaticallyFromInline = true
-        #endif
-        self.controller = controller
-        possibleObservation = controller?.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] controller, _ in
-            let possible = controller.isPictureInPicturePossible
-            Task { @MainActor in self?.isPossible = possible }
-        }
-    }
-
-    func toggle() {
-        guard let controller else { return }
-        if controller.isPictureInPictureActive { controller.stopPictureInPicture() } else { controller.startPictureInPicture() }
-    }
-
-    nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
-        Task { @MainActor in
-            self.engine?.pictureInPictureActive = true
-            self.model?.pictureLeavesApp(true)
-            self.isActive = true
-        }
-    }
-
-    nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
-        Task { @MainActor in
-            self.engine?.pictureInPictureActive = false
-            self.model?.pictureLeavesApp(false)
-            self.isActive = false
-        }
-    }
-
-    // Sample-buffer playback, answered from the engine's software source.
-
-    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, setPlaying playing: Bool) {
-        Task { @MainActor in self.engine?.softwarePiPSource?.setPlaying(playing) }
-    }
-
-    nonisolated func pictureInPictureControllerTimeRangeForPlayback(_ controller: AVPictureInPictureController) -> CMTimeRange {
-        MainActor.assumeIsolated { engine?.softwarePiPSource?.timeRange() ?? CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity) }
-    }
-
-    nonisolated func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool {
-        MainActor.assumeIsolated { engine?.softwarePiPSource?.isPaused ?? true }
-    }
-
-    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
-
-    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, skipByInterval skipInterval: CMTime) async {
-        await MainActor.run { engine?.softwarePiPSource?.skip(by: skipInterval.seconds) }
-    }
-}
-
 /// The system's AirPlay and audio route button, on glass the size of the player's glass buttons
 /// beside it. The system's button can't take a button style, so a glass button like those, laid
 /// out and not drawn, gives the size. The system draws its icon in proportion to its own size,

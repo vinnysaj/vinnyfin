@@ -3,9 +3,11 @@ import SwiftUI
 import UIKit
 #endif
 
-/// The player's choice panels. While one is open the controls stay up.
+/// The player's choice panels. While one is open the controls stay up. The track panels are
+/// `TrackPanel`'s, the quality `QualityPanel`'s, and the show's episodes `EpisodesPanel`'s; on
+/// Apple TV the episodes and the info are the tabs a swipe down from the buttons (`PlayerTabs`).
 enum PlayerPanel: Identifiable {
-    case audio, subtitles, speed, chapters
+    case audio, subtitles, speed, chapters, episodes, quality, info
 
     var id: Self { self }
 
@@ -15,6 +17,9 @@ enum PlayerPanel: Identifiable {
         case .subtitles: "Subtitles"
         case .speed: "Speed"
         case .chapters: "Chapters"
+        case .episodes: "Episodes"
+        case .quality: "Quality"
+        case .info: "Info"
         }
     }
 
@@ -24,7 +29,27 @@ enum PlayerPanel: Identifiable {
         case .subtitles: "captions.bubble"
         case .speed: "gauge.with.dots.needle.67percent"
         case .chapters: "list.bullet.rectangle"
+        case .episodes: "rectangle.stack"
+        case .quality: "sparkles.tv"
+        case .info: "info.circle"
         }
+    }
+
+    /// A list of `TrackPanel`'s.
+    var isTrackPanel: Bool {
+        switch self {
+        case .audio, .subtitles, .speed, .chapters: true
+        case .episodes, .quality, .info: false
+        }
+    }
+
+    /// One of Apple TV's tabs below the buttons, which focus opens.
+    var isTab: Bool {
+        #if os(tvOS)
+        self == .episodes || self == .info
+        #else
+        false
+        #endif
     }
 }
 
@@ -94,6 +119,8 @@ struct TrackPanel: View {
                 Row(id: "chapter.\(chapter.index)", title: chapter.name, detail: Scrubber.format(chapter.start),
                     isSelected: chapter == playing, image: chapter.image) { model.seek(to: chapter.start) }
             }
+        case .episodes, .quality, .info:
+            return []
         }
     }
 
@@ -367,7 +394,7 @@ private struct SpeedChipStyle: ButtonStyle {
 #if os(tvOS)
 /// A panel row with focus: on a rounded card inside the panel's glass, lifted a little, rather than
 /// the plain style's square lift from edge to edge over the rows beside it.
-private struct PanelRowStyle: ButtonStyle {
+struct PanelRowStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

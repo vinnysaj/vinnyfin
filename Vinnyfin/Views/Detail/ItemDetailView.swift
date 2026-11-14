@@ -6,6 +6,14 @@ struct ItemDestination: View {
     let item: JellyfinItem
 
     var body: some View {
+        page
+            // A page of its own for each title. A link puts its title in place of the stack's
+            // page at the same depth, which would otherwise keep the last title's state: an
+            // episode picked on it, the season shown, the details and the version picked.
+            .id(item.id)
+    }
+
+    @ViewBuilder private var page: some View {
         if item.isSeries {
             SeriesView(series: item)
         } else if item.isSeason, let seriesId = item.seriesId {
@@ -285,6 +293,8 @@ struct ItemDetailView: View {
     private func loadDetail() async {
         guard let session else { return }
         let id = page.id
+        // Only this title's details, so a load that fails can't leave another title's actions.
+        if detail?.id != id { detail = nil }
         do {
             let found = try await session.client.item(id: id, userId: session.userId)
             guard id == page.id else { return }

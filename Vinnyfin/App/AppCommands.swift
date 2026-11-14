@@ -8,7 +8,11 @@ import SwiftUI
 /// menu never sees these keys there: the player, which takes focus as it opens, handles them
 /// with `pressed(_:modifiers:)`, and the menu shows them and acts when clicked.
 enum PlayerCommand: CaseIterable {
-    case playPause, skipBack, skipForward, nextEpisode, fullScreen, close
+    case playPause, skipBack, skipForward, nextEpisode
+    case volumeUp, volumeDown, mute, subtitles
+    case fullScreen
+    /// Closes an open panel, else leaves full screen, else closes the player.
+    case close
 
     var shortcut: KeyboardShortcut {
         switch self {
@@ -16,6 +20,10 @@ enum PlayerCommand: CaseIterable {
         case .skipBack: KeyboardShortcut(.leftArrow, modifiers: [])
         case .skipForward: KeyboardShortcut(.rightArrow, modifiers: [])
         case .nextEpisode: KeyboardShortcut("n", modifiers: [])
+        case .volumeUp: KeyboardShortcut(.upArrow, modifiers: [])
+        case .volumeDown: KeyboardShortcut(.downArrow, modifiers: [])
+        case .mute: KeyboardShortcut("m", modifiers: [])
+        case .subtitles: KeyboardShortcut("c", modifiers: [])
         case .fullScreen: KeyboardShortcut("f", modifiers: [])
         case .close: KeyboardShortcut(.escape, modifiers: [])
         }
@@ -70,12 +78,19 @@ struct PlayerCommandTarget {
     let model: PlayerModel
     /// The picture fills the screen, cutting its edges, on iPhone and iPad.
     let fillsScreen: Bool
+    /// The Mac's player window is in full screen.
+    let isFullScreen: Bool
     let perform: (PlayerCommand) -> Void
 }
 
 /// The tabs the Go menu moves between, as the focused window's tabs hand them over.
 struct TabCommandTarget {
     let go: (TabCommand) -> Void
+    /// Back a page in the tab showing; nil on a tab's first page.
+    var back: (() -> Void)?
+
+    /// ⌘[, as in Finder and Safari.
+    static let backShortcut = KeyboardShortcut("[", modifiers: .command)
 }
 
 extension FocusedValues {
@@ -96,17 +111,31 @@ struct AppCommands: Commands {
             button("Forward \(Int(PlayerModel.skipInterval)) Seconds", .skipForward)
             button("Next Episode", .nextEpisode, enabled: player?.model.nextEpisode != nil)
             Divider()
+            button("Volume Up", .volumeUp)
+            button("Volume Down", .volumeDown)
+            button(player?.model.volume.isMuted == true ? "Unmute" : "Mute", .mute)
+            Divider()
             audioPicker
             subtitlePicker
+            button(player?.model.selectedSubtitle != nil ? "Turn Subtitles Off" : "Turn Subtitles On", .subtitles,
+                   enabled: player?.model.subtitleOptions.isEmpty == false)
             Divider()
             #if os(macOS)
-            button("Full Screen", .fullScreen)
+            button(player?.isFullScreen == true ? "Exit Full Screen" : "Enter Full Screen", .fullScreen)
+            // Escape leaves full screen before it closes the player.
+            button(player?.isFullScreen == true ? "Exit Full Screen" : "Close Player", .close)
             #elseif os(iOS)
             button(player?.fillsScreen == true ? "Fit to Screen" : "Fill Screen", .fullScreen)
-            #endif
             button("Close Player", .close)
+            #else
+            button("Close Player", .close)
+            #endif
         }
         CommandMenu("Go") {
+            Button("Back") { tabs?.back?() }
+                .keyboardShortcut(TabCommandTarget.backShortcut)
+                .disabled(tabs?.back == nil)
+            Divider()
             ForEach(TabCommand.allCases, id: \.self) { command in
                 Button(command.title) { tabs?.go(command) }
                     .keyboardShortcut(command.shortcut)

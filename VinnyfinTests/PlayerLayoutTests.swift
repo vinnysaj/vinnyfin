@@ -135,41 +135,105 @@ struct PlayerLayoutTests {
 
 #if os(iOS)
 struct PlayerOrientationRuleTests {
-    @Test func theWindowIsHeldOnceItsWide() {
+    @Test func thePlayerTurnsWithThePhoneUntilLocked() {
         var rule = PlayerOrientationLock.Rule()
-        rule.relock(current: .portrait)
+        #expect(!rule.isLocked)
         #expect(rule.allowed == .all)
-        rule.isWide = true
-        rule.relock(current: .landscapeRight)
-        #expect(rule.allowed == .landscape)
-        // Lying down, the phone upright: the player offers to rotate rather than turning.
-        #expect(rule.isTurnedAgainst(.portrait))
-        #expect(!rule.isTurnedAgainst(.landscapeLeft))
+        // Turning sideways, even for a wide picture, doesn't lock it by itself.
+        #expect(!rule.isTurnedAgainst(.landscapeRight))
+        #expect(!rule.isTurnedAgainst(.portrait))
     }
 
-    @Test func rotatedUprightThePlayerTurnsSidewaysAgain() {
+    @Test func lockingHoldsTheShapeItsInEitherWayUp() {
         var rule = PlayerOrientationLock.Rule()
-        rule.isWide = true
-        rule.relock(current: .landscapeRight)
-        #expect(rule.rotate(to: .portrait) == .portrait)
-        // Upright, it turns with the phone again.
-        rule.isWide = false
-        rule.relock(current: .portrait)
-        #expect(rule.allowed == .all)
-        #expect(!rule.isTurnedAgainst(.landscapeLeft))
-        // Turned sideways, the window goes wide, and is held there again.
-        rule.isWide = true
-        rule.relock(current: .landscapeLeft)
+        rule.lock(current: .landscapeRight)
+        #expect(rule.isLocked)
         #expect(rule.allowed == .landscape)
+        // Lying down, the phone upright: the lock keeps the picture sideways.
+        #expect(rule.isTurnedAgainst(.portrait))
+        #expect(!rule.isTurnedAgainst(.landscapeLeft))
+
+        rule.lock(current: .portrait)
+        #expect(rule.allowed == .portrait)
+        #expect(rule.isTurnedAgainst(.landscapeLeft))
+    }
+
+    @Test func unlockingTurnsWithThePhoneAgain() {
+        var rule = PlayerOrientationLock.Rule()
+        rule.lock(current: .landscapeLeft)
+        rule.unlock()
+        #expect(!rule.isLocked)
+        #expect(rule.allowed == .all)
+        #expect(!rule.isTurnedAgainst(.portrait))
     }
 
     @Test func standingHalfOpenTurnsFreely() {
         var rule = PlayerOrientationLock.Rule()
-        rule.isWide = true
-        rule.relock(current: .landscapeRight)
+        rule.lock(current: .landscapeRight)
         rule.isHalfOpen = true
-        rule.relock(current: .landscapeRight)
         #expect(rule.allowed == .all)
+        #expect(rule.isLocked)
+        rule.isHalfOpen = false
+        #expect(rule.allowed == .landscape)
     }
 }
 #endif
+
+struct PictureTapsTests {
+    @Test func theThirdsOfThePicture() {
+        #expect(PictureTaps.zone(x: 10, width: 300) == .back)
+        #expect(PictureTaps.zone(x: 150, width: 300) == .middle)
+        #expect(PictureTaps.zone(x: 290, width: 300) == .forward)
+        #expect(PictureTaps.zone(x: 10, width: 0) == .middle)
+    }
+
+    @Test func theFirstTapShowsOrHidesTheControlsAtOnce() {
+        var taps = PictureTaps(mode: .sideSkips)
+        #expect(taps.tap(at: 0, zone: .forward, canSkip: true) == .toggleControls)
+        // A second tap long after is another first tap.
+        #expect(taps.tap(at: 5, zone: .forward, canSkip: true) == .toggleControls)
+    }
+
+    @Test func aDoubleTapOnASideSkipsAndTheTapsAfterKeepSkipping() {
+        var taps = PictureTaps(mode: .sideSkips)
+        #expect(taps.tap(at: 0, zone: .back, canSkip: true) == .toggleControls)
+        #expect(taps.tap(at: 0.2, zone: .back, canSkip: true) == .skip(forward: false, restoresControls: true))
+        // Slower taps keep the run going, and may change sides.
+        #expect(taps.tap(at: 0.8, zone: .back, canSkip: true) == .skip(forward: false, restoresControls: false))
+        #expect(taps.tap(at: 1.4, zone: .forward, canSkip: true) == .skip(forward: true, restoresControls: false))
+        // A pause ends the run.
+        #expect(taps.tap(at: 3, zone: .forward, canSkip: true) == .toggleControls)
+    }
+
+    @Test func theMiddleOnlyEverShowsAndHidesTheControls() {
+        var taps = PictureTaps(mode: .sideSkips)
+        #expect(taps.tap(at: 0, zone: .middle, canSkip: true) == .toggleControls)
+        #expect(taps.tap(at: 0.1, zone: .middle, canSkip: true) == .toggleControls)
+    }
+
+    @Test func tapsOnDifferentSidesOrWithoutATimelineDontSkip() {
+        var taps = PictureTaps(mode: .sideSkips)
+        #expect(taps.tap(at: 0, zone: .back, canSkip: true) == .toggleControls)
+        #expect(taps.tap(at: 0.1, zone: .forward, canSkip: true) == .toggleControls)
+        var live = PictureTaps(mode: .sideSkips)
+        #expect(live.tap(at: 0, zone: .back, canSkip: false) == .toggleControls)
+        #expect(live.tap(at: 0.1, zone: .back, canSkip: false) == .toggleControls)
+    }
+
+    @Test func aDoubleClickTogglesFullScreenAndAThirdStartsOver() {
+        var clicks = PictureTaps(mode: .doubleClickFullScreen, doubleTapInterval: 0.5)
+        #expect(clicks.tap(at: 0, zone: .middle, canSkip: true) == .toggleControls)
+        #expect(clicks.tap(at: 0.3, zone: .middle, canSkip: true) == .fullScreen)
+        #expect(clicks.tap(at: 0.6, zone: .middle, canSkip: true) == .toggleControls)
+    }
+}
+
+struct PanelPlacementTests {
+    @Test func aPanelSitsOverItsButtonWithinTheEdges() {
+        // Centered over a button in the middle.
+        #expect(PanelPlacement.leading(width: 300, buttonMidX: 500, containerWidth: 1000, margin: 20) == 350)
+        // Kept off the edges near either side.
+        #expect(PanelPlacement.leading(width: 300, buttonMidX: 40, containerWidth: 1000, margin: 20) == 20)
+        #expect(PanelPlacement.leading(width: 300, buttonMidX: 980, containerWidth: 1000, margin: 20) == 680)
+    }
+}

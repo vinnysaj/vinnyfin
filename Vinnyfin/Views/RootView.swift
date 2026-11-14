@@ -364,9 +364,13 @@ struct MainTabs: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        #if os(iOS)
+        // On iPhone the bar shrinks as a page scrolls down, out of the way of the cards under it.
+        .tabBarMinimizeBehavior(.onScrollDown)
+        #endif
         #if !os(tvOS)
         // While the player covers the tabs, the Go menu waits for it to close.
-        .focusedSceneValue(\.tabs, player.coversScreens ? nil : TabCommandTarget(go: go))
+        .focusedSceneValue(\.tabs, player.coversScreens ? nil : TabCommandTarget(go: go, back: back))
         #endif
         .onChange(of: linkedItem, initial: true) {
             guard let linkedItem else { return }
@@ -391,6 +395,21 @@ struct MainTabs: View {
     private func go(_ command: TabCommand) {
         navigation.selection = command.destination
         if command == .search { searchFieldRequests += 1 }
+    }
+
+    /// The Go menu's Back: a page back in the tab showing, when it's past its first.
+    private var back: (() -> Void)? {
+        let path: WritableKeyPath<TabNavigation, NavigationPath>
+        switch navigation.selection {
+        case .home: path = \.home
+        case .movies: path = \.movies
+        case .shows: path = \.shows
+        case .downloads: path = \.downloads
+        case .search: path = \.search
+        case .sounds, .settings: return nil
+        }
+        guard !navigation[keyPath: path].isEmpty else { return nil }
+        return { navigation[keyPath: path].removeLast() }
     }
     #endif
 }

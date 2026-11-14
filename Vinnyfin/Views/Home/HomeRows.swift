@@ -105,6 +105,95 @@ nonisolated enum HomeRows {
         }
     }
 
+    // MARK: Curation
+
+    /// Rows made from one title or one genre with fewer titles than this aren't worth a row.
+    static let minimumMadeRowSize = 4
+    /// How many of a row's first titles tell whether it repeats the rows above it: about what
+    /// shows of it without scrolling.
+    static let repeatWindow = 10
+    /// The share of those that, already in the rows above, makes a row a repeat.
+    static let repeatShare = 0.8
+
+    /// Whether a row shows whatever it holds: what to watch next, what's newest, the favorites
+    /// picked and what was watched. Every other row is picked for Home, and gives way when it
+    /// has too little in it or repeats the rows above it.
+    static func isKept(_ id: HomeRow.ID) -> Bool {
+        [continueWatching.id, recentMovies.id, recentShows.id, favorites.id, recentlyWatched.id].contains(id)
+    }
+
+    /// Whether a row is made from one title or one genre: the titles like one watched or
+    /// favorited, and a genre's best.
+    static func isMadeRow(_ id: HomeRow.ID) -> Bool {
+        ["becauseYouWatched.", "moreLike.", "genre.", "somethingDifferent."].contains { id.hasPrefix($0) }
+    }
+
+    /// Whether the row `id`, loaded with `titles`, gives way, under the rows shown above it with
+    /// `above`: a row made from one title or genre with fewer than `minimumMadeRowSize` titles,
+    /// or any row picked for Home most of whose first titles are already above, as Unwatched
+    /// Favorites with nothing watched is Favorites again, and in a small library New Releases
+    /// and Top Rated are Recently Added again.
+    static func givesWay(_ id: HomeRow.ID, titles: [JellyfinItem], above: [[JellyfinItem]]) -> Bool {
+        guard !isKept(id), !titles.isEmpty else { return false }
+        if isMadeRow(id), titles.count < minimumMadeRowSize { return true }
+        let shown = Set(above.joined().map(\.id))
+        let first = titles.prefix(repeatWindow)
+        let repeated = first.count { shown.contains($0.id) }
+        return Double(repeated) >= repeatShare * Double(first.count)
+    }
+
+    // MARK: Featured titles
+
+    /// How many titles the banner turns through.
+    static let featuredCount = 6
+    /// With fewer new titles than this to feature, the best rated fill in.
+    static let featuredMinimum = 3
+
+    /// The banner's titles, up to `featuredCount`: the newest movies and shows not watched or
+    /// started, in turn, those with a logo before those without, then the best rated of those
+    /// when there are fewer than `featuredMinimum`. None is in Continue Watching, which is right
+    /// under the banner. Only a library with nothing else features what was watched. Each needs
+    /// a backdrop to show.
+    static func featured(movies: [JellyfinItem], shows: [JellyfinItem], topRated: [JellyfinItem] = [],
+                         continueWatching: [JellyfinItem]) -> [JellyfinItem] {
+        let watching = Set(continueWatching.map(\.titleId))
+        let showable = { (item: JellyfinItem) in item.backdropImageTags?.isEmpty == false && !watching.contains(item.titleId) }
+        func fresh(_ items: [JellyfinItem]) -> [JellyfinItem] {
+            let unseen = items.filter { showable($0) && !isStarted($0) }
+            return unseen.filter(hasLogo) + unseen.filter { !hasLogo($0) }
+        }
+        var picked = alternating(fresh(movies), fresh(shows))
+        if picked.count < featuredMinimum { picked += fresh(topRated) }
+        if picked.isEmpty { picked = (movies + shows + topRated).filter(showable) }
+        var seen = Set<String>()
+        return Array(picked.filter { seen.insert($0.id).inserted }.prefix(featuredCount))
+    }
+
+    /// Watched, or partway through: a show any of whose episodes were watched.
+    static func isStarted(_ item: JellyfinItem) -> Bool {
+        if item.isPlayed || item.resumeSeconds != nil { return true }
+        return item.isSeries && (item.userData?.playedPercentage ?? 0) > 0
+    }
+
+    private static func hasLogo(_ item: JellyfinItem) -> Bool {
+        item.imageTags?["Logo"] != nil
+    }
+
+    /// One from each in turn, then the rest of the longer.
+    private static func alternating(_ first: [JellyfinItem], _ second: [JellyfinItem]) -> [JellyfinItem] {
+        var result: [JellyfinItem] = []
+        for index in 0..<max(first.count, second.count) {
+            if index < first.count { result.append(first[index]) }
+            if index < second.count { result.append(second[index]) }
+        }
+        return result
+    }
+
+    /// The best rated movies and shows not yet watched, for the banner when there are too few new.
+    static let topRatedUnwatched = row("topRatedUnwatched", "Top Rated", .items(query(["Movie", "Series"], sortBy: "CommunityRating") {
+        $0.isPlayed = false
+    }))
+
     /// What the rows are made from.
     struct Inputs: Sendable {
         /// Movies and shows watched, newest first, with their genres.

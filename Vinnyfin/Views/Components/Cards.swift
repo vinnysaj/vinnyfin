@@ -1,3 +1,4 @@
+import NukeUI
 import SwiftUI
 
 /// Sizes that differ by how far away the screen is. Card widths are what a card aims for: rows
@@ -295,17 +296,32 @@ struct ProgressBar: View {
 /// A 16:9 card for Continue Watching and Next Up: the episode's still, its show and number.
 /// Leading with the episode, as a search does that found it by its name, the episode's name
 /// comes first, over its show's and its number: "The Night Ferry" over "Port Ellery · S1, E1".
+/// A movie's backdrop, which has no words on it, carries its logo; a card that plays on a tap
+/// has a play symbol on its picture, on Apple TV while it has focus.
 struct LandscapeCard: View {
     let item: JellyfinItem
     var leadsWithEpisode = false
+    /// A tap plays the title, as in Continue Watching, rather than opening its page.
+    var playsOnTap = false
     @State private var artworkHeight: CGFloat = 0
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Artwork(url: session?.landscape(item), aspectRatio: 16.0 / 9.0, placeholder: "play.rectangle")
+                .overlay(alignment: .bottomLeading) {
+                    if let logo = logoURL {
+                        CardLogo(url: logo, raised: item.progress != nil)
+                    }
+                }
                 .overlay { NotYetAvailableOverlay(item: item) }
+                .overlay {
+                    if showsPlaySymbol { PlaySymbol() }
+                }
                 .overlay(alignment: .bottom) {
                     if let progress = item.progress {
                         ProgressBar(fraction: progress).padding(Metrics.overlayInset)
@@ -334,6 +350,22 @@ struct LandscapeCard: View {
         .accessibilityIdentifier("card.\(item.name)")
     }
 
+    private var showsPlaySymbol: Bool {
+        guard playsOnTap, !item.isNotYetAvailable() else { return false }
+        #if os(tvOS)
+        return isFocused
+        #else
+        return true
+        #endif
+    }
+
+    /// A movie's logo, when its card's picture is a backdrop, without the title a thumb carries.
+    private var logoURL: URL? {
+        guard !item.isEpisode, item.imageTags?["Thumb"] == nil, item.parentThumbImageTag == nil,
+              item.backdropImageTags?.isEmpty == false else { return nil }
+        return session?.logo(item, width: CardLogo.requestWidth)
+    }
+
     private var isEpisodeFirst: Bool { leadsWithEpisode && item.isEpisode }
 
     private var title: String { isEpisodeFirst ? item.name : item.titleName }
@@ -353,6 +385,70 @@ struct LandscapeCard: View {
         guard let episode = item.indexNumber else { return nil }
         let end = item.indexNumberEnd.flatMap { $0 > episode ? "–\($0)" : nil } ?? ""
         return "S\(item.parentIndexNumber ?? 0), E\(episode)\(end)"
+    }
+}
+
+/// A title's logo at the foot of a landscape card's picture, over a shade that keeps it apart from
+/// the picture; above the progress bar when the card has one. Nothing shows while it loads, or
+/// when it can't, as the caption under the card names the title anyway.
+private struct CardLogo: View {
+    let url: URL
+    /// Clear of a progress bar.
+    let raised: Bool
+
+    /// Logos for cards are asked for at one width, so each is loaded once.
+    static var requestWidth: Int {
+        #if os(tvOS)
+        600
+        #else
+        480
+        #endif
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomLeading) {
+                LinearGradient(stops: [.init(color: .clear, location: 0.4), .init(color: .black.opacity(0.5), location: 1)],
+                               startPoint: .top, endPoint: .bottom)
+                ServerImage(url: url) { state in
+                    if let image = state.image {
+                        image.resizable().scaledToFit()
+                            .shadow(color: .black.opacity(0.45), radius: 6)
+                    }
+                }
+                .frame(maxWidth: geometry.size.width * 0.5, maxHeight: geometry.size.height * 0.28, alignment: .bottomLeading)
+                .padding(.leading, Metrics.overlayInset * 1.5)
+                .padding(.bottom, Metrics.overlayInset * (raised ? 2.5 : 1.5))
+            }
+        }
+        .clipShape(.rect(cornerRadius: Metrics.cardRadius))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The play symbol on the picture of a card that plays on a tap.
+private struct PlaySymbol: View {
+    var body: some View {
+        Image(systemName: "play.fill")
+            .font(.system(size: size * 0.4, weight: .bold))
+            .foregroundStyle(.white)
+            .offset(x: size * 0.03)
+            .frame(width: size, height: size)
+            .background(.black.opacity(0.3), in: .circle)
+            .background(.ultraThinMaterial, in: .circle)
+            .environment(\.colorScheme, .dark)
+            .shadow(color: .black.opacity(0.25), radius: 6)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private var size: CGFloat {
+        #if os(tvOS)
+        64
+        #else
+        40
+        #endif
     }
 }
 
@@ -465,6 +561,8 @@ struct Shelf<Item: Identifiable, Card: View>: View {
     @State private var position = ScrollPosition()
     /// Bounds the row's default focus, so it's the row's to take when focus comes in.
     @Namespace private var focusScope
+    /// The card to take focus when the system gives it back to the row after a card left it.
+    @State private var focusOnReturn: Focus?
 
     private enum Focus: Hashable {
         case placeholder(Int), item(Item.ID), seeAll
@@ -542,6 +640,14 @@ struct Shelf<Item: Identifiable, Card: View>: View {
             .onChange(of: items == nil) { _, loading in
                 if !loading { focusReplacement() }
             }
+            .onChange(of: items?.map(\.id)) { old, new in
+                focusReplacement(after: old ?? [], in: new ?? [])
+            }
+            .task {
+                for await _ in NotificationCenter.default.notifications(named: UIFocusSystem.didUpdateNotification) {
+                    takeReturningFocus()
+                }
+            }
             #else
             .scrollTargetBehavior(.viewAligned)
             .scrollDisabled(items == nil)
@@ -572,6 +678,34 @@ struct Shelf<Item: Identifiable, Card: View>: View {
         } else {
             focus = seeAll == nil ? nil : .seeAll
         }
+    }
+
+    /// Moves focus from a card that left the row, as one taken out of Continue Watching does, to
+    /// the card that took its place; and when focus is elsewhere, comes back into the row there.
+    ///
+    /// A card taken out from its own menu leaves while focus is on the menu. As the menu closes,
+    /// the system gives focus back to the card, which is gone, so it's on nothing on screen and
+    /// shows nowhere; the card that took its place takes it then instead.
+    private func focusReplacement(after old: [Item.ID], in new: [Item.ID]) {
+        guard case .item(let id) = memory.focus as? Focus, !new.contains(id),
+              let index = old.firstIndex(of: id) else { return }
+        let replacement: Focus? = new.isEmpty ? nil : .item(new[min(index, new.count - 1)])
+        memory.focus = replacement
+        if focus == .item(id) {
+            focus = replacement
+        } else if focus == nil {
+            focusOnReturn = replacement
+        }
+    }
+
+    /// Gives `focusOnReturn` focus that lands on nothing on screen at the first move of focus
+    /// after a card left; focus that goes somewhere stays there.
+    private func takeReturningFocus() {
+        guard let returning = focusOnReturn else { return }
+        focusOnReturn = nil
+        guard focus == nil, RowPageLayout.focusedFrame() == nil else { return }
+        // Asked for while the system is still moving focus, the move is dropped.
+        Task { focus = returning }
     }
     #endif
 

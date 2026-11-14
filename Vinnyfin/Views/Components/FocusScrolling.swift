@@ -31,6 +31,15 @@ struct CardRowScrollBehavior: ScrollTargetBehavior {
     }
 }
 
+/// Keeps a scroll view that scrolls up and down from moving sideways. Apple TV's focus engine
+/// and a scroll to a card both shift it sideways, toward a card near the screen's edge, even
+/// though nothing is off to the side, and the whole grid then sits off center until focus moves.
+nonisolated struct VerticalScrollBehavior: ScrollTargetBehavior {
+    func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
+        target.rect.origin.x = 0
+    }
+}
+
 /// Where a row of a page of rows sits while it has focus on Apple TV.
 nonisolated enum RowHold: Equatable {
     /// Its top a set distance down from the page's: the rows.

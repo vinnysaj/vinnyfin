@@ -88,6 +88,15 @@ struct LibraryIndexTests {
         #expect(LibraryIndex.boundary(for: "#") == nil)
         #expect(LibraryIndex.boundary(for: "?") == nil)
     }
+
+    @Test func aPositionIsInItsSectionsLetter() {
+        let index = Self.index(leading: 3, ["A": 5, "C": 2])
+        #expect(index.letter(at: 0) == "#")
+        #expect(index.letter(at: 3) == "A")
+        #expect(index.letter(at: 7) == "A")
+        #expect(index.letter(at: 8) == "C")
+        #expect(index.letter(at: 10) == nil)
+    }
 }
 
 struct CardRowScrollTests {

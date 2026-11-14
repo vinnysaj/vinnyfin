@@ -365,6 +365,10 @@ struct PlayerControls: View {
             .overlay { transport.controlSize(controlSize) }
             #endif
         }
+        #if os(tvOS)
+        // Focus stays in an open panel: nothing here can take it until the panel closes.
+        .disabled(panel != nil)
+        #endif
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { bottomBarTop = $0 }
     }
 
@@ -404,22 +408,34 @@ struct PlayerControls: View {
             .disabled(model.audioOptions.isEmpty)
         panelButton(.subtitles, identifier: "player.subtitles", filled: model.selectedSubtitle != nil,
                     value: model.subtitleOptions.first { $0.id == model.selectedSubtitle }?.title ?? "Off")
-        panelButton(.speed, identifier: "player.speed", value: model.rate == 1 ? "Normal" : "\(model.rate.formatted())×")
+        // Away from 1×, the button reads the speed in place of its symbol.
+        panelButton(.speed, identifier: "player.speed", text: model.rate == 1 ? nil : PlaybackSpeed.label(model.rate),
+                    value: PlaybackSpeed.name(model.rate))
         if !model.chapters.isEmpty {
             panelButton(.chapters, identifier: "player.chapters",
                         value: ChapterMark.current(in: model.chapters, at: model.clock.time)?.name)
         }
     }
 
-    /// `value` is what's chosen, which VoiceOver says after the button's name.
-    private func panelButton(_ kind: PlayerPanel, identifier: String, filled: Bool = false, value: String?) -> some View {
+    /// `value` is what's chosen, which VoiceOver says after the button's name. With `text` the
+    /// button shows it in a capsule instead of the panel's symbol.
+    private func panelButton(_ kind: PlayerPanel, identifier: String, filled: Bool = false, text: String? = nil,
+                             value: String?) -> some View {
         Button {
             panel = panel == kind ? nil : kind
             onInteraction()
         } label: {
-            symbol(filled ? kind.symbol + ".fill" : kind.symbol)
+            if let text {
+                Text(text)
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+                    .frame(minWidth: Self.symbolSide, minHeight: Self.symbolSide)
+            } else {
+                symbol(filled ? kind.symbol + ".fill" : kind.symbol)
+            }
         }
         .buttonStyle(.platformGlass)
+        .buttonBorderShape(text == nil ? .circle : .capsule)
         .accessibilityLabel(kind.title)
         .accessibilityValue(value ?? "")
         .accessibilityShowsLargeContentViewer()
@@ -430,7 +446,8 @@ struct PlayerControls: View {
     }
 }
 
-/// What's on screen when it's worth saying: 3D, Dolby Vision, HDR, or that the server is transcoding.
+/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision, HDR, or
+/// that the server is transcoding.
 private struct FormatBadge: View {
     let model: PlayerModel
     #if os(visionOS)
@@ -451,6 +468,7 @@ private struct FormatBadge: View {
 
     private var text: String? {
         var parts: [String] = []
+        if model.rate != 1 { parts.append(PlaybackSpeed.label(model.rate)) }
         #if os(visionOS)
         if coordinator.pictureIsStereo { parts.append("3D") }
         #endif

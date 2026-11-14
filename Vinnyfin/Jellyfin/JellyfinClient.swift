@@ -1,7 +1,11 @@
 import Foundation
+import OSLog
 
 nonisolated enum JellyfinError: LocalizedError {
     case notJellyfin(URL)
+    /// The server answered with a status outside 200–299. `body` is the start of what it sent,
+    /// which goes to the log as it is but is never shown as it is: a proxy in front of the server
+    /// answers with a web page, and the server itself with a JSON problem report.
     case http(status: Int, body: String)
     case invalidCredentials
     case quickConnectDisabled
@@ -11,14 +15,98 @@ nonisolated enum JellyfinError: LocalizedError {
         case .notJellyfin(let url):
             "No Jellyfin server answered at \(url.absoluteString)."
         case .http(let status, let body):
-            body.isEmpty
-                ? "The server answered with HTTP \(status)."
-                : "The server answered with HTTP \(status): \(body)"
+            Self.message(status: status, body: body)
         case .invalidCredentials:
             "Wrong username or password."
         case .quickConnectDisabled:
             "Quick Connect is turned off on this server. An administrator can turn it on in the dashboard."
         }
+    }
+
+    /// An error answer in words for the screen: what its kind of status means, with the status for
+    /// anyone looking into it, then the server's own explanation when it gave one worth reading,
+    /// then what might help.
+    /// "The server ran into a problem (HTTP 500). It said: “The database is locked.” If it keeps
+    /// happening, the server's log says why."
+    static func message(status: Int, body: String) -> String {
+        let (meaning, advice) = meaning(of: status)
+        var sentences = ["\(meaning) (HTTP \(status))."]
+        if let explanation = serverExplanation(in: body, status: status) {
+            sentences.append("It said: “\(explanation)”")
+        }
+        if let advice { sentences.append(advice) }
+        return sentences.joined(separator: " ")
+    }
+
+    /// What a status means to someone using the app, and what might help. 401, 403 and 404 mean
+    /// here what the app takes them for elsewhere: a sign-in the server no longer accepts, an
+    /// account not allowed something, a title gone from the library.
+    private static func meaning(of status: Int) -> (String, advice: String?) {
+        switch status {
+        case 401:
+            ("The server no longer accepts this sign-in", "Sign in again to carry on.")
+        case 403:
+            ("This account isn't allowed to do that on the server", "An administrator can allow it in Jellyfin's dashboard.")
+        case 404:
+            ("The server couldn't find it", "It may have been removed from the library.")
+        case 408:
+            ("The server gave up waiting for the request", nil)
+        case 429:
+            ("The server is getting too many requests", "Wait a moment, then try again.")
+        case 400..<500:
+            ("The server turned the request down", nil)
+        // A proxy in front of the server answers for it while it's down or restarting, and the
+        // server answers 503 itself while it starts up.
+        case 502, 503, 504:
+            ("The server can't be reached right now", "It may be restarting or still starting up.")
+        case 500..<600:
+            ("The server ran into a problem", "If it keeps happening, the server's log says why.")
+        default:
+            ("The server gave an answer vinnyfin didn't expect", nil)
+        }
+    }
+
+    /// The server's own explanation in an error answer, when it reads as one: from a JSON problem
+    /// report, its `detail`, or else its `title` unless that only names the status; a JSON string;
+    /// or a short line of plain text. Never markup, nor the stock words that say no more than the
+    /// status does.
+    static func serverExplanation(in body: String, status: Int) -> String? {
+        let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.range(of: "<[A-Za-z!/?]", options: .regularExpression) == nil else { return nil }
+        let explanation: String?
+        switch text.first {
+        case "{":
+            let report = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
+            let detail = (report?["detail"] as? String).flatMap(readable)
+            let title = (report?["title"] as? String).flatMap(readable).flatMap { isStock($0, for: status) ? nil : $0 }
+            explanation = detail ?? title
+        case "\"":
+            explanation = ((try? JSONSerialization.jsonObject(with: Data(text.utf8), options: .fragmentsAllowed)) as? String).flatMap(readable)
+        case "[":
+            explanation = nil
+        default:
+            explanation = text.contains(where: \.isNewline) || text.count > 200 ? nil : readable(text)
+        }
+        guard let explanation, !isStock(explanation, for: status) else { return nil }
+        // Quoted as a sentence of its own.
+        return explanation.last.map { ".!?…".contains($0) } == true ? explanation : explanation + "."
+    }
+
+    /// Text on one line, cut short past 200 characters; nil when there's none.
+    private static func readable(_ text: String) -> String? {
+        let line = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !line.isEmpty else { return nil }
+        return line.count > 200 ? String(line.prefix(199)) + "…" : line
+    }
+
+    /// Words a server or a proxy sends with any error of the kind: the status's own name, as a
+    /// problem report's title is by default, and the stand-ins Jellyfin and ASP.NET give in place
+    /// of an exception's message.
+    private static func isStock(_ text: String, for status: Int) -> Bool {
+        let words = text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+        return words == HTTPURLResponse.localizedString(forStatusCode: status).lowercased()
+            || words == "error processing request"
+            || words == "an error occurred while processing your request"
     }
 }
 
@@ -34,6 +122,7 @@ nonisolated extension Error {
 /// instead, so a background transfer or the player needs nothing but the URL.
 nonisolated struct JellyfinClient: Sendable {
     static let clientName = "vinnyfin"
+    private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "server")
 
     /// The app's name to the server, with the platform's, as Jellyfin's own apps give theirs:
     /// "vinnyfin tvOS". Other devices tell vinnyfin on Apple TV apart by it.
@@ -62,10 +151,14 @@ nonisolated struct JellyfinClient: Sendable {
 
     // MARK: Server and sign-in
 
+    /// Something other than Jellyfin at the address (a web page, or nothing at the path) is
+    /// `notJellyfin`, rather than a title gone missing, as a 404 elsewhere means.
     func publicSystemInfo() async throws -> PublicSystemInfo {
         do {
             return try await get("System/Info/Public")
         } catch is DecodingError {
+            throw JellyfinError.notJellyfin(serverURL)
+        } catch JellyfinError.http(let status, _) where status == 404 {
             throw JellyfinError.notJellyfin(serverURL)
         }
     }
@@ -587,12 +680,19 @@ nonisolated struct JellyfinClient: Sendable {
         return try JSONDecoder().decode(Response.self, from: body)
     }
 
+    /// An error answer goes to the log with what the server sent, which the error's description
+    /// leaves out.
     private func data(for request: URLRequest) async throws -> Data {
         let (body, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         guard (200..<300).contains(http.statusCode) else {
-            let text = String(data: body.prefix(300), encoding: .utf8) ?? ""
-            throw JellyfinError.http(status: http.statusCode, body: text.trimmingCharacters(in: .whitespacesAndNewlines))
+            // Enough for a problem report to parse whole.
+            let text = String(decoding: body.prefix(4096), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            Self.log.error("""
+                \(request.httpMethod ?? "GET", privacy: .public) \(request.url?.path() ?? "", privacy: .public) \
+                answered with HTTP \(http.statusCode): \(text, privacy: .public)
+                """)
+            throw JellyfinError.http(status: http.statusCode, body: text)
         }
         return body
     }

@@ -81,7 +81,7 @@ final class WatchHistory {
                 entries[key]?.needsSync = false
             } catch JellyfinError.http(let status, let body) where (400..<500).contains(status) && status != 401 && status != 408 && status != 429 {
                 entries[key]?.needsSync = false
-                refused.append(body.isEmpty ? "HTTP \(status)" : body)
+                refused.append(JellyfinError.message(status: status, body: body))
             } catch {
                 // Offline or the server is down; the next sync tries again.
                 continue

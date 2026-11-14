@@ -10,10 +10,20 @@ nonisolated struct TrickplayTiles: Equatable, Sendable {
 
     /// The width the player shows previews at, in pixels: the smallest the server made at least
     /// this wide, else its widest. Downloads keep this width.
-    static let preferredWidth = 320
+    #if os(tvOS)
+    static let preferredWidth = preferredWidth(onTV: true)
+    #else
+    static let preferredWidth = preferredWidth(onTV: false)
+    #endif
 
-    static func width(among available: some Collection<Int>) -> Int? {
-        available.filter { $0 >= preferredWidth }.min() ?? available.max()
+    /// Apple TV draws previews about 320 points wide, 640 pixels on a 4K TV; the other devices
+    /// draw them 160 points wide, 320 pixels on a 2× screen.
+    static func preferredWidth(onTV: Bool) -> Int {
+        onTV ? 640 : 320
+    }
+
+    static func width(among available: some Collection<Int>, atLeast wanted: Int = preferredWidth) -> Int? {
+        available.filter { $0 >= wanted }.min() ?? available.max()
     }
 
     /// The width of the version's previews the player uses, and its layout. Nil when the server

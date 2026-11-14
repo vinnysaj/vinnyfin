@@ -159,3 +159,18 @@ struct ScrubbingTests {
         #expect(scrubbing.finish() == 0)
     }
 }
+
+struct TrickplayWidthTests {
+    @Test func appleTVPrefersPreviewsSharpOnA4KTV() {
+        let tv = TrickplayTiles.preferredWidth(onTV: true)
+        #expect(TrickplayTiles.width(among: [320, 640, 1280], atLeast: tv) == 640)
+        #expect(TrickplayTiles.width(among: [320, 960], atLeast: tv) == 960)
+        // Without any that wide, the widest there is.
+        #expect(TrickplayTiles.width(among: [240, 320], atLeast: tv) == 320)
+    }
+
+    @Test func otherDevicesKeepTheNarrowerPreviews() {
+        let phone = TrickplayTiles.preferredWidth(onTV: false)
+        #expect(TrickplayTiles.width(among: [320, 640, 1280], atLeast: phone) == 320)
+    }
+}

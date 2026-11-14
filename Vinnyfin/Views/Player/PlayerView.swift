@@ -816,6 +816,10 @@ struct PlayerView: View {
                 actionView(upNext: upNext, skip: skip,
                            form: PlayerLayout.upNextForm(controlsVisible: clearsControls, isShort: controlsAreShort),
                            width: geometry.size.width)
+                    #if os(tvOS)
+                    // Focus stays in an open panel, as the controls' bottom bar leaves it there.
+                    .disabled(panel != nil)
+                    #endif
                     .padding(.horizontal, Metrics.playerInset)
                     .padding(.bottom, bottom)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)

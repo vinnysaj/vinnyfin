@@ -40,7 +40,7 @@ struct ItemDetailView: View {
     #endif
     @State private var detail: JellyfinItem?
     @State private var similar: [JellyfinItem] = []
-    @State private var loadError: String?
+    @State private var loadError: LoadFailure?
     /// A version the user picked, for plays and downloads from this page; nil lets them choose by
     /// quality. It isn't kept: every other playback starts with the version the quality allows.
     @State private var pickedSourceId: String?
@@ -72,8 +72,7 @@ struct ItemDetailView: View {
                 }
                 VStack(alignment: .leading, spacing: 28) {
                     if let loadError {
-                        Label(loadError, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(.orange)
+                        LoadFailureNotice(loadError) { Task { await load() } }
                             .padding(.horizontal, Metrics.edge)
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
@@ -175,7 +174,7 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation else { return }
             similar = []
-            loadError = loadError ?? "Couldn't load titles like this one: \(error.localizedDescription)"
+            loadError = loadError ?? LoadFailure("Couldn't Load Titles Like This", error: error)
         }
     }
 
@@ -186,7 +185,7 @@ struct ItemDetailView: View {
             loadError = nil
         } catch {
             guard !error.isCancellation else { return }
-            loadError = "Couldn't load the details: \(error.localizedDescription)"
+            loadError = LoadFailure("Couldn't Load the Details", error: error)
         }
     }
 }

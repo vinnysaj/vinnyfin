@@ -156,12 +156,8 @@ struct LibraryGridView: View {
 
     @ViewBuilder private var status: some View {
         if let items, items.count == nil, let problem = items.problem {
-            ContentUnavailableView {
-                Label("Couldn't Load \(list.title)", systemImage: "wifi.exclamationmark")
-            } description: {
-                Text(problem)
-            } actions: {
-                Button("Try Again") { Task { await load(startingOver: true) } }
+            LoadFailureView(LoadFailure("Couldn't Load \(list.title)", message: problem)) {
+                Task { await load(startingOver: true) }
             }
         } else if items?.count == nil {
             ProgressView()
@@ -272,7 +268,7 @@ struct LibraryGridView: View {
                     Text(list.title).font(.title2.bold())
                 }
                 Spacer()
-                if query != nil { sortAndFilter }
+                if query != nil { sortAndFilter.buttonStyle(.platformGlass) }
             }
         }
     }

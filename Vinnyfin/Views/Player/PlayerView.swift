@@ -41,6 +41,8 @@ struct PlayerView: View {
     @State private var topBarBottom: CGFloat?
     #if os(tvOS)
     @FocusState private var focus: PlayerFocus?
+    /// Try Again over a playback that failed, which takes focus from the controls as it appears.
+    @FocusState private var retryFocused: Bool
     /// The controls show just the timeline, as the remote moves it while they were hidden.
     @State private var controlsCompact = false
     @State private var touchSurface = TouchSurface()
@@ -249,8 +251,15 @@ struct PlayerView: View {
                 onClose()
             }
         }
-        // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline.
-        .onChange(of: controlsVisible) { _, visible in focus = visible ? .timeline : .picture }
+        // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline,
+        // or after a failure on Try Again.
+        .onChange(of: controlsVisible) { _, visible in
+            if visible, case .failed = model.status {
+                retryFocused = true
+            } else {
+                focus = visible ? .timeline : .picture
+            }
+        }
         // Skips and scans from elsewhere, as Siri's or a TV remote's, show on the timeline too.
         .onChange(of: model.scrubbing.skipRun?.id) { _, run in
             if run != nil { revealTimeline() }
@@ -293,7 +302,12 @@ struct PlayerView: View {
             case .preparing, .paused, .ended, .failed: showControls(autoHide: false)
             case .loading, .buffering: break
             }
-            if case .failed(let message) = status { announce("Couldn't play this. \(message)") }
+            if case .failed(let message) = status {
+                announce("Couldn't play this. \(message)")
+                #if os(tvOS)
+                retryFocused = true
+                #endif
+            }
             #if os(iOS) || os(macOS)
             pictureInPicture.attach(to: model.engine)
             #endif
@@ -572,14 +586,12 @@ struct PlayerView: View {
                 Text("Couldn't Play This").font(.title3.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
                 Text(message).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 520)
-                AdaptiveStack(alignment: .center) {
-                    Button("Try Again") { Task { await model.retry() } }
-                    if model.item != nil, !model.isTranscoding {
-                        Button("Play Through the Server") { Task { await model.retryTranscoded() } }
-                    }
-                    Button("Close", action: onClose)
-                }
-                .buttonStyle(.platformGlass)
+                #if os(tvOS)
+                LoadFailureActions(alignment: .center, isProminent: true, retryFocus: $retryFocused, retry: retry) { failureActions }
+                    .focusSection()
+                #else
+                LoadFailureActions(alignment: .center, isProminent: true, retry: retry) { failureActions }
+                #endif
             }
             .padding(30)
             .platformGlass(in: .rect(cornerRadius: 28))
@@ -587,6 +599,18 @@ struct PlayerView: View {
         default:
             EmptyView()
         }
+    }
+
+    private func retry() {
+        Task { await model.retry() }
+    }
+
+    /// The ways on from a failure besides Try Again.
+    @ViewBuilder private var failureActions: some View {
+        if model.item != nil, !model.isTranscoding {
+            Button("Play Through the Server") { Task { await model.retryTranscoded() } }
+        }
+        Button("Close", action: onClose)
     }
 
     @ViewBuilder private var extras: some View {

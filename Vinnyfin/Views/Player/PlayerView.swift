@@ -57,6 +57,9 @@ struct PlayerView: View {
     @State private var soundOnlyReceiver: String?
     @State private var soundOnlyTask: Task<Void, Never>?
     #endif
+    #if os(macOS)
+    @State private var pointerIsOver = false
+    #endif
     #if os(tvOS)
     @FocusState private var focus: PlayerFocus?
     /// Try Again over a playback that failed, which takes focus from the controls as it appears.
@@ -282,8 +285,16 @@ struct PlayerView: View {
         #endif
         #if os(macOS)
         .onContinuousHover { phase in
-            if case .active = phase { showControls() }
+            switch phase {
+            case .active:
+                pointerIsOver = true
+                showControls()
+            case .ended:
+                pointerIsOver = false
+            }
         }
+        // The window's close, minimize and zoom buttons go with the controls, off the picture.
+        .background(WindowButtons(areHidden: !controlsVisible))
         #endif
         #if os(tvOS)
         .background {
@@ -914,6 +925,9 @@ struct PlayerView: View {
         controlsCompact = false
         #endif
         controlsVisible = true
+        #if os(macOS)
+        NSCursor.setHiddenUntilMouseMoves(false)
+        #endif
         if autoHide { scheduleHide() } else { hideTask?.cancel() }
     }
 
@@ -922,6 +936,11 @@ struct PlayerView: View {
         guard model.isPlaying, !model.scrubbing.isActive, panel == nil, fold == nil else { return }
         controlsVisible = false
         holdsControls = false
+        #if os(macOS)
+        // The pointer goes with them, until it moves: over the picture only, and only with the
+        // app in front, as it would vanish over another app's window too.
+        if pointerIsOver, NSApp.isActive { NSCursor.setHiddenUntilMouseMoves(true) }
+        #endif
     }
 
     /// Hides the controls in a few seconds, unless they're held or VoiceOver or Switch Control is
@@ -941,6 +960,40 @@ extension EnvironmentValues {
     /// makes them; the player shows them on each.
     @Entry var playerControlsRequests = 0
 }
+
+#if os(macOS)
+/// Fades the player window's close, minimize and zoom buttons out and back in. The window's
+/// title bar is hidden, so they sit on the picture.
+private struct WindowButtons: NSViewRepresentable {
+    let areHidden: Bool
+
+    func makeNSView(context: Context) -> ButtonsView { ButtonsView() }
+
+    func updateNSView(_ view: ButtonsView, context: Context) {
+        view.areHidden = areHidden
+    }
+
+    final class ButtonsView: NSView {
+        var areHidden = false {
+            didSet { if areHidden != oldValue { apply(animated: true) } }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            apply(animated: false)
+        }
+
+        private func apply(animated: Bool) {
+            guard let window else { return }
+            let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap(window.standardWindowButton)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = animated ? 0.25 : 0
+                for button in buttons { button.animator().alphaValue = areHidden ? 0 : 1 }
+            }
+        }
+    }
+}
+#endif
 
 #if os(tvOS)
 /// The skip button or the up-next card's Play Now while a click on the picture takes it, with the

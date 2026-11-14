@@ -125,29 +125,106 @@ nonisolated enum UpNext {
         }
     }
 
-    /// Movies partway through and the shows being watched, the one played last first. A show
-    /// only the server's next episodes know of was played before any the history reaches, and
-    /// follows, in the server's order.
-    static func titles(movies: [JellyfinItem], shows: [Show]) -> [Title] {
-        let all = movies.map(Title.movie) + shows.map(Title.show)
+    /// Movies partway through and the shows being watched, the one played last first, leaving out
+    /// the shows taken out of the list here (`HiddenShows`) that nothing has been played of since.
+    /// A show only the server's next episodes know of was played before any the history reaches,
+    /// and follows, in the server's order.
+    static func titles(movies: [JellyfinItem], shows: [Show], hidden: [String: Date] = [:]) -> [Title] {
+        let all = movies.map(Title.movie) + shows.filter { !isHidden($0, marks: hidden) }.map(Title.show)
         let dated = all.enumerated().filter { $0.element.lastPlayed != nil }.sorted { left, right in
             let leftDate = left.element.lastPlayed ?? .distantPast, rightDate = right.element.lastPlayed ?? .distantPast
             return leftDate != rightDate ? leftDate > rightDate : left.offset < right.offset
         }
         return dated.map(\.element) + all.filter { $0.lastPlayed == nil }
     }
+
+    /// One title in the list: what to play, and when anything of the movie or show was last
+    /// played, which taking it out of the list goes by.
+    struct Entry: Equatable, Sendable {
+        let item: JellyfinItem
+        let lastPlayed: Date?
+    }
+
+    /// Whether a show taken out of the list stays out: nothing of it played since it was, when
+    /// `marks` has when it was last played then.
+    static func isHidden(_ show: Show, marks: [String: Date]) -> Bool {
+        guard let mark = marks[show.seriesId] else { return false }
+        return (show.lastPlayed ?? .distantPast) <= mark
+    }
+
+    /// The shows in `marks` played since they were taken out, which are back in the list.
+    static func returned(_ shows: [Show], marks: [String: Date]) -> [String] {
+        shows.filter { marks[$0.seriesId] != nil && !isHidden($0, marks: marks) }.map(\.seriesId)
+    }
+
+    /// Shows taken out of the list on this device, each kept out until something of it is played
+    /// again: by show, when anything of it was last played as it was taken out. The server has no
+    /// way to leave a show out of its lists, and a show's next episode, worked out afresh from its
+    /// history each time, would otherwise come straight back. They're kept where the app's
+    /// extensions read them, so the Top Shelf and the widgets leave them out too.
+    struct HiddenShows {
+        /// The most shows kept out at once; past it, those taken out first come back.
+        static let limit = 200
+
+        let userId: String
+        let defaults: UserDefaults
+
+        init(userId: String, defaults: UserDefaults = AccountStore.savedDefaults) {
+            self.userId = userId
+            self.defaults = defaults
+        }
+
+        private var key: String { "upNext.hiddenShows.\(userId)" }
+
+        /// When anything of each show kept out was last played as it was taken out.
+        var marks: [String: Date] {
+            guard let saved = defaults.dictionary(forKey: key) as? [String: Double] else { return [:] }
+            return saved.mapValues { Date(timeIntervalSinceReferenceDate: $0) }
+        }
+
+        /// Keeps the show out until something of it is played after `lastPlayed`, or for a show
+        /// never played, at all.
+        func hide(seriesId: String, lastPlayed: Date?) {
+            var saved = defaults.dictionary(forKey: key) as? [String: Double] ?? [:]
+            saved[seriesId] = (lastPlayed ?? .distantPast).timeIntervalSinceReferenceDate
+            if saved.count > Self.limit {
+                for (id, _) in saved.sorted(by: { $0.value < $1.value }).prefix(saved.count - Self.limit) { saved[id] = nil }
+            }
+            defaults.set(saved, forKey: key)
+        }
+
+        /// Lets the shows back into the list.
+        func letBack(_ seriesIds: [String]) {
+            guard var saved = defaults.dictionary(forKey: key) as? [String: Double],
+                  seriesIds.contains(where: { saved[$0] != nil }) else { return }
+            for id in seriesIds { saved[id] = nil }
+            defaults.set(saved, forKey: key)
+        }
+    }
 }
 
 extension JellyfinClient {
     /// What to watch next, up to `limit` titles (see `UpNext`).
     func upNext(userId: String, limit: Int) async throws -> ItemsPage {
+        let items = try await upNextEntries(userId: userId, limit: limit).map(\.item)
+        return ItemsPage(items: items, totalRecordCount: items.count)
+    }
+
+    /// What to watch next, up to `limit` titles, each with when anything of it was last played
+    /// (see `UpNext`). Shows taken out of the list on this device stay out (`UpNext.HiddenShows`),
+    /// and those played since are let back in.
+    func upNextEntries(userId: String, limit: Int,
+                       hidden: UpNext.HiddenShows? = nil) async throws -> [UpNext.Entry] {
+        let hidden = hidden ?? UpNext.HiddenShows(userId: userId)
         let wanted = min(limit, UpNext.longestList)
         async let resume = resumeItems(userId: userId, limit: UpNext.longestList)
         async let finished = finishedEpisodes(userId: userId, limit: UpNext.historyLength)
         async let serverNext = nextUp(userId: userId, resumable: false, limit: UpNext.longestList)
         let inProgress = try await resume.items
         let shows = try await UpNext.shows(inProgress: inProgress, finished: finished, serverNext: serverNext.items)
-        let titles = UpNext.titles(movies: inProgress.filter { !$0.isEpisode }, shows: shows)
+        let marks = hidden.marks
+        hidden.letBack(UpNext.returned(shows, marks: marks))
+        let titles = UpNext.titles(movies: inProgress.filter { !$0.isEpisode }, shows: shows, hidden: marks)
         let now = Date.now
         // A caught-up show drops out of the list, so a few more than wanted are settled.
         let considered = Array(titles.prefix(wanted + wanted / 2 + 4))
@@ -164,8 +241,10 @@ extension JellyfinClient {
             for try await (position, item) in group { settled[position] = item }
             return settled
         }
-        let items = considered.indices.compactMap { settled[$0] }.prefix(wanted)
-        return ItemsPage(items: Array(items), totalRecordCount: items.count)
+        let entries = considered.indices.compactMap { position in
+            settled[position].map { UpNext.Entry(item: $0, lastPlayed: considered[position].lastPlayed) }
+        }
+        return Array(entries.prefix(wanted))
     }
 
     /// A show's next episode to watch, or nil when there's none: caught up, or, for a show

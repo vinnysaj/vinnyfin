@@ -113,8 +113,13 @@ final class ScreenshotTests: XCTestCase {
     @MainActor
     func testTV() async throws {
         let app = try launch()
-        // From the sidebar, where focus starts, to the hero's button for its film, partway through.
-        focus(app.descendants(matching: .any)["home.hero"].buttons["Resume"], in: app, moving: [.right, .up, .left])
+        let film = app.buttons["card.The Quiet Meridian"]
+        XCTAssertTrue(film.waitForExistence(timeout: uiTimeout), "Continue Watching never loaded")
+        // From the sidebar, where focus starts, into the banner, down to Continue Watching, and
+        // along it to the film partway through, whose card resumes it.
+        XCUIRemote.shared.press(.right)
+        XCUIRemote.shared.press(.down)
+        focus(film, in: app, moving: [.right, .left])
         try await snapHome(app)
         XCUIRemote.shared.press(.select)
         let timeline = app.descendants(matching: .any)["player.timeline"]

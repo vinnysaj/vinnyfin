@@ -426,6 +426,22 @@ struct KeyboardCommandTests {
         #expect(PlayerCommand.keys.count == PlayerCommand.allCases.count)
     }
 
+    @Test func theArrowsUpAndDownSetTheVolumeAndLettersMuteAndCaption() {
+        #expect(PlayerCommand.pressed(.upArrow, modifiers: []) == .volumeUp)
+        #expect(PlayerCommand.pressed(.downArrow, modifiers: []) == .volumeDown)
+        #expect(PlayerCommand.pressed("m", modifiers: []) == .mute)
+        #expect(PlayerCommand.pressed("c", modifiers: []) == .subtitles)
+        #expect(PlayerCommand.pressed("f", modifiers: []) == .fullScreen)
+        // ⌘M minimizes and ⌘C copies, as everywhere.
+        #expect(PlayerCommand.pressed("m", modifiers: .command) == nil)
+        #expect(PlayerCommand.pressed("c", modifiers: .command) == nil)
+    }
+
+    @Test func backIsCommandLeftBracket() {
+        #expect(TabCommandTarget.backShortcut == KeyboardShortcut("[", modifiers: .command))
+        #expect(PlayerCommand.pressed("[", modifiers: .command) == nil)
+    }
+
     @Test func theTabsTakeCommandAndTheirPlace() {
         #expect(TabCommand.allCases.map(\.destination) == [.home, .movies, .shows, .downloads, .search])
         #expect(TabCommand.allCases.map(\.shortcut.key.character) == ["1", "2", "3", "4", "f"])
@@ -434,6 +450,7 @@ struct KeyboardCommandTests {
 
     @Test func noTwoCommandsShareAKey() {
         let shortcuts = PlayerCommand.allCases.map(\.shortcut) + TabCommand.allCases.map(\.shortcut)
+            + [TabCommandTarget.backShortcut]
         #expect(Set(shortcuts.map { "\($0.key.character)-\($0.modifiers.rawValue)" }).count == shortcuts.count)
     }
 }

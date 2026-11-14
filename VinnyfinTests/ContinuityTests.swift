@@ -159,7 +159,7 @@ struct HandoffTests {
 
 struct SettingsSyncTests {
     @Test func settingsThatSuitOneDeviceStayOnIt() {
-        for key in ["settings.streamingQuality", "settings.learnedQuality", "settings.smartDownloadCount", "settings.downloadStorageLimit",
+        for key in ["settings.streamingQuality", "settings.cellularStreamingQuality", "settings.learnedQuality", "settings.downloadStorageLimit",
                     "settings.downloadOverCellular", "settings.downloadOnlyWhileCharging", "settings.matchContent"] {
             #expect(!AppSettings.syncs(key), "\(key)")
         }
@@ -196,7 +196,7 @@ struct SettingsSyncTests {
         settings.appearance = .dark
         settings.subtitleMode = .always
         settings.streamingQuality = .fullHD
-        settings.smartDownloadCount = 3
+        settings.cellularStreamingQuality = .sd
         settings.downloadStorageLimit = 50
         settings.downloadQuality = .hd
         #expect(cloud.writes == ["settings.appearance", "settings.subtitleMode", "settings.downloadQuality"])

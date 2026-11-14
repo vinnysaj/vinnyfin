@@ -275,9 +275,12 @@ final class ScreenshotTests: XCTestCase {
     private func chooseDownloads(_ quality: String, transcoded: Bool, in app: XCUIApplication) {
         tap(tab("Home", in: app))
         tap(app.buttons["home.settings"])
+        tap(scrolledTo(app.buttons["settings.downloads"], in: app))
         tap(scrolledTo(app.buttons["settings.downloadQuality"], in: app))
         tap(app.buttons[quality])
         turn(scrolledTo(app.switches["settings.transcodeDownloads"], in: app), on: transcoded)
+        // Back to Settings' first page, which has Done: the bar's first button is Back.
+        tap(app.navigationBars.buttons.element(boundBy: 0))
         // On iPhone Duo's outer display the bar scrolls away with the form, and back as it scrolls up.
         let done = app.navigationBars.buttons["Done"]
         for _ in 0..<8 where !done.exists { app.swipeDown() }

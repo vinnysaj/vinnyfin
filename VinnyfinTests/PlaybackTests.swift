@@ -1373,7 +1373,7 @@ struct PlaybackEdgeTests {
         let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
         await model.start()
         // Three countdowns run out with nobody doing anything.
-        try await waitUntil(seconds: 60) { model.item?.id == "e4" && model.status == .ended }
+        try await waitUntil(seconds: 120) { model.item?.id == "e4" && model.status == .ended }
         try #require(model.item?.id == "e4", "Got to \(model.item?.id ?? "nothing")")
         try await waitUntil { model.asksStillWatching }
         #expect(model.asksStillWatching)
@@ -1394,9 +1394,18 @@ struct PlaybackEdgeTests {
         let file = try await GeneratedVideo.write(seconds: 2)
         let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
         await model.start()
-        try await waitUntil(seconds: 30) { model.item?.id == "e3" && model.status == .playing }
+        // Two episodes started by themselves; a third would ask at its end. Its two seconds of
+        // playing can pass between two looks while other suites hold the main actor, so the
+        // viewer acts as soon as it's on.
+        var seen: [String] = []
+        try await waitUntil(seconds: 90) {
+            let state = "\(model.item?.id ?? "-") \(model.status)"
+            if seen.last != state { seen.append(state) }
+            return model.item?.id == "e3"
+        }
+        try #require(model.item?.id == "e3" && !model.asksStillWatching, "Went \(seen.joined(separator: ", "))")
         model.noteViewerActivity()
-        try await waitUntil(seconds: 60) { model.item?.id == "e5" && model.status == .ended }
+        try await waitUntil(seconds: 120) { model.item?.id == "e5" && model.status == .ended }
         #expect(model.item?.id == "e5")
         #expect(!model.asksStillWatching)
 

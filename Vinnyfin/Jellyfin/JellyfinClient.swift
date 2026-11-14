@@ -215,6 +215,8 @@ nonisolated struct JellyfinClient: Sendable {
         var types: [String] = ["Movie", "Series"]
         /// Only these items.
         var ids: [String] = []
+        /// Not these items.
+        var excludeIds: [String] = []
         var parentId: String?
         var searchTerm: String?
         var sortBy = "SortName"
@@ -246,6 +248,11 @@ nonisolated struct JellyfinClient: Sendable {
     }
 
     func items(userId: String, _ query: ItemQuery) async throws -> ItemsPage {
+        try await get("Items", query: parameters(of: query, userId: userId))
+    }
+
+    /// What `items(userId:_:)` asks the server with.
+    private func parameters(of query: ItemQuery, userId: String) -> [String: String] {
         var parameters = [
             "userId": userId,
             "recursive": "true",
@@ -260,6 +267,7 @@ nonisolated struct JellyfinClient: Sendable {
         ]
         if let limit = query.limit { parameters["limit"] = String(limit) }
         if !query.ids.isEmpty { parameters["ids"] = query.ids.joined(separator: ",") }
+        if !query.excludeIds.isEmpty { parameters["excludeItemIds"] = query.excludeIds.joined(separator: ",") }
         if let parentId = query.parentId { parameters["parentId"] = parentId }
         if let term = query.searchTerm, !term.isEmpty { parameters["searchTerm"] = term }
         if let played = query.isPlayed { parameters["isPlayed"] = String(played) }
@@ -267,7 +275,105 @@ nonisolated struct JellyfinClient: Sendable {
         if !query.genres.isEmpty { parameters["genres"] = query.genres.joined(separator: "|") }
         if !query.personIds.isEmpty { parameters["personIds"] = query.personIds.joined(separator: ",") }
         if let nameLessThan = query.nameLessThan { parameters["nameLessThan"] = nameLessThan }
-        return try await get("Items", query: parameters)
+        return parameters
+    }
+
+    /// The ids and names of everything a query finds, without pictures or watch state: a whole
+    /// list in one answer of a few bytes a title.
+    private func names(userId: String, _ query: ItemQuery) async throws -> [(id: String, name: String)] {
+        var parameters = parameters(of: query, userId: userId)
+        parameters["fields"] = ""
+        parameters["enableImages"] = "false"
+        parameters["enableUserData"] = "false"
+        parameters["enableImageTypes"] = nil
+        parameters["imageTypeLimit"] = nil
+        parameters["startIndex"] = "0"
+        parameters["limit"] = nil
+        let page: ItemsPage = try await get("Items", query: parameters)
+        return page.items.map { ($0.id, $0.name) }
+    }
+
+    /// The name of every title of `types`, for what a search that found nothing may have meant
+    /// (see `DidYouMean`).
+    func titleNames(userId: String, types: [String]) async throws -> [String] {
+        try await names(userId: userId, ItemQuery(types: types)).map(\.name)
+    }
+
+    /// Every id a query finds, in the order `seed` shuffles them into (see `ShuffleOrder`).
+    func shuffledIds(userId: String, _ query: ItemQuery, seed: UInt64) async throws -> [String] {
+        ShuffleOrder.sorted(try await names(userId: userId, query).map(\.id), seed: seed)
+    }
+
+    /// Those of `ids` that a query finds, in the order of `ids`.
+    func items(userId: String, _ query: ItemQuery, inOrder ids: [String]) async throws -> [JellyfinItem] {
+        guard !ids.isEmpty else { return [] }
+        var query = query
+        query.ids = ids
+        query.startIndex = 0
+        query.limit = nil
+        let found = try await items(userId: userId, query).items
+        let byId = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byId[$0] }
+    }
+
+    /// Movies and shows together, the newest added first: a movie by when it was added, a show by
+    /// when an episode of it last was.
+    func recentlyAdded(userId: String, limit: Int) async throws -> [JellyfinItem] {
+        /// An item, with when it counts as added.
+        struct Dated: Decodable, Sendable {
+            let item: JellyfinItem
+            let added: Date?
+
+            enum CodingKeys: String, CodingKey {
+                case dateCreated = "DateCreated", dateLastMediaAdded = "DateLastMediaAdded"
+            }
+
+            init(from decoder: any Decoder) throws {
+                item = try JellyfinItem(from: decoder)
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let key = item.isSeries ? CodingKeys.dateLastMediaAdded : .dateCreated
+                added = try container.decodeIfPresent(String.self, forKey: key).flatMap(JellyfinDate.parse)
+            }
+        }
+        struct Page: Decodable, Sendable {
+            let items: [Dated]
+            enum CodingKeys: String, CodingKey { case items = "Items" }
+        }
+        func newest(_ query: ItemQuery, dateField: String) async throws -> [Dated] {
+            var query = query
+            query.limit = limit
+            var parameters = parameters(of: query, userId: userId)
+            parameters["fields"] = dateField
+            let page: Page = try await get("Items", query: parameters)
+            return page.items
+        }
+        async let movies = newest(.recentlyAddedMovies, dateField: "DateCreated")
+        async let shows = newest(.recentlyAddedShows, dateField: "DateLastMediaAdded")
+        let dated = try await movies + shows
+        return Self.newestFirst(dated.map { ($0.item, $0.added) }, limit: limit)
+    }
+
+    /// The first `limit` items, the one added last first, and those without a date after the rest.
+    static func newestFirst(_ dated: [(item: JellyfinItem, added: Date?)], limit: Int) -> [JellyfinItem] {
+        dated.enumerated()
+            .sorted { left, right in
+                switch (left.element.added, right.element.added) {
+                case let (leftDate?, rightDate?) where leftDate != rightDate: leftDate > rightDate
+                case (.some, nil): true
+                case (nil, .some): false
+                default: left.offset < right.offset
+                }
+            }
+            .prefix(limit)
+            .map(\.element.item)
+    }
+
+    /// The people, genres and collections whose names match `term`, the closest match first.
+    func searchHints(userId: String, term: String, limit: Int = 24) async throws -> [SearchHint] {
+        let page: SearchHintsPage = try await get("Search/Hints", query: [
+            "userId": userId, "searchTerm": term, "limit": String(limit), "includeItemTypes": "Person,Genre,BoxSet",
+        ])
+        return page.searchHints
     }
 
     /// How many items match, without fetching any.
@@ -286,6 +392,10 @@ nonisolated struct JellyfinClient: Sendable {
         case upNext
         /// The titles the server finds most like one, best first.
         case similar(toItemId: String)
+        /// The library, filtered, in the order `seed` shuffles it into (see `ShuffleOrder`).
+        case shuffled(ItemQuery, seed: UInt64)
+        /// Movies and shows together, the newest added first (see `recentlyAdded(userId:limit:)`).
+        case recentlyAdded
     }
 
     func page(of source: ItemSource, userId: String, startIndex: Int, limit: Int) async throws -> ItemsPage {
@@ -302,6 +412,16 @@ nonisolated struct JellyfinClient: Sendable {
             // The server ranks similar titles without paging them, so the first page is the list.
             guard startIndex == 0 else { return ItemsPage(items: [], totalRecordCount: 0) }
             let items = try await similar(to: itemId, userId: userId, limit: limit)
+            return ItemsPage(items: items, totalRecordCount: items.count)
+        case .shuffled(let query, let seed):
+            // The whole order for each page: `PagedItems` keeps it instead for the list it pages.
+            let order = try await shuffledIds(userId: userId, query, seed: seed)
+            let range = min(startIndex, order.count)..<min(startIndex + limit, order.count)
+            return ItemsPage(items: try await items(userId: userId, query, inOrder: Array(order[range])), totalRecordCount: order.count)
+        case .recentlyAdded:
+            // Merged whole from two lists, so the first page is the list.
+            guard startIndex == 0 else { return ItemsPage(items: [], totalRecordCount: 0) }
+            let items = try await recentlyAdded(userId: userId, limit: limit)
             return ItemsPage(items: items, totalRecordCount: items.count)
         }
     }
@@ -733,6 +853,71 @@ nonisolated struct JellyfinClient: Sendable {
             throw JellyfinError.http(status: http.statusCode, body: text)
         }
         return body
+    }
+}
+
+/// One of the server's search hints: something whose name matches what was searched for, of any
+/// kind, as a person, a genre or a collection.
+nonisolated struct SearchHint: Decodable, Hashable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    /// The item type: "Person", "Genre", "BoxSet".
+    let type: String
+    var primaryImageTag: String?
+    var productionYear: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id = "Id", itemId = "ItemId", name = "Name", type = "Type", primaryImageTag = "PrimaryImageTag"
+        case productionYear = "ProductionYear"
+    }
+
+    init(id: String, name: String, type: String, primaryImageTag: String? = nil, productionYear: Int? = nil) {
+        self.id = id
+        self.name = name
+        self.type = type
+        self.primaryImageTag = primaryImageTag
+        self.productionYear = productionYear
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Servers before 10.9 name the id ItemId alone.
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? container.decode(String.self, forKey: .itemId)
+        name = try container.decode(String.self, forKey: .name)
+        type = try container.decode(String.self, forKey: .type)
+        primaryImageTag = try container.decodeIfPresent(String.self, forKey: .primaryImageTag)
+        productionYear = try container.decodeIfPresent(Int.self, forKey: .productionYear)
+    }
+}
+
+nonisolated struct SearchHintsPage: Decodable, Sendable {
+    let searchHints: [SearchHint]
+
+    enum CodingKeys: String, CodingKey {
+        case searchHints = "SearchHints"
+    }
+}
+
+/// A shuffled order that holds still. Each id's place comes from a hash of it with the seed, so
+/// the same seed puts the same ids in the same order every time, and ids added or gone leave the
+/// order of the rest alone: a shuffled list loaded again, or a page at a time, stays as it was.
+nonisolated enum ShuffleOrder {
+    static func sorted(_ ids: [String], seed: UInt64) -> [String] {
+        ids.map { (key(for: $0, seed: seed), $0) }
+            .sorted { $0.0 != $1.0 ? $0.0 < $1.0 : $0.1 < $1.1 }
+            .map(\.1)
+    }
+
+    /// FNV-1a over the id's bytes from a start the seed sets, then SplitMix64's mix, which
+    /// spreads ids a letter apart to unrelated places.
+    static func key(for id: String, seed: UInt64) -> UInt64 {
+        var hash: UInt64 = 0xCBF2_9CE4_8422_2325 ^ seed
+        for byte in id.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01B3
+        }
+        hash = (hash ^ (hash >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        hash = (hash ^ (hash >> 27)) &* 0x94D0_49BB_1331_11EB
+        return hash ^ (hash >> 31)
     }
 }
 

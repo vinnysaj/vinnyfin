@@ -1288,6 +1288,9 @@ final class PlayerModel: Identifiable {
         updateSubtitleRendering()
     }
 
+    /// The picture is in Picture in Picture.
+    var isInPictureInPicture: Bool { pictureOutside.contains(.pictureInPicture) }
+
     /// Hands the subtitles to the system while the picture is outside the app, and takes them
     /// back. Not a transcode's: AVPlayer draws those itself wherever the picture is, and handing
     /// them over, with no renditions of the engine's own to show, would turn them off.

@@ -31,7 +31,7 @@ struct RootView: View {
     /// The sign-in screen, for the server a handed-off title is from.
     @State private var handoffSignIn: ServerSignIn?
     #endif
-    /// A title a link asked to open, for Home to show.
+    /// A title a link asked to open, for the tab on screen to show.
     @State private var linkedItem: JellyfinItem?
     #if os(iOS)
     /// The full-screen player is up, until it has finished going away.
@@ -231,7 +231,8 @@ struct RootView: View {
         }
     }
 
-    /// Plays the title, or shows its page on Home in place of the player.
+    /// Plays the title, or shows its page on the tab on screen. A player covering the tabs closes
+    /// for it; one in Picture in Picture, or in a window of its own, plays on.
     private func open(_ link: AppLink) {
         switch link.action {
         case .play:
@@ -241,7 +242,9 @@ struct RootView: View {
                 messages.show("Sign in to see \(link.name).")
                 return
             }
-            Task { await player.dismiss() }
+            if player.coversScreens && !player.isInPictureInPicture {
+                Task { await player.dismiss() }
+            }
             linkedItem = link.item
         }
     }
@@ -287,12 +290,9 @@ struct MainTabs: View {
         case home, movies, shows, downloads, sounds, settings, search
     }
 
-    /// A title a link asked to open, shown on Home as the page after it.
+    /// A title a link asked to open, shown on the tab on screen as the page after the one it shows.
     @Binding var linkedItem: JellyfinItem?
-    @State private var selection = Destination.home
-    @State private var homePath = NavigationPath()
-    @State private var moviesPath = NavigationPath()
-    @State private var showsPath = NavigationPath()
+    @State private var navigation = TabNavigation()
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlayerCoordinator.self) private var player
@@ -319,21 +319,21 @@ struct MainTabs: View {
     }
 
     private var tabs: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $navigation.selection) {
             Tab("Home", systemImage: "house", value: .home) {
-                HomeView(path: $homePath) { selection = .downloads }
+                HomeView(path: $navigation.home) { navigation.selection = .downloads }
             }
             Tab("Movies", systemImage: "film", value: .movies) {
-                NavigationStack(path: $moviesPath) {
+                NavigationStack(path: $navigation.movies) {
                     LibraryGridView(list: .movies).itemDestinations()
                 }
-                .opensTitles(on: $moviesPath)
+                .opensTitles(on: $navigation.movies)
             }
             Tab("Shows", systemImage: "tv", value: .shows) {
-                NavigationStack(path: $showsPath) {
+                NavigationStack(path: $navigation.shows) {
                     LibraryGridView(list: .shows).itemDestinations()
                 }
-                .opensTitles(on: $showsPath)
+                .opensTitles(on: $navigation.shows)
             }
             #if os(tvOS)
             Tab("Sounds", systemImage: "waveform", value: .sounds) {
@@ -344,15 +344,22 @@ struct MainTabs: View {
             }
             #else
             Tab("Downloads", systemImage: "arrow.down.circle", value: .downloads) {
-                DownloadsView()
+                DownloadsView(path: $navigation.downloads)
             }
             .badge(downloads.jobs.count { $0.status == .active })
             #endif
+            #if os(iOS) || os(visionOS)
+            if Self.hasSettingsTab {
+                Tab("Settings", systemImage: "gear", value: .settings) {
+                    SettingsView()
+                }
+            }
+            #endif
             Tab(value: .search, role: .search) {
                 #if os(tvOS)
-                SearchView()
+                SearchView(path: $navigation.search)
                 #else
-                SearchView(fieldRequests: searchFieldRequests)
+                SearchView(fieldRequests: searchFieldRequests, path: $navigation.search)
                 #endif
             }
         }
@@ -363,18 +370,55 @@ struct MainTabs: View {
         #endif
         .onChange(of: linkedItem, initial: true) {
             guard let linkedItem else { return }
-            selection = .home
-            homePath = NavigationPath([linkedItem])
+            navigation.open(linkedItem)
             self.linkedItem = nil
         }
     }
 
+    #if os(iOS) || os(visionOS)
+    /// Settings is a tab where there's a sidebar to hold it, as on Apple TV: on iPad and Vision
+    /// Pro. On iPhone it opens from Home, and on the Mac in a window of its own.
+    private static var hasSettingsTab: Bool {
+        #if os(visionOS)
+        true
+        #else
+        UIDevice.current.userInterfaceIdiom == .pad
+        #endif
+    }
+    #endif
+
     #if !os(tvOS)
     private func go(_ command: TabCommand) {
-        selection = command.destination
+        navigation.selection = command.destination
         if command == .search { searchFieldRequests += 1 }
     }
     #endif
+}
+
+/// The tab on screen, the pages open on each tab, and where a title a link asks for opens.
+struct TabNavigation {
+    var selection = MainTabs.Destination.home
+    var home = NavigationPath()
+    var movies = NavigationPath()
+    var shows = NavigationPath()
+    var downloads = NavigationPath()
+    var search = NavigationPath()
+
+    /// Opens a title a link asked for as the next page of the tab on screen, so what that tab
+    /// showed stays a page back. A tab with no pages of titles, Sounds or Settings, gives way to
+    /// Home.
+    mutating func open(_ item: JellyfinItem) {
+        switch selection {
+        case .home: home.append(item)
+        case .movies: movies.append(item)
+        case .shows: shows.append(item)
+        case .downloads: downloads.append(item)
+        case .search: search.append(item)
+        case .sounds, .settings:
+            selection = .home
+            home.append(item)
+        }
+    }
 }
 
 extension AppSettings.Appearance {

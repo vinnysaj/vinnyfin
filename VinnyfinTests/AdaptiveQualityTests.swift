@@ -275,6 +275,20 @@ struct SameTrackTests {
         #expect(TrackChooser.same(as: sdh, in: [track(3, "eng")]) == 3)
     }
 
+    @Test func neverTurnsForcedSubtitlesIntoFullOnes() {
+        let forced = track(5, "eng", forced: true)
+        #expect(TrackChooser.same(as: forced, in: [track(3, "eng"), track(4, "eng", hearingImpaired: true)]) == nil)
+        #expect(TrackChooser.same(as: track(3, "eng"), in: [track(5, "eng", forced: true)]) == nil)
+    }
+
+    /// A transcode's subtitles come without the forced flag, named as the server lists them.
+    @Test func knowsForcedSubtitlesByName() {
+        let forced = track(5, "eng", forced: true)
+        let renditions = [track(0, "eng", name: "English - SRT"), track(1, "eng", name: "English - Forced - SRT")]
+        #expect(TrackChooser.same(as: forced, in: renditions) == 1)
+        #expect(TrackChooser.same(as: track(3, "eng"), in: renditions) == 0)
+    }
+
     @Test func tellsTracksApartByName() {
         let commentary = track(2, "eng", name: "Director's Commentary")
         let tracks = [track(1, "eng", name: "Main"), track(3, "eng", name: "director's commentary")]

@@ -90,6 +90,16 @@ struct TrackChooserTests {
         #expect(TrackChooser.subtitle(from: [english, french], audioLanguage: "eng", mode: .forcedOnly, language: "eng") == nil)
     }
 
+    @Test func forcedOnlyKnowsAForcedTrackByItsName() {
+        let named = TrackChooser.Candidate(id: 8, language: "eng", isForced: false, isHearingImpaired: false, isDefault: false,
+                                           name: "English (Forced)")
+        #expect(TrackChooser.subtitle(from: [english, named], audioLanguage: "eng", mode: .forcedOnly, language: "eng") == 8)
+        #expect(TrackChooser.subtitle(from: [named, english], audioLanguage: "jpn", mode: .smart, language: "eng") == 3)
+        #expect(TrackChooser.namesForced("Foreign Parts Only"))
+        #expect(!TrackChooser.namesForced("English SDH"))
+        #expect(!TrackChooser.namesForced("Reinforcement"))
+    }
+
     @Test func smartShowsFullSubtitlesForForeignAudio() {
         let tracks = [englishSDH, english, englishForced, french]
         #expect(TrackChooser.subtitle(from: tracks, audioLanguage: "jpn", mode: .smart, language: "eng") == 3)

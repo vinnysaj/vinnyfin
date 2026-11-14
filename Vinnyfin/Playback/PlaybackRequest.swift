@@ -417,19 +417,33 @@ nonisolated enum TrackChooser {
         var name: String?
         /// An audio description, narrating what's on screen.
         var describesVideo = false
+
+        /// Subtitles of only what isn't in the audio's language, such as signs and foreign
+        /// dialogue: flagged so, or named so. Files often name such a track "Forced" without the
+        /// flag, and the subtitles a transcode carries never have it.
+        var showsOnlyForced: Bool { isForced || TrackChooser.namesForced(name) }
+    }
+
+    /// Whether a track's title calls it forced subtitles: "Forced", "English (Forced)", "Foreign
+    /// Parts Only".
+    static func namesForced(_ title: String?) -> Bool {
+        guard let title = title?.lowercased(), !title.isEmpty else { return false }
+        return title.split { !$0.isLetter }.contains("forced") || title.contains("foreign parts")
     }
 
     /// The candidate that is the same choice as `chosen`, made in another version of the title,
     /// whose tracks are numbered differently: the same language, of the same kind when there is
-    /// one, by name when several are. Nil when the version has nothing in that language.
+    /// one, by name when several are. Nil when the version has nothing in that language, or for
+    /// forced subtitles, none forced: full subtitles would show everything they leave out.
     static func same(as chosen: Candidate, in candidates: [Candidate]) -> Int? {
         let sameLanguage = candidates.filter {
             AppSettings.sameLanguage($0.language, chosen.language) || (isUnknown($0.language) && isUnknown(chosen.language))
         }
-        let sameKind = sameLanguage.filter {
-            $0.isForced == chosen.isForced && $0.isHearingImpaired == chosen.isHearingImpaired && $0.describesVideo == chosen.describesVideo
+        let sameForcedness = sameLanguage.filter { $0.showsOnlyForced == chosen.showsOnlyForced }
+        let sameKind = sameForcedness.filter {
+            $0.isHearingImpaired == chosen.isHearingImpaired && $0.describesVideo == chosen.describesVideo
         }
-        let pool = sameKind.isEmpty ? sameLanguage : sameKind
+        let pool = sameKind.isEmpty ? sameForcedness : sameKind
         let sameName = chosen.name.flatMap { name in pool.first { $0.name?.caseInsensitiveCompare(name) == .orderedSame } }
         return (sameName ?? pool.first)?.id
     }
@@ -460,12 +474,12 @@ nonisolated enum TrackChooser {
     static func subtitle(from candidates: [Candidate], audioLanguage: String?, mode: AppSettings.SubtitleMode, language: String,
                          captions: Bool = false) -> Int? {
         let inLanguage = candidates.filter { AppSettings.sameLanguage($0.language, language) }
-        let forced = inLanguage.first { $0.isForced }
-            ?? candidates.first { $0.isForced && AppSettings.sameLanguage($0.language, audioLanguage) }
-        let full = inLanguage.first { !$0.isForced && !$0.isHearingImpaired } ?? inLanguage.first { !$0.isForced }
+        let forced = inLanguage.first { $0.showsOnlyForced }
+            ?? candidates.first { $0.showsOnlyForced && AppSettings.sameLanguage($0.language, audioLanguage) }
+        let full = inLanguage.first { !$0.showsOnlyForced && !$0.isHearingImpaired } ?? inLanguage.first { !$0.showsOnlyForced }
         if captions {
             for spoken in [language, audioLanguage] {
-                let tracks = candidates.filter { !$0.isForced && AppSettings.sameLanguage($0.language, spoken) }
+                let tracks = candidates.filter { !$0.showsOnlyForced && AppSettings.sameLanguage($0.language, spoken) }
                 if let caption = tracks.first(where: \.isHearingImpaired) ?? tracks.first { return caption.id }
             }
             return forced?.id

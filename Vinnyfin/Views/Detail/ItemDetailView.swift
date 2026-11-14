@@ -189,11 +189,10 @@ struct ItemDetailView: View {
         .scrollPosition($scrollPosition)
         #endif
         .refreshable { await load(refreshing: true) }
-        // The page color the hero artwork fades into.
-        .background(Color.pageBackground.ignoresSafeArea())
+        .pageBackground()
         .screenTitle(shown.name)
         .inlineNavigationTitle()
-        .toolbarBackgroundVisibility(.hidden, for: .automatic)
+        .heroScrollEdge()
         .handoffPage(shown)
         // Siri knows which title the page is about: "play this", "download this".
         .appEntityIdentifier(EntityIdentifier.title(page))

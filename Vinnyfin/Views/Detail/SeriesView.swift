@@ -120,11 +120,10 @@ struct SeriesView: View {
         }
         #endif
         .refreshable { await refresh() }
-        // The page color the hero artwork fades into.
-        .background(Color.pageBackground.ignoresSafeArea())
+        .pageBackground()
         .screenTitle(series.name)
         .inlineNavigationTitle()
-        .toolbarBackgroundVisibility(.hidden, for: .automatic)
+        .heroScrollEdge()
         .handoffPage(shown)
         #if !os(tvOS)
         .toolbar { selectionToolbar }

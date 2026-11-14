@@ -201,6 +201,16 @@ nonisolated struct JellyfinClient: Sendable {
         try await send("Sessions/Logout", method: "POST")
     }
 
+    /// The users the server shows on its sign-in screen, asked before anyone signs in.
+    func publicUsers<User: Decodable & Sendable>() async throws -> [User] {
+        try await get("Users/Public")
+    }
+
+    /// A user's picture.
+    func userImageURL(userId: String, tag: String, maxWidth: Int) -> URL {
+        url(for: "Users/\(userId)/Images/Primary", query: ["tag": tag, "maxWidth": String(maxWidth), "quality": "90"])
+    }
+
     // MARK: Browsing
 
     func libraries(userId: String) async throws -> [JellyfinItem] {

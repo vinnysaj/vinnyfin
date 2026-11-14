@@ -2,11 +2,14 @@ import Foundation
 import Observation
 import OSLog
 
-/// Who is signed in to which server. The token lives in the `Keychain`. On Apple TV, iPhone, iPad
-/// and the Mac the sign-in is kept in the app group, where the app's extensions read it to ask
-/// the server what's up next: Apple TV's Top Shelf, and the Up Next widgets. Each person on a
-/// shared Apple TV has a sign-in of their own: the app and Top Shelf run as the user picked in
-/// Control Center, and tvOS keeps each user's app group and Keychain apart.
+/// Who is signed in to which server. Several sign-ins can be kept on a device, each its own
+/// server and user, and one is in use at a time; switching between them needs no password. Each
+/// one's token lives in the `Keychain`, under its server's id and its user's (`Account.tokenKey`).
+/// On Apple TV, iPhone, iPad and the Mac the sign-ins are kept in the app group, where the app's
+/// extensions read the one in use to ask the server what's up next: Apple TV's Top Shelf, and
+/// the Up Next widgets. Each person on a shared Apple TV has sign-ins of their own: the app and
+/// Top Shelf run as the user picked in Control Center, and tvOS keeps each user's app group and
+/// Keychain apart.
 @Observable
 final class AccountStore {
     nonisolated struct Account: Codable, Equatable, Sendable {
@@ -18,6 +21,20 @@ final class AccountStore {
 
         /// What to call the server in a sentence.
         var serverTitle: String { serverName ?? serverURL.host() ?? "the server" }
+
+        /// Whether `other` is this person on this server, wherever the server is and whatever
+        /// it's called now.
+        func isSame(as other: Account?) -> Bool {
+            other?.serverId == serverId && other?.userId == userId
+        }
+
+        /// The Keychain's name for the token: the server's id and the user's, so two people on
+        /// one server each keep theirs.
+        var tokenKey: String { Self.tokenKey(serverId: serverId, userId: userId) }
+
+        static func tokenKey(serverId: String, userId: String) -> String {
+            serverId + "/" + userId
+        }
     }
 
     /// A Jellyfin server that answered at an address, before anyone signs in to it.
@@ -29,9 +46,24 @@ final class AccountStore {
         var title: String { info.serverName ?? url.host() ?? "the server" }
     }
 
+    /// Where the tokens are, by `Account.tokenKey`.
+    nonisolated struct TokenStore: Sendable {
+        var read: @Sendable (_ key: String) throws -> String?
+        var write: @Sendable (_ token: String, _ key: String) throws -> Void
+        var delete: @Sendable (_ key: String) throws -> Void
+
+        /// The app group's Keychain items, which the extensions read too.
+        static let keychain = TokenStore(read: { try Keychain.token(for: $0) }, write: { try Keychain.setToken($0, for: $1) },
+                                         delete: { try Keychain.deleteToken(for: $0) })
+    }
+
+    /// The sign-ins kept on this device, the one in use among them, in the order they were first
+    /// made here.
+    private(set) var saved: [Account] = []
+    /// The sign-in in use.
     private(set) var account: Account?
     private(set) var client: JellyfinClient?
-    /// Why the sign-in saved here can't be used: its token isn't in the Keychain, or the Keychain
+    /// Why the sign-in in use can't be used: its token isn't in the Keychain, or the Keychain
     /// wouldn't give it. Nil when there's none saved, or it's in use.
     private(set) var savedSignInProblem: String?
     #if os(iOS) || os(macOS)
@@ -40,9 +72,13 @@ final class AccountStore {
     #endif
 
     private let defaults: UserDefaults
+    private let tokens: TokenStore
     /// Tells the server a sign-in has ended.
     private let endSession: @Sendable (JellyfinClient) async throws -> Void
+    /// The sign-in in use, which the extensions read.
     nonisolated private static let accountKey = "account"
+    /// Every sign-in kept on this device.
+    nonisolated private static let savedKey = "accounts"
     nonisolated private static let deviceIdKey = "deviceId"
     nonisolated private static let lastServerKey = "lastServer"
     nonisolated private static let lastServerNameKey = "lastServerName"
@@ -50,10 +86,10 @@ final class AccountStore {
     /// How long telling the server about a sign-out may take, in the background, before it's
     /// given up on: a server out of reach keeps a token no one uses.
     static let signOutTimeLimit = Duration.seconds(15)
-    private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "accounts")
+    nonisolated private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "accounts")
 
-    /// Where the sign-in is kept: on Apple TV, iPhone, iPad and the Mac the app group's defaults,
-    /// shared with the app's extensions.
+    /// Where the sign-ins are kept: on Apple TV, iPhone, iPad and the Mac the app group's
+    /// defaults, shared with the app's extensions.
     nonisolated static var savedDefaults: UserDefaults {
         #if os(visionOS)
         .standard
@@ -63,20 +99,23 @@ final class AccountStore {
         #endif
     }
 
-    /// The sign-in saved in `defaults`, as an extension reads it.
+    /// The sign-ins saved in `defaults`, as an extension reads them.
     convenience init(defaults: UserDefaults = savedDefaults) {
-        self.init(defaults: defaults) { try Keychain.token(for: $0) }
+        self.init(defaults: defaults, tokens: .keychain)
     }
 
-    /// The sign-in saved in `defaults`, with the token `token` reads for its server, telling the
-    /// server of a sign-out with `endSession`.
-    init(defaults: UserDefaults, token: (_ serverId: String) throws -> String?,
+    /// The sign-ins saved in `defaults`, with their tokens in `tokens`, telling the server of a
+    /// sign-out with `endSession`.
+    init(defaults: UserDefaults, tokens: TokenStore,
          endSession: @escaping @Sendable (JellyfinClient) async throws -> Void = { try await $0.signOut() }) {
         self.defaults = defaults
+        self.tokens = tokens
         self.endSession = endSession
         do {
-            guard let account = try Self.savedAccount(in: defaults) else { return }
-            guard let token = try token(account.serverId) else {
+            let account = try Self.savedAccount(in: defaults)
+            saved = try Self.savedAccounts(in: defaults) ?? account.map { [$0] } ?? []
+            guard let account else { return }
+            guard let token = try Self.token(of: account, in: tokens) else {
                 savedSignInProblem = "The sign-in to \(account.serverTitle) isn't in the Keychain."
                 return
             }
@@ -105,9 +144,9 @@ final class AccountStore {
             return
         }
         Self.log.error("Couldn't move the sign-in to the app group: \(moveError.localizedDescription, privacy: .public)")
-        self.init(defaults: appDefaults) { serverId in
-            try Keychain.appToken(for: serverId) ?? Keychain.token(for: serverId)
-        }
+        var tokens = TokenStore.keychain
+        tokens.read = { key in try Keychain.appToken(for: key) ?? Keychain.token(for: key) }
+        self.init(defaults: appDefaults, tokens: tokens)
         sharingProblem = "The widgets can't use your sign-in: \(moveError.localizedDescription) vinnyfin stays signed in and tries again the next time it opens."
     }
     #endif
@@ -117,10 +156,36 @@ final class AccountStore {
         return try JSONDecoder().decode(Account.self, from: data)
     }
 
+    /// Nil when no list is saved, as when a device kept one sign-in, the one in use.
+    nonisolated private static func savedAccounts(in defaults: UserDefaults) throws -> [Account]? {
+        guard let data = defaults.data(forKey: savedKey) else { return nil }
+        return try JSONDecoder().decode([Account].self, from: data)
+    }
+
+    /// The account's token: under its own name, or else under its server's id alone, where a
+    /// device that kept one sign-in had it, and which it's moved from to its own name. A move
+    /// that fails leaves it where it was, to move the next time.
+    nonisolated static func token(of account: Account, in tokens: TokenStore) throws -> String? {
+        if let token = try tokens.read(account.tokenKey) { return token }
+        guard let token = try tokens.read(account.serverId) else { return nil }
+        do {
+            try tokens.write(token, account.tokenKey)
+            try tokens.delete(account.serverId)
+        } catch {
+            log.error("Couldn't move the token of \(account.serverTitle, privacy: .public) to its own name: \(error.localizedDescription, privacy: .public)")
+        }
+        return token
+    }
+
     /// The signed-in server and user, for browsing.
     var session: ServerSession? {
         guard let client, let account else { return nil }
         return ServerSession(client: client, account: account)
+    }
+
+    /// The sign-ins kept on this device other than the one in use, to switch to.
+    var others: [Account] {
+        saved.filter { !$0.isSame(as: account) }
     }
 
     /// Identifies this install to the server; Jellyfin lists sessions by it.
@@ -142,9 +207,25 @@ final class AccountStore {
         Server(url: serverURL, info: try await publicClient(for: serverURL).publicSystemInfo())
     }
 
-    func signIn(to server: Server, username: String, password: String) async throws {
+    /// The people the server lists on its sign-in screen. Many servers list no one.
+    func publicUsers(on serverURL: URL) async throws -> [PublicUser] {
+        try await publicClient(for: serverURL).publicUsers()
+    }
+
+    /// A person's picture on the server, about `points` wide on screen; nil when they have none.
+    func pictureURL(of user: PublicUser, on serverURL: URL, points: Int) -> URL? {
+        guard let tag = user.primaryImageTag else { return nil }
+        return publicClient(for: serverURL).userImageURL(userId: user.id, tag: tag, maxWidth: points * 3)
+    }
+
+    /// Signs in with the password, once `signedIn` has had its say: the server has given the
+    /// sign-in by then, which only takes the app over after.
+    func signIn(to server: Server, username: String, password: String,
+                signedIn: @MainActor () async throws -> Void = {}) async throws {
         let client = publicClient(for: server.url)
         let result = try await client.authenticate(username: username, password: password)
+        try await signedIn()
+        try Task.checkCancellation()
         try adopt(result, on: server, client: client)
     }
 
@@ -174,6 +255,7 @@ final class AccountStore {
         JellyfinClient(serverURL: serverURL, deviceId: deviceId, deviceName: Device.ownName)
     }
 
+    /// Keeps the sign-in the server gave, beside any others kept here, and uses it.
     private func adopt(_ result: AuthenticationResult, on server: Server, client: JellyfinClient) throws {
         var client = client
         client.token = result.accessToken
@@ -184,13 +266,40 @@ final class AccountStore {
             userId: result.user.id,
             userName: result.user.name
         )
-        try Keychain.setToken(result.accessToken, for: account.serverId)
+        try tokens.write(result.accessToken, account.tokenKey)
         #if os(iOS) || os(macOS)
         // The next launch's move would take a token left where only the app read it for newer.
         try Keychain.deleteAppToken(for: account.serverId)
         #endif
-        defaults.set(try JSONEncoder().encode(account), forKey: Self.accountKey)
-        defaults.set(server.url, forKey: Self.lastServerKey)
+        if let index = saved.firstIndex(where: { $0.isSame(as: account) }) {
+            saved[index] = account
+        } else {
+            saved.append(account)
+        }
+        use(account, client: client)
+    }
+
+    /// Switches to a sign-in kept on this device, with the token kept for it. One whose token is
+    /// gone can't be used any more: it's no longer kept, and this throws.
+    func switchTo(_ account: Account) throws {
+        guard let account = saved.first(where: { $0.isSame(as: account) }) else { throw AccountError.notKept(account) }
+        guard let token = try Self.token(of: account, in: tokens) else {
+            saved.removeAll { $0.isSame(as: account) }
+            saveList()
+            throw AccountError.tokenMissing(account)
+        }
+        use(account, client: JellyfinClient(serverURL: account.serverURL, deviceId: deviceId, deviceName: Device.ownName, token: token))
+    }
+
+    /// Makes the sign-in the one in use, and the one the sign-in screen starts from after it ends.
+    private func use(_ account: Account, client: JellyfinClient) {
+        do {
+            defaults.set(try JSONEncoder().encode(account), forKey: Self.accountKey)
+        } catch {
+            Self.log.error("Couldn't save the sign-in in use: \(error.localizedDescription, privacy: .public)")
+        }
+        saveList()
+        defaults.set(account.serverURL, forKey: Self.lastServerKey)
         defaults.set(account.serverName, forKey: Self.lastServerNameKey)
         defaults.set(account.userName, forKey: Self.lastUserNameKey)
         self.account = account
@@ -198,25 +307,51 @@ final class AccountStore {
         savedSignInProblem = nil
     }
 
-    /// Signs out here at once, then tells the server in the background, after `beforeTellingServer`
-    /// has finished what still needs the sign-in there. Neither is waited for: a server out of
-    /// reach keeps a token no one uses, rather than keeping the app signed in while it's asked.
-    func signOut(beforeTellingServer: @escaping @Sendable () async -> Void = {}) {
-        let client = client
-        if let account {
-            do {
-                try Keychain.deleteToken(for: account.serverId)
-                #if os(iOS) || os(macOS)
-                // Where the token stays while it can't be moved to the app group.
-                try Keychain.deleteAppToken(for: account.serverId)
-                #endif
-            } catch {
-                Self.log.error("Couldn't delete the token of \(account.serverTitle, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
+    private func saveList() {
+        do {
+            defaults.set(try JSONEncoder().encode(saved), forKey: Self.savedKey)
+        } catch {
+            Self.log.error("Couldn't save the sign-ins: \(error.localizedDescription, privacy: .public)")
         }
-        defaults.removeObject(forKey: Self.accountKey)
-        account = nil
-        self.client = nil
+    }
+
+    /// Signs out of the sign-in in use; see `signOut(of:beforeTellingServer:)`.
+    func signOut(beforeTellingServer: @escaping @Sendable () async -> Void = {}) {
+        guard let account else {
+            defaults.removeObject(forKey: Self.accountKey)
+            client = nil
+            return
+        }
+        signOut(of: account, beforeTellingServer: beforeTellingServer)
+    }
+
+    /// Signs out of a sign-in kept here at once, then tells the server in the background, after
+    /// `beforeTellingServer` has finished what still needs the sign-in there. Neither is waited
+    /// for: a server out of reach keeps a token no one uses, rather than keeping the app signed in
+    /// while it's asked. Signing out of the one in use leaves none in use, whatever others are
+    /// kept: which comes next is the person's to choose.
+    func signOut(of account: Account, beforeTellingServer: @escaping @Sendable () async -> Void = {}) {
+        let isInUse = account.isSame(as: self.account)
+        var client = isInUse ? self.client : nil
+        if !isInUse, let token = try? Self.token(of: account, in: tokens) {
+            client = JellyfinClient(serverURL: account.serverURL, deviceId: deviceId, deviceName: Device.ownName, token: token)
+        }
+        do {
+            try tokens.delete(account.tokenKey)
+            #if os(iOS) || os(macOS)
+            // Where the token stays while it can't be moved to the app group.
+            try Keychain.deleteAppToken(for: account.serverId)
+            #endif
+        } catch {
+            Self.log.error("Couldn't delete the token of \(account.serverTitle, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        saved.removeAll { $0.isSame(as: account) }
+        saveList()
+        if isInUse {
+            defaults.removeObject(forKey: Self.accountKey)
+            self.account = nil
+            self.client = nil
+        }
         guard let client else { return }
         let endSession = endSession
         let timeLimit = Self.signOutTimeLimit
@@ -226,6 +361,49 @@ final class AccountStore {
                 try await endSession(client)
             }
         }
+    }
+}
+
+/// Why a sign-in kept on this device couldn't be switched to.
+nonisolated enum AccountError: LocalizedError, Equatable {
+    case notKept(AccountStore.Account)
+    case tokenMissing(AccountStore.Account)
+
+    var errorDescription: String? {
+        switch self {
+        case .notKept(let account):
+            "\(account.userName) isn't signed in to \(account.serverTitle) here any more. Sign in again to use it."
+        case .tokenMissing(let account):
+            "The sign-in to \(account.serverTitle) as \(account.userName) isn't in the Keychain any more. Sign in again to use it."
+        }
+    }
+}
+
+/// Someone a server lists on its sign-in screen, from `/Users/Public`.
+nonisolated struct PublicUser: Decodable, Hashable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let primaryImageTag: String?
+    /// Whether signing in as them takes a password. A server that doesn't say is taken to want one.
+    let hasPassword: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id = "Id", name = "Name", primaryImageTag = "PrimaryImageTag", hasPassword = "HasPassword"
+    }
+
+    init(id: String, name: String, primaryImageTag: String? = nil, hasPassword: Bool = true) {
+        self.id = id
+        self.name = name
+        self.primaryImageTag = primaryImageTag
+        self.hasPassword = hasPassword
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        primaryImageTag = try container.decodeIfPresent(String.self, forKey: .primaryImageTag)
+        hasPassword = try container.decodeIfPresent(Bool.self, forKey: .hasPassword) ?? true
     }
 }
 
@@ -249,7 +427,7 @@ nonisolated func withTimeLimit<T: Sendable>(_ limit: Duration, _ operation: @esc
 
 extension AccountStore {
     /// What the sign-in keeps in defaults, all of it moved to the app group.
-    nonisolated static let sharedKeys = [accountKey, deviceIdKey, lastServerKey, lastServerNameKey, lastUserNameKey]
+    nonisolated static let sharedKeys = [accountKey, savedKey, deviceIdKey, lastServerKey, lastServerNameKey, lastUserNameKey]
 
     /// Moves a sign-in kept where only the app reads it, its own defaults and Keychain item, to
     /// the app group. It runs at each launch and does nothing once everything has moved.

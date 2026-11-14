@@ -3,7 +3,8 @@ import SwiftUI
 
 /// What to watch next, and everything else to find: a featured banner, what's in progress and
 /// new, then a long run of rows from what was watched and liked, the best and newest, collections
-/// and every genre. Each row's title opens all of its titles.
+/// and every genre. Continue Watching plays on a tap; every other card opens its title. A row's
+/// title opens all of its titles when it holds only some.
 struct HomeView: View {
     /// The pages open on top of Home: titles, and lists in full.
     @Binding var path: NavigationPath
@@ -12,6 +13,7 @@ struct HomeView: View {
     @Environment(\.session) private var session
     @Environment(AccountStore.self) private var accounts
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
     @State private var feed = HomeFeed()
     /// The featured title the banner shows, kept here so it stays as the banner scrolls out of
@@ -28,12 +30,15 @@ struct HomeView: View {
     @State private var showingSounds = false
     #endif
     #if os(iOS)
+    @Environment(TVRemote.self) private var tvRemote
     @State private var showingRemote = false
     #elseif os(macOS)
     @Environment(\.openWindow) private var openWindow
     #elseif os(tvOS)
     /// Where the banner and the rows are, for holding the focused one in place.
     @State private var rowLayout = RowPageLayout()
+    /// Focus is on Home, not on the sidebar over it.
+    @FocusedValue(\.isInHome) private var focusIsInHome
     #endif
 
     var body: some View {
@@ -42,7 +47,7 @@ struct HomeView: View {
                 LazyVStack(alignment: .leading, spacing: 34) {
                     Group {
                         if !feed.featured.isEmpty {
-                            HeroBanner(items: feed.featured, shownId: $featuredId, mayTurn: bannerMayTurn) { path.append($0) }
+                            HeroBanner(items: feed.featured, shownId: $featuredId, mayTurn: bannerMayTurn, feed: feed) { path.append($0) }
                         } else if feed.isLoadingFirstTime {
                             HeroPlaceholder()
                         }
@@ -61,15 +66,19 @@ struct HomeView: View {
                     .pageRow("notice", in: rowLayout, holding: .whole)
                     #endif
                     ForEach(feed.rows) { row in
-                        HomeRowView(row: row, feed: feed)
-                            #if os(tvOS)
-                            // The first row under the banner leaves what fits of it in view.
-                            .pageRow(row.id, in: rowLayout, holding: row.id == leadRow ? .whole : .top)
-                            #endif
+                        HomeRowView(row: row, titles: feed.items[row.id], problem: feed.problems[row.id],
+                                    isShown: feed.isShown(row.id), isTruncated: feed.truncated.contains(row.id), feed: feed) {
+                            feed.removeFromContinueWatching($0) { messages.show($0) }
+                        }
+                        #if os(tvOS)
+                        // The first row under the banner leaves what fits of it in view.
+                        .pageRow(row.id, in: rowLayout, holding: row.id == leadRow ? .whole : .top)
+                        #endif
                     }
                 }
                 #if os(tvOS)
                 .rowPageContent(rowLayout)
+                .focusedValue(\.isInHome, true)
                 #endif
                 .padding(.bottom, Metrics.edge)
             }
@@ -80,21 +89,38 @@ struct HomeView: View {
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
             .overlay { if feed.hasNoTitles { noTitles } }
+            .overlay(alignment: .bottom) {
+                if let removal = feed.removal {
+                    RemovalToast(removal: removal) { undo(removal) } expire: { feed.settleRemoval(removal) }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy, value: feed.removal?.id)
+            #if os(tvOS)
+            // Undo, while the toast says so; the card the press was meant for is gone.
+            .onPlayPauseCommand(perform: feed.removal.map { removal in { undo(removal) } })
+            #endif
             .pageBackground()
             .screenTitle("Home")
             .onAppear { isOnScreen = true }
-            .onDisappear { isOnScreen = false }
+            .onDisappear {
+                isOnScreen = false
+                feed.wentAway()
+            }
             #if os(tvOS)
             .toolbarVisibility(hasBanner ? .hidden : .automatic, for: .navigationBar)
             #elseif os(iOS) || os(visionOS)
-            // Over the banner the bar keeps only its buttons (Remote on iPhone and iPad, Sounds and
-            // Settings), floating on the artwork, and once it's scrolled away a small title; on
-            // iPhone Duo they go in the vertical bar with the rest of the bar's buttons.
+            // Over the banner the bar keeps only its buttons (Remote on iPhone and iPad, once a
+            // TV has been found, Sounds and Settings), floating on the artwork, and once it's
+            // scrolled away a small title; on iPhone Duo they go in the vertical bar with the
+            // rest of the bar's buttons.
             .navigationBarTitleDisplayMode(hasBanner ? .inline : .automatic)
             .heroScrollEdge()
             .toolbar {
                 #if os(iOS)
-                ToolbarItem(placement: .barTrailing) { remoteButton }
+                if tvRemote.hasFoundTV {
+                    ToolbarItem(placement: .barTrailing) { remoteButton }
+                }
                 #endif
                 ToolbarItem(placement: .barTrailing) { soundsButton }
                 ToolbarItem(placement: .barTrailing) { settingsButton }
@@ -108,6 +134,7 @@ struct HomeView: View {
             }
             #if os(iOS)
             .sheet(isPresented: $showingRemote) { TVRemoteScreen() }
+            .task(id: session?.account) { await tvRemote.lookForTV() }
             #endif
             #elseif os(macOS)
             .toolbar {
@@ -121,8 +148,19 @@ struct HomeView: View {
             .itemDestinations()
             .refreshable { await load(reshuffling: true) }
             .task { await load() }
-            // A playback started here, from the banner or a card's menu, moved Continue Watching.
-            .onChange(of: player.endedPlayback) { Task { await load() } }
+            // Back from the background, Home refreshes as on coming back to it.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background { feed.wentAway() }
+                if phase == .active, isOnScreen { Task { await load() } }
+            }
+            // A playback started here, from the banner or a card, moved Continue Watching.
+            .onChange(of: player.endedPlayback) {
+                feed.apply(player.endedPlayback)
+                Task { await load() }
+            }
+            .onChange(of: feed.featured.map(\.id)) { old, new in
+                featuredId = FeaturedRotation.id(keeping: featuredId, from: old, in: new)
+            }
         }
         .opensTitles(on: $path)
     }
@@ -134,7 +172,8 @@ struct HomeView: View {
     }
 
     /// Home is on screen, with nothing over it and not scrolling, so the banner turning can't
-    /// change a title under the viewer's hand or behind their back.
+    /// change a title under the viewer's hand or behind their back. On Apple TV, that's with
+    /// focus on Home, not on the sidebar over it.
     private var bannerMayTurn: Bool {
         var covered = !path.isEmpty || player.coversScreens || isScrolling
         #if os(iOS) || os(visionOS)
@@ -146,13 +185,16 @@ struct HomeView: View {
         #if os(iOS)
         covered = covered || showingRemote
         #endif
+        #if os(tvOS)
+        covered = covered || focusIsInHome != true
+        #endif
         return isOnScreen && scenePhase == .active && !covered
     }
 
     #if os(tvOS)
     /// The first row that shows, the one under the banner.
     private var leadRow: HomeRow.ID? {
-        feed.rows.first { HomeRowView.isShown($0, in: feed) }?.id
+        feed.rows.first { feed.isShown($0.id) }?.id
     }
     #endif
 
@@ -234,30 +276,44 @@ struct HomeView: View {
         }
     }
 
+    private func undo(_ removal: ContinueWatchingRemoval) {
+        feed.undo(removal) { messages.show($0) }
+    }
+
     private func load(reshuffling: Bool = false) async {
         guard let session else { return }
         await feed.load(session: session, reshuffling: reshuffling)
     }
 }
 
+extension FocusedValues {
+    /// Set while focus is on Home's banner or rows.
+    @Entry var isInHome: Bool?
+}
+
 /// One of Home's rows: its cards once they're in, their shapes until then, or why they couldn't
 /// load. A row with nothing in it isn't there at all. The row is the same `Shelf` loading and
-/// loaded, so on Apple TV focus on a stand-in card stays in the row as the cards come in.
+/// loaded, so on Apple TV focus on a stand-in card stays in the row as the cards come in. It's
+/// given its titles rather than reading them from the feed, so one row loading leaves the others
+/// as they are.
 private struct HomeRowView: View {
     let row: HomeRow
+    /// Nil while they load.
+    let titles: [JellyfinItem]?
+    let problem: String?
+    let isShown: Bool
+    /// The row holds only some of its list's titles, so its title opens the rest.
+    let isTruncated: Bool
     let feed: HomeFeed
-
-    /// Whether a row shows at all: not once it has loaded with nothing in it.
-    static func isShown(_ row: HomeRow, in feed: HomeFeed) -> Bool {
-        feed.problems[row.id] != nil || feed.items[row.id]?.isEmpty != true
-    }
+    let removeFromContinueWatching: (JellyfinItem) -> Void
+    @Environment(PlayerCoordinator.self) private var player
 
     var body: some View {
         Group {
-            if let problem = feed.problems[row.id] {
+            if let problem {
                 problemRow(problem)
-            } else if Self.isShown(row, in: feed) {
-                Shelf(title: row.list.title, seeAll: row.list, items: feed.items[row.id], cardWidth: row.list.style.cardWidth,
+            } else if isShown {
+                Shelf(title: row.list.title, seeAll: isTruncated ? row.list : nil, items: titles, cardWidth: row.list.style.cardWidth,
                       placeholderStyle: row.list.style) { item in
                     card(item)
                 }
@@ -268,15 +324,25 @@ private struct HomeRowView: View {
     }
 
     @ViewBuilder private func card(_ item: JellyfinItem) -> some View {
-        switch row.list.style {
-        case .poster:
-            NavigationLink(value: item) { PosterCard(item: item) }
+        if row.id == HomeRows.continueWatching.id {
+            // Picks up where it was left, as the widget does; the title's page is in the menu.
+            Button { player.play(.item(item)) } label: { LandscapeCard(item: item, playsOnTap: true) }
                 .buttonStyle(.artwork)
-                .titleMenu(item) { feed.replace($0) }
-        case .landscape:
-            NavigationLink(value: item) { LandscapeCard(item: item) }
-                .buttonStyle(.artwork)
-                .titleMenu(item) { feed.replace($0) }
+                .titleMenu(item, playsOnTap: true) { feed.replace($0) } more: {
+                    Button("Remove from Continue Watching", systemImage: "minus.circle") { removeFromContinueWatching(item) }
+                }
+                .accessibilityHint(item.resumeSeconds != nil ? "Resumes it" : "Plays it")
+        } else {
+            switch row.list.style {
+            case .poster:
+                NavigationLink(value: item) { PosterCard(item: item) }
+                    .buttonStyle(.artwork)
+                    .titleMenu(item) { feed.replace($0) }
+            case .landscape:
+                NavigationLink(value: item) { LandscapeCard(item: item) }
+                    .buttonStyle(.artwork)
+                    .titleMenu(item) { feed.replace($0) }
+            }
         }
     }
 
@@ -286,8 +352,56 @@ private struct HomeRowView: View {
     }
 }
 
+/// Says a title left Continue Watching, and offers to put it back for a few seconds; on Apple
+/// TV, with the Play/Pause button, as the card it came from is gone.
+private struct RemovalToast: View {
+    let removal: ContinueWatchingRemoval
+    let undo: () -> Void
+    /// The time to put it back is over.
+    let expire: () -> Void
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+
+    /// How long the toast stays; long enough to reach Undo with VoiceOver too.
+    private var duration: Duration { .seconds(voiceOverEnabled ? 15 : 6) }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Removed from Continue Watching").font(.subheadline.weight(.semibold))
+                Text(removal.item.titleName).font(.caption).foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            #if os(tvOS)
+            Label("Undo", systemImage: "playpause.fill")
+                .font(.subheadline.weight(.semibold))
+                .accessibilityLabel("Play/Pause to undo")
+            #else
+            Button("Undo", action: undo)
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.platformGlass)
+                .accessibilityIdentifier("home.undoRemove")
+            #endif
+        }
+        .padding(.leading, 20)
+        .padding(.trailing, 10)
+        .padding(.vertical, 10)
+        .platformGlass(in: .capsule)
+        .padding(.horizontal, Metrics.edge)
+        .padding(.bottom, 12)
+        .accessibilityElement(children: .contain)
+        .task(id: removal.id) {
+            AccessibilityNotification.Announcement("Removed \(removal.item.titleName) from Continue Watching").post()
+            try? await Task.sleep(for: duration)
+            guard !Task.isCancelled else { return }
+            expire()
+        }
+    }
+}
+
 /// Which featured title the banner shows, kept as the title's id, so the banner stays on it when
-/// the titles load again in another order.
+/// the titles load again in another order. Off Apple TV the banner pages through them, with the
+/// last one again before the first and the first again after the last, so a swipe or a turn goes
+/// round from the end to the start without running back across them all.
 nonisolated enum FeaturedRotation {
     /// Where the title `id` is in `items`, or the first when it's gone.
     static func position(of id: String?, in items: [JellyfinItem]) -> Int {
@@ -300,19 +414,61 @@ nonisolated enum FeaturedRotation {
         let count = items.count
         return items[((position(of: id, in: items) + step) % count + count) % count].id
     }
+
+    /// The title to show once the titles `old` became `new`: `id` while it's still there, else
+    /// the first after it that is, round from the end.
+    static func id(keeping id: String?, from old: [String], in new: [String]) -> String? {
+        guard let id, !new.contains(id) else { return id }
+        guard let start = old.firstIndex(of: id) else { return new.first }
+        let after = old[(start + 1)...] + old[..<start]
+        return after.first(where: new.contains) ?? new.first
+    }
+
+    /// How many pages `count` titles take.
+    static func pageCount(for count: Int) -> Int {
+        count > 1 ? count + 2 : count
+    }
+
+    /// The title at `page`, among `count`.
+    static func title(atPage page: Int, count: Int) -> Int {
+        guard count > 1 else { return 0 }
+        return ((page - 1) % count + count) % count
+    }
+
+    /// The page of the title at `position`, among `count`: its own, not a copy at an end.
+    static func page(ofTitle position: Int, count: Int) -> Int {
+        count > 1 ? position + 1 : 0
+    }
 }
 
-/// The featured titles, one at a time across the top, turning every few seconds. It holds still
-/// while anything might act on the title it shows: a finger or pointer on it, one of its buttons
-/// with focus, a scroll, a menu or sheet over Home, a page over Home or another tab, the player,
-/// and Reduce Motion, VoiceOver or Switch Control, which would have it change under them too;
-/// there the titles turn by hand, with the adjustable dots. Turning on its own, it waits for the
-/// next title's picture and logo, so the one shown stays until they're in.
+/// How far the banner's pages have scrolled, as a page and a share of the next, and how wide its
+/// words are: read by the words alone, which follow the pictures as they move.
+@MainActor @Observable
+private final class HeroPager {
+    var progress: Double = 0
+    var isPaging = false
+    var wordsWidth: CGFloat = 0
+}
+
+/// The featured titles, one at a time across the top, turning every few seconds, the active dot
+/// filling as the next turn comes. It holds still while anything might act on the title it shows:
+/// a finger or pointer on it, one of its buttons with focus, a scroll, a menu or sheet over Home,
+/// a page over Home or another tab, the player, Apple TV's sidebar, and Reduce Motion, VoiceOver
+/// or Switch Control, which would have it change under them too. Turning on its own, it waits for
+/// the next title's picture and logo, so the one shown stays until they're in.
+///
+/// It turns by hand too. On iPhone, iPad, the Mac and Vision Pro the pictures follow a swipe and
+/// the words follow them, a tap on the picture opens the title, a dot goes to its title, and on
+/// the Mac and with an iPad's pointer, arrows at the sides show under the pointer; on the Mac the
+/// arrow keys turn it while one of its buttons has focus. On Apple TV, right from its last button
+/// goes on, and left from its first goes back but for the first title, where it opens the
+/// sidebar, the titles fading from one to the next with focus kept on the button.
 private struct HeroBanner: View {
     let items: [JellyfinItem]
     @Binding var shownId: String?
     /// Home is on screen with nothing over it, and not scrolling.
     let mayTurn: Bool
+    let feed: HomeFeed
     let openDetails: (JellyfinItem) -> Void
 
     @Environment(\.session) private var session
@@ -332,6 +488,8 @@ private struct HeroBanner: View {
     #endif
     /// When the title last changed: Play or Details pressed right after was meant for the one before.
     @State private var turnedAt = ContinuousClock.now - .seconds(1)
+    /// When the title shown began counting down to the next; nil while the banner holds still.
+    @State private var countdownStart: Date?
     @State private var visibleHeight: CGFloat = 0
     @State private var prefetcher = ImagePrefetcher()
     @State private var presentations = PresentationProbe()
@@ -339,7 +497,15 @@ private struct HeroBanner: View {
     #if os(tvOS)
     /// Bounds the banner's default focus, so it's the banner's to take when focus comes in.
     @Namespace private var focusScope
+    @FocusState private var isGoingBack: Bool
+    #else
+    @State private var pager = HeroPager()
+    /// The page the pictures are on.
+    @State private var page: Int?
     #endif
+
+    /// How long each title shows, turning on its own.
+    private static let interval: TimeInterval = 8
 
     private enum HeroButton {
         case play, details
@@ -348,18 +514,31 @@ private struct HeroBanner: View {
     /// What decides when the banner turns on its own: it counts down afresh each time it changes.
     private struct Turning: Equatable {
         let ids: [String]
+        let shownId: String?
         let holds: Bool
     }
 
     var body: some View {
-        let item = items[FeaturedRotation.position(of: shownId, in: items)]
+        let position = FeaturedRotation.position(of: shownId, in: items)
+        let item = items[position]
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
+                #if os(tvOS)
                 turning(item, alignment: .bottomLeading) {
                     heading(item)
-                    if !isStacked { details(item) }
+                    if !isStacked { about(item) }
                 }
-                if !isStacked { pages }
+                if !isStacked { buttons(item) }
+                #else
+                // Laid out for the title shown, and drawn for the pages as they move.
+                words(item)
+                    .hidden()
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { pager.wordsWidth = $0 }
+                    .overlay(alignment: .bottomLeading) {
+                        PagedWords(pager: pager, items: items) { words($0) }
+                    }
+                #endif
+                if !isStacked { dots(position) }
             }
             // The words go on the dark of the fade in either appearance.
             .environment(\.colorScheme, .dark)
@@ -371,17 +550,20 @@ private struct HeroBanner: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, topBarsHeight > 0 ? topBarsHeight + 14 : 0)
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(fullHeight, visible: visibleHeight), alignment: .bottomLeading)
-            .background {
-                ZStack {
-                    HeroBackdrop(url: session?.backdrop(item), from: 0.3, middle: 0.7, at: 0.72)
-                        .id(item.id)
-                        .transition(.opacity)
-                }
-            }
+            .background { art(item) }
+            #if !os(tvOS)
+            .overlay { arrows }
+            .animation(.easeOut(duration: 0.2), value: isHovered)
+            #endif
             if isStacked {
                 VStack(alignment: .leading, spacing: 10) {
-                    turning(item, alignment: .topLeading) { details(item) }
-                    pages
+                    #if os(tvOS)
+                    turning(item, alignment: .topLeading) { about(item) }
+                    #else
+                    about(item)
+                    #endif
+                    buttons(item)
+                    dots(position)
                 }
                 .padding(.horizontal, Metrics.edge)
                 .padding(.bottom, 6)
@@ -390,13 +572,6 @@ private struct HeroBanner: View {
         .onGeometryChange(for: CGFloat.self) { $0.bounds(of: .scrollView)?.height ?? 0 } action: { visibleHeight = $0 }
         .background { PresentationProbeView(probe: presentations) }
         #if os(iOS)
-        .gesture(
-            DragGesture(minimumDistance: 30)
-                .onEnded { value in
-                    if value.translation.width < -40 { turn(by: 1) }
-                    if value.translation.width > 40 { turn(by: -1) }
-                }
-        )
         // Alongside the swipe and the buttons, not ahead of them.
         .simultaneousGesture(DragGesture(minimumDistance: 0).updating($isTouched) { _, touched, _ in touched = true })
         #endif
@@ -404,6 +579,13 @@ private struct HeroBanner: View {
         .onHover { isHovered = $0 }
         #endif
         #if os(macOS)
+        .onMoveCommand { direction in
+            switch direction {
+            case .left: turn(by: -1)
+            case .right: turn(by: 1)
+            default: break
+            }
+        }
         .task {
             for await _ in NotificationCenter.default.notifications(named: NSMenu.didBeginTrackingNotification) { isMenuOpen = true }
         }
@@ -416,21 +598,34 @@ private struct HeroBanner: View {
         .focusScope(focusScope)
         // Up from the rows, focus goes to the title's main button, not whichever is above the
         // card it leaves.
-        .defaultFocus($focusedButton, Self.showsPlay(for: item) ? .play : .details, priority: .userInitiated)
+        .defaultFocus($focusedButton, showsPlay(for: item) ? .play : .details, priority: .userInitiated)
+        #else
+        .onChange(of: shownId) { showPage(of: shownId) }
+        .onChange(of: items.map(\.id)) { showPage(of: shownId) }
+        .onAppear { showPage(of: shownId) }
         #endif
         .task(id: items.map(\.id)) {
             prefetcher.startPrefetching(with: items.flatMap(imageURLs))
         }
-        .task(id: Turning(ids: items.map(\.id), holds: holds)) {
-            guard !holds else { return }
+        .task(id: Turning(ids: items.map(\.id), shownId: shownId, holds: holds)) {
+            guard !holds, items.count > 1 else {
+                countdownStart = nil
+                return
+            }
+            countdownStart = .now
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(8))
-                guard !Task.isCancelled, !presentations.isCovered else { continue }
+                try? await Task.sleep(for: .seconds(Self.interval))
+                guard !Task.isCancelled else { return }
+                guard !presentations.isCovered else {
+                    countdownStart = .now
+                    continue
+                }
                 let shown = shownId
                 guard let next = items.first(where: { $0.id == FeaturedRotation.id(after: shown, by: 1, in: items) }) else { return }
                 await load(next)
                 guard !Task.isCancelled, !presentations.isCovered, shownId == shown else { continue }
-                show(next.id)
+                turn(by: 1)
+                return
             }
         }
         .accessibilityElement(children: .contain)
@@ -440,6 +635,122 @@ private struct HeroBanner: View {
     /// At the accessibility sizes, all but the title go under the picture rather than over it,
     /// where they would run up past the fade into the page, onto the picture itself.
     private var isStacked: Bool { dynamicTypeSize.isAccessibilitySize }
+
+    // MARK: Pictures
+
+    #if os(tvOS)
+    /// The title's picture, fading into the next one's.
+    private func art(_ item: JellyfinItem) -> some View {
+        ZStack {
+            HeroBackdrop(url: session?.backdrop(item), from: 0.3, middle: 0.7, at: 0.72)
+                .id(item.id)
+                .transition(.opacity)
+        }
+    }
+    #else
+    /// The titles' pictures, side by side, a page each the screen's width, which a swipe moves
+    /// and a tap on opens.
+    private func art(_ item: JellyfinItem) -> some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                ForEach(0..<FeaturedRotation.pageCount(for: items.count), id: \.self) { page in
+                    let title = items[FeaturedRotation.title(atPage: page, count: items.count)]
+                    HeroBackdrop(url: session?.backdrop(title), from: 0.3, middle: 0.7, at: 0.72)
+                        .containerRelativeFrame(.horizontal)
+                        .contentShape(.rect)
+                        .onTapGesture {
+                            guard !justTurned else { return }
+                            openDetails(title)
+                        }
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.paging)
+        .scrollPosition(id: $page)
+        .scrollIndicators(.hidden)
+        .scrollDisabled(items.count < 2)
+        // Past the safe area at the sides, under any bars there, as the page's artwork runs.
+        .ignoresSafeArea(edges: .horizontal)
+        .onScrollGeometryChange(for: Double.self) { geometry in
+            geometry.containerSize.width > 0 ? geometry.contentOffset.x / geometry.containerSize.width : 0
+        } action: { _, progress in
+            pager.progress = progress
+        }
+        .onScrollPhaseChange { _, phase in
+            pager.isPaging = phase != .idle
+            if phase == .idle { settlePage() }
+        }
+        .visualEffect { content, geometry in
+            // Pulled down past the top, the pictures stretch up from their foot to fill the space.
+            let overscroll = max(0, geometry.frame(in: .scrollView(axis: .vertical)).minY)
+            return content.scaleEffect(geometry.size.height > 0 ? 1 + overscroll / geometry.size.height : 1, anchor: .bottom)
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Arrows at the sides, under a pointer, that turn the titles.
+    @ViewBuilder private var arrows: some View {
+        if items.count > 1, isHovered {
+            HStack {
+                arrow("Previous Title", systemImage: "chevron.left") { turn(by: -1) }
+                Spacer()
+                arrow("Next Title", systemImage: "chevron.right") { turn(by: 1) }
+            }
+            .padding(.horizontal, Metrics.edge / 2)
+            .transition(.opacity)
+        }
+    }
+
+    private func arrow(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.iconOnly)
+                .font(.title3.weight(.semibold))
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.platformGlass)
+        .buttonBorderShape(.circle)
+        .environment(\.colorScheme, .dark)
+        #if os(macOS)
+        .help(title)
+        #endif
+        // The dots turn the titles for VoiceOver, Voice Control and Switch Control.
+        .accessibilityHidden(true)
+    }
+
+    /// Scrolls the pictures to the title `id`'s page, at once, when they're on another title's.
+    private func showPage(of id: String?) {
+        let position = FeaturedRotation.position(of: id, in: items)
+        if let page, FeaturedRotation.title(atPage: page, count: items.count) == position { return }
+        let target = FeaturedRotation.page(ofTitle: position, count: items.count)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { page = target }
+        pager.progress = Double(target)
+    }
+
+    /// The pictures came to rest: the banner shows the title they're on, and from a copy at an
+    /// end, they go to the title's own page, which looks the same.
+    private func settlePage() {
+        guard let page else { return }
+        let position = FeaturedRotation.title(atPage: page, count: items.count)
+        let own = FeaturedRotation.page(ofTitle: position, count: items.count)
+        if own != page {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { self.page = own }
+        }
+        pager.progress = Double(own)
+        let id = items[position].id
+        if id != shownId {
+            turnedAt = .now
+            shownId = id
+        }
+    }
+    #endif
+
+    // MARK: Words
 
     /// `content` for `item`, giving way to the next title's as a whole: the words going fade out
     /// quickly, then the new ones fade in, sliding a little into place.
@@ -453,26 +764,40 @@ private struct HeroBanner: View {
         }
     }
 
-    /// The title, as its logo when there is one.
+    /// A page's words over its picture: the title, and but at the accessibility sizes, the
+    /// facts, the overview and the buttons.
+    private func words(_ item: JellyfinItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            heading(item)
+            if !isStacked {
+                about(item)
+                buttons(item)
+            }
+        }
+    }
+
+    /// The title, as its logo when there is one. A tap on it goes to the picture under it.
     private func heading(_ item: JellyfinItem) -> some View {
         TitleLogo(url: session?.logo(item, width: TitleLogo.requestWidth), name: item.name)
             .accessibilityAddTraits(.isHeader)
+            .allowsHitTesting(false)
     }
 
-    /// Whether the banner offers to play the title: one that plays, and is out.
-    private static func showsPlay(for item: JellyfinItem) -> Bool {
-        item.isPlayable && !item.isNotYetAvailable()
-    }
-
-    /// The facts, the overview and the buttons.
-    @ViewBuilder private func details(_ item: JellyfinItem) -> some View {
-        FactsLine(item: item)
-        if let overview = item.overview {
-            Text(overview).font(.subheadline).lineLimit(dynamicTypeSize.lineLimit(2)).frame(maxWidth: 640, alignment: .leading)
+    /// The facts and the overview.
+    @ViewBuilder private func about(_ item: JellyfinItem) -> some View {
+        Group {
+            FactsLine(item: item)
+            if let overview = item.overview {
+                Text(overview).font(.subheadline).lineLimit(dynamicTypeSize.lineLimit(2)).frame(maxWidth: 640, alignment: .leading)
+            }
         }
-        // Side by side, with Details as its symbol alone when "Resume · 1 hr, 10 min left"
-        // leaves no room for its name, or one above the other.
-        ViewThatFits(in: .horizontal) {
+        .allowsHitTesting(false)
+    }
+
+    /// Play and Details: side by side, with Details as its symbol alone when "Resume · 1 hr, 10
+    /// min left" leaves no room for its name, or one above the other.
+    @ViewBuilder private func buttons(_ item: JellyfinItem) -> some View {
+        let choices = ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
                 playButton(item, oneLine: true)
                 detailsButton(item, titled: true)
@@ -487,19 +812,50 @@ private struct HeroBanner: View {
             }
         }
         .controlSize(.large)
+        #if os(tvOS)
+        // A move command only reaches the banner when focus has nowhere to go, as right from
+        // Details does. Left from the first button focus would go out to the sidebar, so while
+        // there's a title before, a stop in the margin left of the buttons takes it and goes back
+        // a title. It's laid out there, not offset there: focus goes by where views are laid out.
+        HStack(spacing: Metrics.edge / 4) {
+            Color.clear
+                .frame(width: Metrics.edge / 2)
+                .focusable(FeaturedRotation.position(of: shownId, in: items) > 0)
+                .focused($isGoingBack)
+                .accessibilityHidden(true)
+            choices
+        }
+        .padding(.leading, -Metrics.edge * 3 / 4)
+        .onChange(of: isGoingBack) { _, going in
+            guard going else { return }
+            let previous = items[FeaturedRotation.position(of: FeaturedRotation.id(after: shownId, by: -1, in: items), in: items)]
+            focusedButton = showsPlay(for: previous) ? .play : .details
+            turn(by: -1)
+        }
+        .onMoveCommand { direction in
+            if direction == .right, focusedButton == .details { turn(by: 1) }
+        }
+        #else
+        choices
+        #endif
+    }
+
+    /// Whether the banner offers to play the title: a movie that's out, or a show's next episode.
+    private func showsPlay(for item: JellyfinItem) -> Bool {
+        item.isSeries || (item.isPlayable && !item.isNotYetAvailable())
     }
 
     @ViewBuilder private func playButton(_ item: JellyfinItem, oneLine: Bool) -> some View {
-        if Self.showsPlay(for: item) {
+        if showsPlay(for: item) {
             Button {
                 guard !justTurned else { return }
-                player.play(.item(item))
+                play(item)
             } label: {
-                Label(Self.playLabel(for: item), systemImage: "play.fill")
+                Label(playLabel(for: item), systemImage: "play.fill")
             }
             .buttonStyle(.platformGlassProminent)
             .fixedSize(horizontal: oneLine, vertical: false)
-            .accessibilityLabel(Self.spokenPlayLabel(for: item))
+            .accessibilityLabel(spokenPlayLabel(for: item))
             .focused($focusedButton, equals: .play)
         }
     }
@@ -520,20 +876,64 @@ private struct HeroBanner: View {
         .focused($focusedButton, equals: .details)
     }
 
-    /// A dot for each title, the one shown long.
-    @ViewBuilder private var pages: some View {
+    /// Plays a movie, or a show's next episode; a show with none to play opens instead.
+    private func play(_ item: JellyfinItem) {
+        guard item.isSeries else {
+            player.play(.item(item))
+            return
+        }
+        Task {
+            if let episode = await feed.episode(for: item) {
+                player.play(.item(episode))
+            } else {
+                openDetails(item)
+            }
+        }
+    }
+
+    /// "Resume · 1 hr, 10 min left", as the title's page has it, "Play S1, E1" for a show's next
+    /// episode, "Play Again" for a movie watched, or "Play".
+    private func playLabel(for item: JellyfinItem) -> String {
+        if item.isSeries {
+            return feed.featuredEpisodes[item.id].flatMap(LandscapeCard.shortCode).map { "Play \($0)" } ?? "Play"
+        }
+        if item.isPlayed { return "Play Again" }
+        guard let resume = item.resumeSeconds else { return "Play" }
+        guard let total = item.runtimeSeconds, total > resume else { return "Resume" }
+        return "Resume · \(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
+    }
+
+    /// `playLabel(for:)` as it's said: "Resume, 1 hour, 10 minutes left", "Play Season 1, Episode 1".
+    private func spokenPlayLabel(for item: JellyfinItem) -> String {
+        if item.isSeries {
+            return feed.featuredEpisodes[item.id]?.spokenEpisodeCode.map { "Play \($0)" } ?? "Play"
+        }
+        if item.isPlayed { return "Play Again" }
+        guard let resume = item.resumeSeconds else { return "Play" }
+        guard let total = item.runtimeSeconds, total > resume else { return "Resume" }
+        return "Resume, \(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .wide))) left"
+    }
+
+    // MARK: Dots
+
+    /// A dot for each title, the one shown long, filling as the next turn comes; a dot goes to
+    /// its title.
+    @ViewBuilder private func dots(_ position: Int) -> some View {
         if items.count > 1 {
-            let position = FeaturedRotation.position(of: shownId, in: items)
-            HStack(spacing: 6) {
-                ForEach(items.indices, id: \.self) { index in
-                    Capsule().fill(index == position ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
-                        .frame(width: index == position ? 18 : 6, height: 6)
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: countdownStart == nil)) { context in
+                let fill = countdownStart.map { min(1, max(0, context.date.timeIntervalSince($0) / Self.interval)) } ?? 1
+                HStack(spacing: 0) {
+                    ForEach(items.indices, id: \.self) { index in
+                        dot(isShown: index == position, fill: fill)
+                            // A touch target's height around dots 6 points high, taken back out of
+                            // the layout below so nothing around them moves.
+                            .frame(width: (index == position ? 18 : 6) + 6, height: 44)
+                            .contentShape(.rect)
+                            .onTapGesture { go(to: index) }
+                    }
                 }
             }
-            // A touch target's height around dots 6 points high, taken back out of the
-            // layout below so nothing around them moves.
-            .frame(height: 44)
-            .contentShape(.rect)
+            .padding(.horizontal, -3)
             // Turns the titles for VoiceOver, with a swipe up or down, and for Voice
             // Control and Switch Control, with its actions.
             .accessibilityElement()
@@ -553,25 +953,28 @@ private struct HeroBanner: View {
         }
     }
 
-    /// "Resume · 1 hr, 10 min left", as the title's page has it, or "Play".
-    private static func playLabel(for item: JellyfinItem) -> String {
-        guard let resume = item.resumeSeconds else { return "Play" }
-        guard let total = item.runtimeSeconds, total > resume else { return "Resume" }
-        return "Resume · \(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
+    private func dot(isShown: Bool, fill: Double) -> some View {
+        Capsule().fill(.tertiary)
+            .overlay(alignment: .leading) {
+                if isShown {
+                    Rectangle().fill(.primary).frame(width: 18 * fill)
+                }
+            }
+            .clipShape(.capsule)
+            .frame(width: isShown ? 18 : 6, height: 6)
+            .animation(.snappy(duration: 0.25), value: isShown)
     }
 
-    /// "Resume, 1 hour, 10 minutes left", rather than VoiceOver spelling out "hr" and "min".
-    private static func spokenPlayLabel(for item: JellyfinItem) -> String {
-        guard let resume = item.resumeSeconds else { return "Play" }
-        guard let total = item.runtimeSeconds, total > resume else { return "Resume" }
-        return "Resume, \(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .wide))) left"
-    }
+    // MARK: Turning
 
     /// Something might act on the title shown, so it doesn't turn on its own.
     private var holds: Bool {
         var holds = !mayTurn || isTouched || isHovered || focusedButton != nil || holdsStill
         #if os(macOS)
         holds = holds || isMenuOpen
+        #endif
+        #if !os(tvOS)
+        holds = holds || pager.isPaging
         #endif
         return holds
     }
@@ -589,13 +992,42 @@ private struct HeroBanner: View {
 
     private func turn(by step: Int) {
         guard items.count > 1 else { return }
+        #if os(tvOS)
         show(FeaturedRotation.id(after: shownId, by: step, in: items))
+        #else
+        let position = FeaturedRotation.position(of: shownId, in: items)
+        scroll(toPage: FeaturedRotation.page(ofTitle: position, count: items.count) + step)
+        #endif
     }
 
+    private func go(to position: Int) {
+        guard items.indices.contains(position) else { return }
+        #if os(tvOS)
+        show(items[position].id)
+        #else
+        scroll(toPage: FeaturedRotation.page(ofTitle: position, count: items.count))
+        #endif
+    }
+
+    #if os(tvOS)
     private func show(_ id: String?) {
         turnedAt = .now
         withAnimation(.easeInOut(duration: 0.6)) { shownId = id }
     }
+    #else
+    /// Moves the pictures to `target`, sliding, or with Reduce Motion at once.
+    private func scroll(toPage target: Int) {
+        turnedAt = .now
+        if reduceMotion {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { page = target }
+            settlePage()
+        } else {
+            withAnimation(.smooth(duration: 0.55)) { page = target } completion: { settlePage() }
+        }
+    }
+    #endif
 
     /// The pictures the banner shows for `item`: its backdrop and logo.
     private func imageURLs(_ item: JellyfinItem) -> [URL] {
@@ -621,6 +1053,32 @@ private struct HeroBanner: View {
         #endif
     }
 }
+
+#if !os(tvOS)
+/// The words of the banner's pages around where its pictures have scrolled to, each moving with
+/// its picture, a page apart, and fading as it goes; at rest, the shown title's alone. It alone
+/// reads how far the pictures have scrolled, so the rest of the banner stays as it is meanwhile.
+private struct PagedWords<Words: View>: View {
+    let pager: HeroPager
+    let items: [JellyfinItem]
+    @ViewBuilder let words: (JellyfinItem) -> Words
+
+    var body: some View {
+        let progress = pager.progress
+        let lower = Int(progress.rounded(.down))
+        ZStack(alignment: .bottomLeading) {
+            ForEach([lower, lower + 1], id: \.self) { page in
+                let distance = Double(page) - progress
+                if abs(distance) < 0.999, items.count > 0 {
+                    words(items[FeaturedRotation.title(atPage: page, count: items.count)])
+                        .offset(x: distance * pager.wordsWidth)
+                        .opacity(max(0, 1 - abs(distance) * 1.4))
+                }
+            }
+        }
+    }
+}
+#endif
 
 /// The banner's place while Home loads for the first time, as tall as the banner will be, so the
 /// page doesn't change shape when it comes.

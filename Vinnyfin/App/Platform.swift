@@ -218,7 +218,8 @@ extension View {
 }
 
 /// For artwork cards: Apple TV lifts them under focus; elsewhere they stay untinted, with the
-/// title in the text color rather than the accent, and give a little under a finger or a click.
+/// title in the text color rather than the accent, and give a little under a finger or a click,
+/// on iPhone and iPad with a light tap felt as they do.
 #if os(tvOS)
 typealias ArtworkButtonStyle = BorderlessButtonStyle
 
@@ -235,6 +236,9 @@ struct ArtworkButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
             .opacity(configuration.isPressed && reduceMotion ? 0.7 : 1)
             .animation(.spring(duration: 0.3, bounce: 0.4), value: configuration.isPressed)
+            #if os(iOS)
+            .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.5), trigger: configuration.isPressed) { _, pressed in pressed }
+            #endif
     }
 }
 

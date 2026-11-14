@@ -50,14 +50,12 @@ final class VisionPlayerTests: XCTestCase {
         try await requestScreenshot("movie-subtitles")
         XCTAssertTrue(subtitlesAppeared, "The subtitle choices never appeared")
         subtitles.element(boundBy: 0).tap()
-        XCTAssertTrue(app.buttons["panel.subtitle.off"].waitForNonExistence(timeout: uiTimeout), "The subtitle panel didn't close")
-
-        tap(app.buttons["player.audio"])
-        let audio = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'panel.audio.'"))
-        let audioAppeared = audio.firstMatch.waitForExistence(timeout: uiTimeout)
-        try await requestScreenshot("movie-audio")
-        XCTAssertTrue(audioAppeared, "The audio choices never appeared")
-        audio.element(boundBy: 0).tap()
+        // The Audio & Subtitles panel stays open on a choice, with the subtitles' timing under them.
+        let timing = app.descendants(matching: .any)["panel.timing"]
+        XCTAssertTrue(timing.waitForExistence(timeout: uiTimeout), "The subtitle timing never appeared")
+        try await requestScreenshot("movie-audio-subtitles")
+        tap(app.otherElements["player.panel"].buttons["Close"])
+        XCTAssertTrue(app.buttons["panel.subtitle.off"].waitForNonExistence(timeout: uiTimeout), "The panel didn't close")
 
         try scrub(to: 0.5, in: app, expecting: "1:")
         try await requestScreenshot("movie-scrubbed")

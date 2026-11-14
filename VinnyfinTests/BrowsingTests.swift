@@ -481,6 +481,264 @@ struct FeaturedRotationTests {
         #expect(FeaturedRotation.id(after: nil, by: 1, in: items) == "b")
         #expect(FeaturedRotation.id(after: "a", by: 1, in: []) == nil)
     }
+
+    @Test func goesOnToTheNextTitleLeftWhenTheOneShownLeaves() {
+        // "b" was started, so it's in Continue Watching now and out of the banner.
+        #expect(FeaturedRotation.id(keeping: "b", from: ["a", "b", "c", "d"], in: ["a", "c", "d"]) == "c")
+        #expect(FeaturedRotation.id(keeping: "d", from: ["a", "b", "c", "d"], in: ["a", "b", "c"]) == "a")
+        #expect(FeaturedRotation.id(keeping: "c", from: ["a", "b", "c", "d"], in: ["d", "c"]) == "c")
+        #expect(FeaturedRotation.id(keeping: "x", from: ["a"], in: ["b"]) == "b")
+        #expect(FeaturedRotation.id(keeping: nil, from: [], in: ["a"]) == nil)
+    }
+
+    @Test func pagesGoRoundWithACopyAtEachEnd() {
+        // Four titles: the last, the four, then the first again.
+        #expect(FeaturedRotation.pageCount(for: 4) == 6)
+        #expect((0..<6).map { FeaturedRotation.title(atPage: $0, count: 4) } == [3, 0, 1, 2, 3, 0])
+        #expect(FeaturedRotation.page(ofTitle: 0, count: 4) == 1)
+        #expect(FeaturedRotation.page(ofTitle: 3, count: 4) == 4)
+        // One title has a page of its own and nothing to go round to.
+        #expect(FeaturedRotation.pageCount(for: 1) == 1)
+        #expect(FeaturedRotation.title(atPage: 0, count: 1) == 0)
+        #expect(FeaturedRotation.page(ofTitle: 0, count: 1) == 0)
+    }
+}
+
+/// What the banner features.
+struct FeaturedTitlesTests {
+    private static func title(_ id: String, _ type: String = "Movie", logo: Bool = true, backdrop: Bool = true,
+                              played: Bool = false, resumeTicks: Int64? = nil, playedPercentage: Double? = nil) -> JellyfinItem {
+        var item = JellyfinItem(id: id, name: "Title \(id)", type: type)
+        if logo { item.imageTags = ["Logo": "l"] }
+        if backdrop { item.backdropImageTags = ["b"] }
+        item.userData = UserItemData(playbackPositionTicks: resumeTicks, played: played, playedPercentage: playedPercentage)
+        return item
+    }
+
+    private static func episode(of seriesId: String) -> JellyfinItem {
+        var episode = JellyfinItem(id: "e.\(seriesId)", name: "Episode", type: "Episode")
+        episode.seriesId = seriesId
+        return episode
+    }
+
+    @Test func takesMoviesAndShowsInTurn() {
+        let movies = ["m1", "m2", "m3", "m4"].map { Self.title($0) }
+        let shows = ["s1", "s2"].map { Self.title($0, "Series") }
+        let featured = HomeRows.featured(movies: movies, shows: shows, continueWatching: [])
+        #expect(featured.map(\.id) == ["m1", "s1", "m2", "s2", "m3", "m4"])
+    }
+
+    @Test func leavesOutWhatsInContinueWatching() {
+        let movies = [Self.title("m1"), Self.title("m2")]
+        let shows = [Self.title("s1", "Series"), Self.title("s2", "Series")]
+        let featured = HomeRows.featured(movies: movies, shows: shows, continueWatching: [movies[0], Self.episode(of: "s2")])
+        #expect(featured.map(\.id) == ["m2", "s1"])
+    }
+
+    @Test func leavesOutWhatWasWatchedOrStarted() {
+        let movies = [Self.title("watched", played: true), Self.title("started", resumeTicks: 600_000_000), Self.title("new")]
+        let shows = [Self.title("begun", "Series", playedPercentage: 20), Self.title("fresh", "Series", playedPercentage: 0),
+                     Self.title("done", "Series", played: true)]
+        let featured = HomeRows.featured(movies: movies, shows: shows, continueWatching: [])
+        #expect(featured.map(\.id) == ["new", "fresh"])
+    }
+
+    @Test func putsTitlesWithALogoFirstAndNeedsABackdrop() {
+        let movies = [Self.title("plain", logo: false), Self.title("logo"), Self.title("bare", backdrop: false)]
+        let featured = HomeRows.featured(movies: movies, shows: [], continueWatching: [])
+        #expect(featured.map(\.id) == ["logo", "plain"])
+    }
+
+    @Test func fillsInWithTheBestRatedWhenThereAreTooFewNew() {
+        let movies = [Self.title("m1"), Self.title("old", played: true)]
+        let topRated = [Self.title("m1"), Self.title("t1"), Self.title("t2", "Series")]
+        let featured = HomeRows.featured(movies: movies, shows: [], topRated: topRated, continueWatching: [])
+        #expect(featured.map(\.id) == ["m1", "t1", "t2"])
+    }
+
+    @Test func featuresWhatWasWatchedOnlyWithNothingElse() {
+        let movies = [Self.title("m1", played: true), Self.title("m2", played: true)]
+        let featured = HomeRows.featured(movies: movies, shows: [], continueWatching: [Self.title("m2")])
+        #expect(featured.map(\.id) == ["m1"])
+    }
+
+    @Test func featuresAtMostSix() {
+        let movies = (0..<10).map { Self.title("m\($0)") }
+        #expect(HomeRows.featured(movies: movies, shows: [], continueWatching: []).count == HomeRows.featuredCount)
+    }
+}
+
+/// Rows Home leaves out, for repeating the rows above them or holding too little.
+struct HomeCurationTests {
+    private static func titles(_ ids: [String]) -> [JellyfinItem] {
+        ids.map { JellyfinItem(id: $0, name: $0, type: "Movie") }
+    }
+
+    @Test func unwatchedFavoritesSameAsFavoritesGivesWay() {
+        let favorites = Self.titles(["a", "b"])
+        #expect(HomeRows.givesWay(HomeRows.unwatchedFavorites.id, titles: favorites, above: [favorites]))
+        // With one of them watched, it's a row of its own.
+        let unwatched = Self.titles(["b", "c"])
+        #expect(!HomeRows.givesWay(HomeRows.unwatchedFavorites.id, titles: unwatched, above: [favorites]))
+    }
+
+    @Test func aRowMadeFromOneTitleOrGenreNeedsFourTitles() {
+        let watched = JellyfinItem(id: "w", name: "Port Ellery", type: "Series")
+        let because = HomeRows.becauseYouWatched(watched).id
+        #expect(HomeRows.givesWay(because, titles: Self.titles(["x"]), above: []))
+        #expect(HomeRows.givesWay(because, titles: Self.titles(["x", "y", "z"]), above: []))
+        #expect(!HomeRows.givesWay(because, titles: Self.titles(["x", "y", "z", "q"]), above: []))
+        #expect(HomeRows.givesWay(HomeRows.genre("Drama", type: "Movie").id, titles: Self.titles(["x", "y"]), above: []))
+        #expect(HomeRows.givesWay(HomeRows.somethingDifferent("Drama").id, titles: Self.titles(["x"]), above: []))
+        // A row of the newest, or the best, isn't made from one title.
+        #expect(!HomeRows.givesWay(HomeRows.newMovies.id, titles: Self.titles(["x"]), above: []))
+    }
+
+    @Test func aRowMostlyAboveAlreadyGivesWay() {
+        let recent = Self.titles((0..<12).map { "m\($0)" })
+        // The same twelve, newest released first.
+        let newReleases = Array(recent.reversed())
+        #expect(HomeRows.givesWay(HomeRows.newMovies.id, titles: newReleases, above: [recent]))
+        // Eight of its first ten above: a repeat.
+        let mostly = Self.titles(["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "n1", "n2", "n3"])
+        #expect(HomeRows.givesWay(HomeRows.topMovies.id, titles: mostly, above: [recent]))
+        // Half of them new: a row worth having.
+        let half = Self.titles(["m0", "n1", "m1", "n2", "m2", "n3", "m3", "n4", "m4", "n5"])
+        #expect(!HomeRows.givesWay(HomeRows.topMovies.id, titles: half, above: [recent]))
+    }
+
+    @Test func rowsThatShowWhateverTheyHoldNeverGiveWay() {
+        let recent = Self.titles(["a"])
+        for id in [HomeRows.continueWatching.id, HomeRows.recentMovies.id, HomeRows.recentShows.id,
+                   HomeRows.favorites.id, HomeRows.recentlyWatched.id] {
+            #expect(!HomeRows.givesWay(id, titles: recent, above: [recent]))
+        }
+    }
+
+    @Test func aRowHoldsOnlySomeOfItsListWhenItsFullOrTheListHasMore() {
+        let twelve = Self.titles((0..<12).map { "m\($0)" })
+        #expect(!HomeFeed.isTruncated(ItemsPage(items: twelve, totalRecordCount: 12)))
+        #expect(HomeFeed.isTruncated(ItemsPage(items: twelve, totalRecordCount: 40)))
+        // A list worked out whole, such as Continue Watching, as long as a row asks for.
+        let full = Self.titles((0..<HomeRows.rowLength).map { "m\($0)" })
+        #expect(HomeFeed.isTruncated(ItemsPage(items: full, totalRecordCount: full.count)))
+    }
+}
+
+/// Home keeps its rows coming back to it.
+struct HomeRefreshTests {
+    @Test func keepsTheRowsComingBackSoon() {
+        #expect(!HomeFeed.picksRows(reshuffling: false, awayFor: nil, isSettled: true))
+        #expect(!HomeFeed.picksRows(reshuffling: false, awayFor: 29 * 60, isSettled: true))
+    }
+
+    @Test func picksTheRowsAgainAfterHalfAnHourAwayOrWhenPulled() {
+        #expect(HomeFeed.picksRows(reshuffling: false, awayFor: 30 * 60, isSettled: true))
+        #expect(HomeFeed.picksRows(reshuffling: true, awayFor: nil, isSettled: true))
+    }
+
+    @Test func picksTheRowsWhileTheyHaventLoaded() {
+        #expect(HomeFeed.picksRows(reshuffling: false, awayFor: nil, isSettled: false))
+    }
+}
+
+/// Taking titles out of Continue Watching, and putting them back.
+struct ContinueWatchingRemovalTests {
+    private static func movie(_ id: String, resumeTicks: Int64? = 600_000_000) -> JellyfinItem {
+        var item = JellyfinItem(id: id, name: "Movie \(id)", type: "Movie")
+        item.userData = UserItemData(playbackPositionTicks: resumeTicks)
+        return item
+    }
+
+    private static func episode(_ id: String, of seriesId: String, resumeTicks: Int64? = nil) -> JellyfinItem {
+        var item = JellyfinItem(id: id, name: "Episode \(id)", type: "Episode")
+        item.seriesId = seriesId
+        item.userData = UserItemData(playbackPositionTicks: resumeTicks)
+        return item
+    }
+
+    @Test func aMovieHasItsPositionClearedOnEveryVersion() {
+        var movie = Self.movie("m1")
+        movie.mediaSources = [MediaSource(id: "m1"), MediaSource(id: "m1.4k")]
+        let removal = ContinueWatchingRemoval(item: movie, position: 0, lastPlayed: nil)
+        #expect(removal.clearing == ["m1", "m1.4k"])
+        #expect(removal.hidingShow == nil)
+    }
+
+    @Test func anEpisodePartwayThroughIsClearedAndItsShowKeptOut() {
+        let removal = ContinueWatchingRemoval(item: Self.episode("e3", of: "s1", resumeTicks: 600_000_000), position: 1, lastPlayed: nil)
+        #expect(removal.clearing == ["e3"])
+        #expect(removal.hidingShow == "s1")
+    }
+
+    @Test func aShowsNextEpisodeKeepsTheShowOutAlone() {
+        let removal = ContinueWatchingRemoval(item: Self.episode("e4", of: "s1"), position: 0, lastPlayed: nil)
+        #expect(removal.clearing.isEmpty)
+        #expect(removal.hidingShow == "s1")
+    }
+
+    @Test func aTitleTakenOutStaysOutUntilSomethingOfItIsPlayedAgain() {
+        let then = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let entries = [
+            UpNext.Entry(item: Self.movie("m1"), lastPlayed: then),
+            UpNext.Entry(item: Self.episode("e4", of: "s1"), lastPlayed: then),
+            UpNext.Entry(item: Self.movie("m2"), lastPlayed: then),
+        ]
+        let takenOut = ["m1": then, "s1": then]
+        #expect(HomeFeed.leavingOut(entries, takenOut: takenOut).map(\.item.id) == ["m2"])
+        // Played again since: the show's next episode is back.
+        let later = [UpNext.Entry(item: Self.episode("e5", of: "s1"), lastPlayed: then.addingTimeInterval(60))]
+        #expect(HomeFeed.leavingOut(later, takenOut: takenOut).map(\.item.id) == ["e5"])
+    }
+
+    @Test func aShowKeptOutLeavesTheListUntilPlayedAfter() {
+        let then = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        var finished = Self.episode("e3", of: "s1")
+        finished.userData = UserItemData(played: true, lastPlayedDate: JellyfinDate.format(then))
+        var other = Self.episode("o1", of: "s2")
+        other.userData = UserItemData(played: true, lastPlayedDate: JellyfinDate.format(then.addingTimeInterval(-60)))
+        let shows = UpNext.shows(inProgress: [], finished: [finished, other], serverNext: [])
+        var movie = Self.movie("m1")
+        movie.userData?.lastPlayedDate = JellyfinDate.format(then.addingTimeInterval(-120))
+
+        let titles = UpNext.titles(movies: [movie], shows: shows, hidden: ["s1": then])
+        #expect(titles.count == 2)
+        #expect(UpNext.returned(shows, marks: ["s1": then]).isEmpty)
+
+        // An episode of it played after it was taken out brings it back.
+        var again = Self.episode("e4", of: "s1")
+        again.userData = UserItemData(played: true, lastPlayedDate: JellyfinDate.format(then.addingTimeInterval(300)))
+        let played = UpNext.shows(inProgress: [], finished: [again, finished, other], serverNext: [])
+        #expect(UpNext.titles(movies: [], shows: played, hidden: ["s1": then]).count == 2)
+        #expect(UpNext.returned(played, marks: ["s1": then]) == ["s1"])
+    }
+
+    @Test func showsKeptOutAreRememberedByUserAndLetBack() throws {
+        let suite = "ContinueWatchingRemovalTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let then = Date(timeIntervalSinceReferenceDate: 1_000_000)
+        let hidden = UpNext.HiddenShows(userId: "u1", defaults: defaults)
+        hidden.hide(seriesId: "s1", lastPlayed: then)
+        hidden.hide(seriesId: "s2", lastPlayed: nil)
+        #expect(hidden.marks == ["s1": then, "s2": .distantPast])
+        #expect(UpNext.HiddenShows(userId: "u2", defaults: defaults).marks.isEmpty)
+
+        hidden.letBack(["s1"])
+        #expect(hidden.marks == ["s2": .distantPast])
+    }
+
+    @Test func keepsOutAtMostSoManyShowsLettingTheOldestBack() throws {
+        let suite = "ContinueWatchingRemovalTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let hidden = UpNext.HiddenShows(userId: "u1", defaults: defaults)
+        for index in 0...UpNext.HiddenShows.limit {
+            hidden.hide(seriesId: "s\(index)", lastPlayed: Date(timeIntervalSinceReferenceDate: Double(index)))
+        }
+        #expect(hidden.marks.count == UpNext.HiddenShows.limit)
+        #expect(hidden.marks["s0"] == nil)
+    }
 }
 
 struct HeroTests {

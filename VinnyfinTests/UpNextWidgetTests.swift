@@ -25,10 +25,10 @@ struct UpNextWidgetTests {
     @Test func aTileSaysWhatHomesLandscapeCardSays() {
         let tiles = UpNextWidgets.tiles(from: [Self.episodePartway, Self.moviePartway, Self.nextEpisode], limit: 8)
         #expect(tiles.map(\.title) == ["Port Ellery", "Copperline", "Port Ellery"])
-        #expect(tiles[0].detail == "S02E03 · The Long Night")
+        #expect(tiles[0].detail == "S2, E3 · 30 min left")
         #expect(tiles[1].detail == Self.moviePartway.cardDetail)
         #expect(tiles[1].detail.hasSuffix(" left"))
-        #expect(tiles[2].detail == "S02E04 · Morning")
+        #expect(tiles[2].detail == "Next · S2, E4")
         #expect(tiles.map(\.progress) == [0.4, 1.0 / 3.0, nil])
         #expect(tiles.allSatisfy { $0.artwork == nil })
     }

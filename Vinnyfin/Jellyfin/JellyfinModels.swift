@@ -112,6 +112,15 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         return season + episode
     }
 
+    /// The episode code as a label reads it: "S1, E2", "S1, E2–3" for a multi-episode file, and
+    /// "Specials, E1" for a special.
+    var shortEpisodeCode: String? {
+        guard let indexNumber else { return nil }
+        let season = parentIndexNumber.map { $0 == 0 ? "Specials" : "S\($0)" }
+        let episode = if let end = indexNumberEnd, end > indexNumber { "E\(indexNumber)–\(end)" } else { "E\(indexNumber)" }
+        return [season, episode].compactMap(\.self).joined(separator: ", ")
+    }
+
     /// The episode code as it's said: "Season 1, Episode 2", "Season 1, Episodes 2 to 3".
     var spokenEpisodeCode: String? {
         guard let indexNumber else { return nil }
@@ -131,30 +140,48 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         return runtime.formatted(.units(allowed: units, width: .wide))
     }
 
-    /// "1 hr, 52 min", or seconds for a clip under a minute.
+    /// "1h 52m", or seconds for a clip under a minute.
     var runtimeText: String? {
         guard let runtime, runtime > .zero else { return nil }
         let units: Set<Duration.UnitsFormatStyle.Unit> = runtime < .seconds(60) ? [.seconds] : [.hours, .minutes]
-        return runtime.formatted(.units(allowed: units, width: .abbreviated))
+        return runtime.formatted(.units(allowed: units, width: .narrow))
     }
 
     var runtimeSeconds: Double? {
         runTimeTicks.map { Double($0) / 10_000_000 }
     }
 
-    /// Where a resumed playback starts, when the server has one.
+    /// Where a resumed playback starts, when the server has one. A watched title has one while
+    /// it's watched again: the server clears the position as a title is finished.
     var resumeSeconds: Double? {
-        guard let ticks = userData?.playbackPositionTicks, ticks > 0, userData?.played != true else { return nil }
+        guard let ticks = userData?.playbackPositionTicks, ticks > 0 else { return nil }
         return Double(ticks) / 10_000_000
     }
 
     /// How far through the item playback got, 0...1, for a progress bar.
     var progress: Double? {
+        // A watched show's or season's percentage is of its episodes, all of them, which has no
+        // bar; a watched movie or episode watched again has its position, below.
         if let percentage = userData?.playedPercentage, percentage > 0, userData?.played != true {
             return min(1, percentage / 100)
         }
         guard let resume = resumeSeconds, let total = runtimeSeconds, total > 0 else { return nil }
         return min(1, resume / total)
+    }
+
+    /// "1 hr, 4 min left" in a title partway through, when its length is known.
+    var timeLeftText: String? {
+        timeLeft.map { "\($0.formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left" }
+    }
+
+    /// "1 hour, 4 minutes left": `timeLeftText` as it's said.
+    var spokenTimeLeft: String? {
+        timeLeft.map { "\($0.formatted(.units(allowed: [.hours, .minutes], width: .wide))) left" }
+    }
+
+    private var timeLeft: Duration? {
+        guard let resume = resumeSeconds, let total = runtimeSeconds, total > resume else { return nil }
+        return .seconds(total - resume)
     }
 
     var isPlayed: Bool { userData?.played == true }
@@ -165,27 +192,29 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
     var titleId: String { isEpisode ? (seriesId ?? id) : id }
     var titleName: String { isEpisode ? (seriesName ?? name) : name }
 
-    /// What a landscape card says under the title's name: an episode's number and name, the time
-    /// left in a film partway through, or its year.
+    /// What a landscape card says under the title's name. An episode partway through: its number
+    /// and the time left, "S1, E2 · 36 min left". One not started, which Continue Watching has as
+    /// the one to watch next: "Next · S1, E3". One watched: its number and name. A film partway
+    /// through: the time left; any other, its year.
     var cardDetail: String {
         if isEpisode {
-            return [episodeCode, name].compactMap(\.self).joined(separator: " · ")
+            let code = shortEpisodeCode ?? name
+            if resumeSeconds != nil { return [code, timeLeftText ?? name].joined(separator: " · ") }
+            if !isPlayed { return "Next · \(code)" }
+            return [shortEpisodeCode, name].compactMap(\.self).joined(separator: " · ")
         }
-        if let resume = resumeSeconds, let total = runtimeSeconds, total > resume {
-            return "\(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))) left"
-        }
-        return premiereYearText ?? ""
+        return timeLeftText ?? premiereYearText ?? ""
     }
 
-    /// `cardDetail` as it's said, with the episode's number and the time left in words.
+    /// `cardDetail` as it's said: the episode's number and the time left in words, and the
+    /// episode's name, which the card leaves out for want of room.
     var spokenCardDetail: String {
         if isEpisode {
-            return [spokenEpisodeCode, name].compactMap(\.self).joined(separator: ", ")
+            let parts = resumeSeconds != nil ? [spokenEpisodeCode, name, spokenTimeLeft]
+                : isPlayed ? [spokenEpisodeCode, name] : ["Next", spokenEpisodeCode, name]
+            return parts.compactMap(\.self).joined(separator: ", ")
         }
-        if let resume = resumeSeconds, let total = runtimeSeconds, total > resume {
-            return "\(Duration.seconds(total - resume).formatted(.units(allowed: [.hours, .minutes], width: .wide))) left"
-        }
-        return premiereYearText ?? ""
+        return spokenTimeLeft ?? premiereYearText ?? ""
     }
 
     var premiereYearText: String? {

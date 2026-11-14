@@ -29,7 +29,7 @@ struct DownloadNextEpisodesIntent: AppIntent {
 }
 
 /// Queues a movie as the download settings say: its version closest to the download quality, or
-/// a transcode to it when every version is bigger and Transcode When No Version Fits is on.
+/// a transcode to it when every version is bigger and Transcode Downloads When No Version Fits is on.
 struct DownloadMovieIntent: AppIntent {
     static let title: LocalizedStringResource = "Download Movie"
     static let description = IntentDescription("Downloads a movie in the download quality, to watch offline.")

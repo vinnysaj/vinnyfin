@@ -2,7 +2,7 @@
 import Foundation
 
 /// How a download gets its file: a version as it is, or, when every version is bigger than the
-/// download quality and Transcode When No Version Fits is on, the server's transcode of the best
+/// download quality and Transcode Downloads When No Version Fits is on, the server's transcode of the best
 /// version down to it (`TranscodedDownloads`).
 nonisolated enum DownloadPlan: Equatable, Sendable {
     case original(MediaSource)

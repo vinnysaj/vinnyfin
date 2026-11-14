@@ -88,13 +88,17 @@ typealias PlatformGlassButtonStyle = GlassButtonStyle
 #endif
 
 /// A screen's main action, filled with the accent color: on Liquid Glass, or on Vision Pro its
-/// own glass. White reads on the accent green at only 2.6 to 1, so with Increase Contrast the fill
-/// is a deeper green it reads on at 5.9. Apple TV's accent is white, with a dark title already.
+/// own glass. Its title is near-black, which reads on the sage green at about 8 to 1, and on dark
+/// mode's lighter green at more, where white reads at only 2 to 2.6. With Increase Contrast the
+/// fill is the accent's deeper high-contrast green instead, with a white title, at 5.9 to 1. Apple
+/// TV's prominent buttons turn white under focus, with a dark title, by themselves.
 struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
     @Environment(\.colorSchemeContrast) private var contrast
 
     /// The accent green's own high-contrast variant in light mode, which white reads on.
     private static let increasedContrastFill = Color(red: 0.20658, green: 0.43823, blue: 0.27906)
+    /// The title on the accent green: black but for a little light, as the system's dark labels are.
+    private static let title = Color(white: 0.08)
 
     func makeBody(configuration: Configuration) -> some View {
         let button = Button(configuration)
@@ -107,15 +111,15 @@ struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
         button
         #else
         if contrast == .increased {
-            button.tint(Self.increasedContrastFill)
-        } else {
-            #if os(visionOS)
-            // Vision Pro's prominent style fills with its own gray, like the plain bordered
-            // style beside it, unless it's given the accent itself.
-            button.tint(.accentColor)
-            #else
             button
-            #endif
+                .tint(Self.increasedContrastFill)
+                .foregroundStyle(.white)
+        } else {
+            // Vision Pro's prominent style fills with its own gray, like the plain bordered style
+            // beside it, unless it's given the accent itself.
+            button
+                .tint(.accentColor)
+                .foregroundStyle(Self.title)
         }
         #endif
     }

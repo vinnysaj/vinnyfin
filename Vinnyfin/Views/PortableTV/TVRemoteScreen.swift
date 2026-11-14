@@ -3,18 +3,31 @@ import SwiftUI
 import UIKit
 
 /// This iPhone or iPad as a TV's remote, laid out as Apple TV's remote in Control Center: the TV
-/// picked at the top, a touch surface to swipe and tap through the library (on YouTube a
-/// trackpad), and below it Back, play and pause and Home, then skipping and Search.
+/// picked at the top beside its power button, a touch surface to swipe and tap through the
+/// library (on YouTube a trackpad), and below it Back, play and pause and Home, then skipping and
+/// Search, then the volume.
 struct TVRemoteScreen: View {
     @Environment(TVRemote.self) private var remote
     @Environment(AccountStore.self) private var accounts
     @Environment(\.dismiss) private var dismiss
+    @State private var asksToSleep = false
 
     var body: some View {
         NavigationStack {
             content
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    if let target = remote.target, target.sleeps {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Sleep", systemImage: "power") { asksToSleep = true }
+                                .accessibilityIdentifier("tvRemote.sleep")
+                                .confirmationDialog("Put \(target.name) to Sleep?", isPresented: $asksToSleep, titleVisibility: .visible) {
+                                    Button("Sleep") { remote.press(.sleep) }
+                                } message: {
+                                    Text("vinnyfin closes there, stopping what plays, and the Mac goes to sleep.")
+                                }
+                        }
+                    }
                     ToolbarItem(placement: .principal) { picker }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
@@ -147,7 +160,8 @@ private struct TVRemoteControls: View {
         .onAppear { fieldHasFocus = true }
     }
 
-    /// Two rows of round buttons under the surface, as on Apple TV's remote.
+    /// Rows of round buttons under the surface, as on Apple TV's remote, the volume's for a TV
+    /// that takes them.
     private var buttons: some View {
         Grid(horizontalSpacing: 34, verticalSpacing: 18) {
             GridRow {
@@ -167,6 +181,13 @@ private struct TVRemoteControls: View {
                 }
                 RemoteButton(title: "Forward \(Int(RemoteCommand.skipInterval)) Seconds", symbol: "goforward.10", identifier: "skipForward") {
                     remote.skip(forward: true)
+                }
+            }
+            if target.takesVolume {
+                GridRow {
+                    RemoteButton(title: "Volume Down", symbol: "speaker.minus.fill", identifier: "volumeDown") { remote.press(.volumeDown) }
+                    RemoteButton(title: "Mute", symbol: "speaker.slash.fill", identifier: "mute") { remote.press(.mute) }
+                    RemoteButton(title: "Volume Up", symbol: "speaker.plus.fill", identifier: "volumeUp") { remote.press(.volumeUp) }
                 }
             }
         }
@@ -255,26 +276,19 @@ private struct RemoteButton: View {
     }
 }
 
-/// The library's touch surface, as on Apple TV's remote: a swipe moves focus a step for each
-/// stretch of it, a quick one glides on a few more, and a tap selects, each with a tick under the
-/// finger. VoiceOver moves with its actions instead.
+/// The library's touch surface, as on Apple TV's remote: a swipe moves focus a step, dragging on
+/// moves it again, a flick glides on a few more, and a tap selects, each with a tick under the
+/// finger. `TVSwipe` reads the touch. VoiceOver moves with its actions instead.
 private struct SwipeSurface: View {
     let onMove: (TVDirection) -> Void
     let onSelect: () -> Void
-    /// Where the stretch of the swipe under way started.
-    @State private var stretchStart: CGPoint?
-    @State private var hasMoved = false
+    /// The touch under way.
+    @State private var swipe: TVSwipe?
     @State private var touch: CGPoint?
     @State private var moves = 0
     @State private var selects = 0
-    /// The steps a quick swipe glides on by after the finger lifts.
+    /// The steps a flick glides on by after the finger lifts.
     @State private var glide: Task<Void, Never>?
-
-    /// How far a finger goes for each step of focus.
-    private static let step: CGFloat = 60
-    /// A shorter swipe than a step still moves once; less than this is a tap.
-    private static let flick: CGFloat = 22
-    private static let longestGlide = 6
 
     var body: some View {
         RemoteSurfaceBackground(hint: "Swipe to move · Tap to select")
@@ -291,30 +305,24 @@ private struct SwipeSurface: View {
             .contentShape(.rect)
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { value in
-                    if stretchStart == nil { glide?.cancel() }
+                    // A touch stops a glide.
+                    if swipe == nil { glide?.cancel() }
                     touch = value.location
-                    let start = stretchStart ?? value.startLocation
-                    stretchStart = start
-                    let dx = value.location.x - start.x
-                    let dy = value.location.y - start.y
-                    guard max(abs(dx), abs(dy)) >= Self.step else { return }
-                    move(dx: dx, dy: dy)
-                    stretchStart = value.location
-                    hasMoved = true
+                    var current = swipe ?? TVSwipe(from: value.startLocation)
+                    if let direction = current.moved(to: value.location, at: value.time) { move(direction) }
+                    swipe = current
                 }
                 .onEnded { value in
-                    let dx = value.translation.width
-                    let dy = value.translation.height
-                    let travel = max(abs(dx), abs(dy))
-                    if !hasMoved, travel < Self.flick {
+                    let ended = swipe ?? TVSwipe(from: value.startLocation)
+                    switch ended.ended(translation: value.translation, velocity: value.velocity) {
+                    case .tap:
                         selects += 1
                         onSelect()
-                    } else {
-                        if !hasMoved { move(dx: dx, dy: dy) }
-                        glideOn(dx: dx, dy: dy, predicted: value.predictedEndTranslation)
+                    case .swipe(let direction, let owesMove, let steps):
+                        if owesMove { move(direction) }
+                        glideOn(direction, steps: steps)
                     }
-                    stretchStart = nil
-                    hasMoved = false
+                    swipe = nil
                     withAnimation(.easeOut(duration: 0.25)) { touch = nil }
                 })
             .sensoryFeedback(.selection, trigger: moves)
@@ -331,29 +339,19 @@ private struct SwipeSurface: View {
             .accessibilityIdentifier("tvRemote.surface")
     }
 
-    private func move(dx: CGFloat, dy: CGFloat) {
+    private func move(_ direction: TVDirection) {
         moves += 1
-        if abs(dx) > abs(dy) {
-            onMove(dx > 0 ? .right : .left)
-        } else {
-            onMove(dy > 0 ? .down : .up)
-        }
+        onMove(direction)
     }
 
-    /// A quick swipe goes on as far as it would have carried, slowing as it goes; a touch stops it.
-    private func glideOn(dx: CGFloat, dy: CGFloat, predicted: CGSize) {
-        let sideways = abs(dx) > abs(dy)
-        let carried = sideways ? predicted.width - dx : predicted.height - dy
-        let along = sideways ? dx : dy
-        // Only on in the swipe's own direction.
-        guard carried * along > 0 else { return }
-        let steps = min(Self.longestGlide, Int(abs(carried) / (Self.step * 1.5)))
+    /// Goes on by `steps`, slowing as it goes.
+    private func glideOn(_ direction: TVDirection, steps: Int) {
         guard steps > 0 else { return }
         glide = Task {
             for step in 0..<steps {
                 try? await Task.sleep(for: .milliseconds(70 + step * 25))
                 guard !Task.isCancelled else { return }
-                move(dx: sideways ? along : 0, dy: sideways ? 0 : along)
+                move(direction)
             }
         }
     }
@@ -434,8 +432,9 @@ private struct TrackpadGestures: UIViewRepresentable {
             let moved = recognizer.translation(in: view)
             recognizer.setTranslation(.zero, in: view)
             let velocity = recognizer.velocity(in: view)
-            // Slow for aiming, quick across the screen.
-            let gain = 1.2 + min(2.5, hypot(velocity.x, velocity.y) / 900)
+            // Slow for aiming, quicker across the screen: the trackpad's width is from a third of
+            // the TV's to a little over all of it.
+            let gain = 0.3 + min(0.8, hypot(velocity.x, velocity.y) / 2500)
             let width = view.bounds.width
             // The same distance across the TV either way: its height is 9/16 of its width.
             parent?.onMove(moved.x * gain / width, moved.y * gain / width * 16 / 9)

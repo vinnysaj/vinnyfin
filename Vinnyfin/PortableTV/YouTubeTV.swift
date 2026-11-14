@@ -10,7 +10,7 @@ import WebKit
 /// App Store's rules for other services' content (5.2.2, 5.2.3), so the website it is.
 ///
 /// The website is made for a pointer, so the remote moves one, clicks and scrolls, and plays,
-/// pauses and skips with YouTube's own keys. It stays on YouTube, and Google's pages for signing
+/// pauses and skips with YouTube's own keys, and turns the volume of YouTube's player. It stays on YouTube, and Google's pages for signing
 /// in and for consent: a link anywhere else does nothing, so the app gives no way out onto the web.
 @Observable
 final class YouTubeTV {
@@ -48,6 +48,11 @@ final class YouTubeTV {
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "portable-tv")
 
+    /// A video fills the screen, or is on its way to, which Escape on the page undoes.
+    var fillsScreen: Bool {
+        webView.fullscreenState == .inFullscreen || webView.fullscreenState == .enteringFullscreen
+    }
+
     /// Loads YouTube the first time it shows, and takes the keyboard.
     func show() {
         if webView.url == nil { webView.load(URLRequest(url: Self.home)) }
@@ -73,6 +78,46 @@ final class YouTubeTV {
         }
     }
 
+    /// Plays the page's videos this loud, from nothing to 1, and those of the pages after it.
+    /// Until it's first called they play as loud as YouTube has them.
+    func setVolume(_ volume: Float) {
+        let script = Self.volumeScript(volume)
+        let scripts = webView.configuration.userContentController
+        scripts.removeAllUserScripts()
+        scripts.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        guard webView.url != nil else { return }
+        webView.evaluateJavaScript(script) { _, error in
+            if let error { Self.log.notice("Couldn't set YouTube's volume: \(error.localizedDescription, privacy: .public)") }
+        }
+    }
+
+    /// Sets the volume of the page it runs in, and again as each video starts: with the volume of
+    /// YouTube's players, which they'd otherwise set a video back to, and of a video without one.
+    private static func volumeScript(_ volume: Float) -> String {
+        """
+        (() => {
+            const apply = () => {
+                const volume = window.vinnyfinVolume
+                let players = 0
+                document.querySelectorAll('.html5-video-player').forEach(player => {
+                    if (typeof player.setVolume !== 'function') return
+                    players += 1
+                    if (volume > 0) {
+                        player.unMute?.()
+                        player.setVolume(Math.round(volume * 100))
+                    } else {
+                        player.mute?.()
+                    }
+                })
+                if (!players) document.querySelectorAll('video').forEach(video => { video.volume = volume })
+            }
+            if (window.vinnyfinVolume === undefined) document.addEventListener('playing', apply, true)
+            window.vinnyfinVolume = \(min(1, max(0, volume)))
+            apply()
+        })()
+        """
+    }
+
     func press(_ press: TVPress) {
         switch press {
         case .point(let x, let y):
@@ -86,7 +131,7 @@ final class YouTubeTV {
             // A pointer that's showing clicks; Select from a remote without one presses Return.
             if pointer != nil { click() } else { self.press(key: .enter) }
         case .back:
-            if webView.fullscreenState == .inFullscreen || webView.fullscreenState == .enteringFullscreen {
+            if fillsScreen {
                 self.press(key: .escape)
             } else if webView.canGoBack {
                 webView.goBack()
@@ -98,6 +143,8 @@ final class YouTubeTV {
         case .fullScreen: self.press(key: .fullScreen)
         case .home: goHome()
         case .text(let text): search(text)
+        // The TV's, whatever it shows.
+        case .volumeUp, .volumeDown, .mute, .sleep: break
         }
     }
 

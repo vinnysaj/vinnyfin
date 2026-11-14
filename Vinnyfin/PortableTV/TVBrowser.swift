@@ -140,7 +140,7 @@ final class TVBrowser {
             if let item { open(item) } else { focusesTabs = true }
         case .back:
             focusesTabs = true
-        case .home, .text, .point, .click, .scroll, .fullScreen:
+        case .home, .text, .point, .click, .scroll, .fullScreen, .volumeUp, .volumeDown, .mute, .sleep:
             break
         }
     }
@@ -157,7 +157,7 @@ final class TVBrowser {
             }
         case .back:
             pages.removeLast()
-        case .home, .text, .point, .click, .scroll, .fullScreen:
+        case .home, .text, .point, .click, .scroll, .fullScreen, .volumeUp, .volumeDown, .mute, .sleep:
             break
         }
     }

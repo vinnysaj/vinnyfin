@@ -17,6 +17,11 @@ final class PlayerCoordinator {
     var playsOnTV = false
     /// A playback waiting for Portable TV's window to show it.
     var pendingTVRequest: PlaybackRequest?
+    /// How loud the engine plays, from nothing to 1. Portable TV turns it down where the Mac has
+    /// no volume of its own to turn down.
+    @ObservationIgnored var volume: Float = 1 {
+        didSet { engine?.volume = volume }
+    }
     #endif
     #if os(visionOS)
     /// The playback is on the cinema's big screen, in its immersive space, rather than in its window.
@@ -226,6 +231,9 @@ final class PlayerCoordinator {
             #endif
             engine.ownsSoftwareNowPlaying = true
             engine.remoteSkipInterval = PlayerModel.skipInterval
+            #if os(macOS)
+            engine.volume = volume
+            #endif
             self.engine = engine
             return engine
         } catch {

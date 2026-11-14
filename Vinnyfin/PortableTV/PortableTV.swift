@@ -1,12 +1,15 @@
 #if os(macOS)
 import AppKit
+import IOKit.pwr_mgt
 import Observation
+import OSLog
 
 /// The Mac as an Apple TV, for a TV it's plugged into: a window full screen there, with the
 /// library made for across the room, YouTube's website, and the player, driven by a remote.
 /// The remote is vinnyfin on an iPhone, whose presses come through the server like any other
 /// remote control, so it works on any network both reach the server from; the Mac's own keys
-/// work too. While it's on the Mac stays awake, and the server lists it as a TV.
+/// work too. While it's on the Mac stays awake, and the server lists it as a TV. The remote
+/// turns its volume, and puts the Mac to sleep.
 @Observable
 final class PortableTV {
     /// Its window is open.
@@ -20,15 +23,22 @@ final class PortableTV {
     private(set) var controlsRequests = 0
     let browser: TVBrowser
     let youTube = YouTubeTV()
+    let volume: TVVolume
 
     @ObservationIgnored private let player: PlayerCoordinator
     @ObservationIgnored private let socket: SessionSocket
     /// Keeps the Mac and its display awake while the TV is on.
     @ObservationIgnored private var activity: (any NSObjectProtocol)?
 
+    private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "portable-tv")
+
     init(accounts: AccountStore, player: PlayerCoordinator, socket: SessionSocket) {
         self.player = player
         self.socket = socket
+        volume = TVVolume { [player, youTube] level in
+            player.volume = level
+            youTube.setVolume(level)
+        }
         browser = TVBrowser(accounts: accounts) { [player] request in player.open(request) }
     }
 
@@ -51,6 +61,7 @@ final class PortableTV {
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
         youTube.pauseVideos()
+        volume.letGo()
         await stopPlaying()
     }
 
@@ -96,6 +107,10 @@ final class PortableTV {
             case .library: browser.searchFor(text)
             case .youTube: youTube.search(text)
             }
+        case .volumeUp: volume.turn(up: true)
+        case .volumeDown: volume.turn(up: false)
+        case .mute: volume.toggleMute()
+        case .sleep: sleep()
         default:
             if let playing {
                 pressDuringPlayback(press, playing)
@@ -124,9 +139,22 @@ final class PortableTV {
         case .back:
             Task { await stopPlaying() }
             return
-        case .up, .down, .home, .text, .point, .click, .scroll, .fullScreen: break
+        case .up, .down, .home, .text, .point, .click, .scroll, .fullScreen, .volumeUp, .volumeDown, .mute, .sleep: break
         }
         controlsRequests += 1
+    }
+
+    /// Stops what plays, which tells the server where it got to, then puts the Mac to sleep and
+    /// quits the app, so the Mac wakes without it.
+    private func sleep() {
+        Task {
+            await turnOff()
+            let power = IOPMFindPowerManagement(mach_port_t(MACH_PORT_NULL))
+            let sleeps = power != 0 && IOPMSleepSystem(power) == kIOReturnSuccess
+            if power != 0 { IOServiceClose(power) }
+            if !sleeps { Self.log.error("Couldn't put the Mac to sleep") }
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: Playing

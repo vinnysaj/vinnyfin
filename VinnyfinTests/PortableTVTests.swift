@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 @testable import vinnyfin
@@ -11,6 +12,7 @@ struct TVPressTests {
         let presses: [TVPress] = [
             .up, .down, .left, .right, .select, .back, .home(nil), .home(.library), .home(.youTube), .text("lofi hip hop"),
             .point(x: 0.25, y: 0.75), .click(x: 0.5, y: 0.125), .scroll(dx: -12, dy: 340), .fullScreen,
+            .volumeUp, .volumeDown, .mute, .sleep,
         ]
         for press in presses {
             #expect(TVPress(press.command) == press)
@@ -59,6 +61,14 @@ struct TVPressTests {
         #expect(library.contains("MoveUp") && library.contains("Select") && !library.contains("SendKey"))
         #expect(youTube.contains("SendKey") && youTube.contains("Select") && !youTube.contains("MoveUp"))
         #expect(!standard.contains("Select"))
+        for volume in ["VolumeUp", "VolumeDown", "ToggleMute"] {
+            #expect(library.contains(volume) && youTube.contains(volume) && !standard.contains(volume))
+        }
+    }
+
+    @Test func sleepIsAKeyOnlyAVinnyfinTVReads() throws {
+        #expect(TVPress.sleep.command == GeneralCommand(.sendKey, arguments: ["Key": "Sleep"]))
+        #expect(try general(#"{"Name":"SendKey","Arguments":{"Key":"Sleep"}}"#) == .tv(.sleep))
     }
 }
 
@@ -92,6 +102,18 @@ struct TelevisionTests {
         ], excludingDeviceId: "me")
         #expect(televisions.map(\.tvSpace) == [.library, .youTube, .library])
         #expect(televisions.map(\.hasYouTube) == [true, true, false])
+    }
+
+    @Test func aTVWithoutVolumeIsStillATV() {
+        let presses = TVPress.ofEveryTV.map(\.rawValue)
+        let televisions = PlayTarget.televisions(from: [
+            session("mac", name: "A", commands: library),
+            session("web", client: "Jellyfin Web", name: "B", commands: presses + ["VolumeUp", "VolumeDown", "ToggleMute"]),
+            session("old", client: "Jellyfin Web", name: "C", commands: presses + ["VolumeUp"]),
+        ], excludingDeviceId: "me")
+        #expect(televisions.map(\.id) == ["mac", "web", "old"])
+        #expect(televisions.map(\.takesVolume) == [true, true, false])
+        #expect(televisions.map(\.sleeps) == [true, false, false])
     }
 }
 
@@ -155,6 +177,67 @@ struct TVFocusTests {
         // From where focus shows, so the press does what it looks like it will.
         #expect(step(&focus, .down, reloaded))
         #expect(focus.focused(in: reloaded)?.row.id == "a")
+    }
+}
+
+struct TVSwipeTests {
+    /// The moves a finger makes going right from the surface's left edge by `distance` over
+    /// `duration`, then resting there for `rest`, as the surface hears of it every hundredth of a second.
+    private func moves(right distance: CGFloat, over duration: TimeInterval, thenResting rest: TimeInterval = 0) -> [TVDirection] {
+        var swipe = TVSwipe(from: .zero)
+        let began = Date(timeIntervalSinceReferenceDate: 0)
+        var moves: [TVDirection] = []
+        for tick in 1...Int(((duration + rest) * 100).rounded()) {
+            let time = Double(tick) / 100
+            // A resting finger still shifts a little.
+            let x = time < duration ? distance * time / duration : distance + CGFloat(tick % 2)
+            if let move = swipe.moved(to: CGPoint(x: x, y: 3), at: began.addingTimeInterval(time)) { moves.append(move) }
+        }
+        return moves
+    }
+
+    private func ending(_ translation: CGSize, velocity: CGSize = .zero) -> TVSwipe.Ending {
+        TVSwipe(from: .zero).ended(translation: translation, velocity: velocity)
+    }
+
+    @Test func aSwipeMovesOnceHoweverLong() {
+        #expect(moves(right: 70, over: 0.1) == [.right])
+        #expect(moves(right: 180, over: 0.15) == [.right])
+        #expect(moves(right: 320, over: 0.25) == [.right])
+    }
+
+    @Test func aFingerRestingAfterItsSwipeMovesNoFurther() {
+        #expect(moves(right: 200, over: 0.15, thenResting: 1) == [.right])
+    }
+
+    @Test func draggingOnMovesAgainForEachStretch() {
+        #expect(moves(right: 300, over: 1.5) == [.right, .right, .right])
+    }
+
+    @Test func lessThanAFlickIsATap() {
+        #expect(ending(CGSize(width: 8, height: -5)) == .tap)
+        #expect(ending(CGSize(width: 8, height: -5), velocity: CGSize(width: 5000, height: 0)) == .tap)
+    }
+
+    @Test func aSwipeShorterThanAStepMovesAsItLifts() {
+        #expect(ending(CGSize(width: 10, height: -40), velocity: CGSize(width: 0, height: -600)) == .swipe(.up, owesMove: true, glide: 0))
+    }
+
+    @Test func aSwipeThatMovedOwesNoMoreAsItLifts() {
+        var swipe = TVSwipe(from: .zero)
+        #expect(swipe.moved(to: CGPoint(x: -80, y: 0), at: .now) == .left)
+        #expect(swipe.ended(translation: CGSize(width: -120, height: 0), velocity: CGSize(width: -900, height: 0))
+            == .swipe(.left, owesMove: false, glide: 0))
+    }
+
+    @Test func onlyAFlickGlidesOnFurtherTheFasterItIs() {
+        func glide(_ speed: CGFloat) -> TVSwipe.Ending { ending(CGSize(width: 90, height: 0), velocity: CGSize(width: speed, height: 0)) }
+        #expect(glide(1900) == .swipe(.right, owesMove: true, glide: 0))
+        #expect(glide(2000) == .swipe(.right, owesMove: true, glide: 1))
+        #expect(glide(3700) == .swipe(.right, owesMove: true, glide: 3))
+        #expect(glide(20000) == .swipe(.right, owesMove: true, glide: TVSwipe.longestGlide))
+        // Lifting on the way back.
+        #expect(glide(-4000) == .swipe(.right, owesMove: true, glide: 0))
     }
 }
 

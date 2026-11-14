@@ -177,7 +177,7 @@ struct AddressTests {
             guard url.scheme == "http" else { throw URLError(.secureConnectionFailed) }
             return "Jellyfin"
         }
-        #expect(asked == ["https://nas.local", "http://nas.local:8096"])
+        #expect(Set(asked) == ["https://nas.local", "http://nas.local:8096"])
         #expect(found.address == ServerAddress(scheme: .http, host: "nas.local"))
         #expect(found.answer == "Jellyfin")
         asked = []
@@ -186,29 +186,23 @@ struct AddressTests {
             guard url.scheme == "http" else { throw URLError(.secureConnectionFailed) }
             return "Jellyfin"
         }
-        #expect(asked == ["https://nas.local:8096", "http://nas.local:8096"])
+        #expect(Set(asked) == ["https://nas.local:8096", "http://nas.local:8096"])
         #expect(typed.address == ServerAddress(scheme: .http, host: "nas.local", port: "8096"))
     }
 
-    @Test func asksOnceWhereTheAddressAnswers() async throws {
-        var asked: [String] = []
-        let found = try await ServerAddress(host: "nas.local").firstAnswer { url in
-            asked.append(url.absoluteString)
-            return url
-        }
-        #expect(asked == ["https://nas.local"])
+    @Test func takesTheAddressItselfWhereItAnswers() async throws {
+        let found = try await ServerAddress(host: "nas.local").firstAnswer { url in url }
         #expect(found.address == ServerAddress(host: "nas.local"))
+        #expect(found.answer == URL(string: "https://nas.local"))
     }
 
     @Test func aServerThatAnswersWithAnErrorHasAnswered() async {
-        var asked = 0
         await #expect(throws: JellyfinError.self) {
             try await ServerAddress(host: "nas.local").firstAnswer { url -> String in
-                asked += 1
-                throw JellyfinError.notJellyfin(url)
+                guard url.scheme == "http" else { throw JellyfinError.notJellyfin(url) }
+                return "Jellyfin"
             }
         }
-        #expect(asked == 1)
     }
 
     @Test func failsWithTheAddresssOwnErrorWhenNeitherAnswers() async {

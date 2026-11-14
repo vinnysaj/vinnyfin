@@ -4,9 +4,9 @@ import SwiftUI
 /// Picks a version for each selected episode, says how much space the versions picked take by
 /// the server's sizes, then queues them all.
 /// Each episode starts on what the download settings pick (`DownloadPlanner`): the version
-/// closest to the download quality, or a transcode to it when none fits and Transcode When No
-/// Version Fits is on. Choosing a version for one episode can carry the same release over to
-/// the rest.
+/// closest to the download quality, or a transcode to it when none fits and Transcode Downloads
+/// When No Version Fits is on. Choosing a version for one episode can carry the same release
+/// over to the rest.
 struct BatchDownloadSheet: View {
     let episodes: [JellyfinItem]
     let onQueued: () -> Void
@@ -140,7 +140,9 @@ struct BatchDownloadSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else if let plan = plans[episode.id] {
-                        VersionSummary(source: plan.source)
+                        // Named only when the name isn't the episode's file's, as one version's is.
+                        VersionSummary(source: plan.source, name: DownloadJob.distinctName(
+                            plan.source.name, title: detail.titleWithYear, stem: DownloadJob.destinationStem(for: detail)))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {

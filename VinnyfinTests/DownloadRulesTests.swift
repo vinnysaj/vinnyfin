@@ -654,4 +654,59 @@ struct DownloadNotificationTests {
         #expect(mixed.link == AppLink(.open, Samples.movie).url)
     }
 }
+
+struct DownloadRowTests {
+    private func source(named name: String?, picture: String? = "1080p H264 SDR") -> MediaSource {
+        var source = MediaSource(id: "s1", name: name)
+        source.size = 22_600_000
+        var video = MediaStream(type: "Video")
+        video.displayTitle = picture
+        source.mediaStreams = [video]
+        return source
+    }
+
+    private let movie = Samples.item(#"{"Id":"m1","Name":"Glass Orchard","Type":"Movie","ProductionYear":2022}"#)
+    private let episode = Samples.item(#"{"Id":"e2","Name":"Low Tide","Type":"Episode","SeriesName":"Port Ellery","ParentIndexNumber":1,"IndexNumber":2}"#)
+
+    @Test func leavesOutAVersionNameThatRepeatsTheTitleOrTheFile() {
+        #expect(DownloadJob(item: movie, source: source(named: "Glass Orchard (2022)")).versionLine == "1080p H264 SDR")
+        #expect(DownloadJob(item: episode, source: source(named: "Port Ellery - S01E02")).versionLine == "1080p H264 SDR")
+        #expect(DownloadJob(item: episode, source: source(named: "port ellery - s01e02 - low tide")).versionLine == "1080p H264 SDR")
+        #expect(DownloadJob(item: movie, source: source(named: nil)).versionLine == "1080p H264 SDR")
+    }
+
+    @Test func namesAVersionThatTellsItApart() {
+        #expect(DownloadJob(item: movie, source: source(named: "Director's Cut", picture: "4K HEVC HDR10")).versionLine
+            == "Director's Cut · 4K HEVC HDR10")
+        #expect(DownloadJob(item: movie, source: source(named: "Director's Cut", picture: nil)).versionLine == "Director's Cut")
+        #expect(DownloadJob(item: movie, source: source(named: "Glass Orchard (2022)", picture: nil)).versionLine == nil)
+    }
+
+    @Test func saysWhatATranscodeMade() {
+        let original = source(named: "Glass Orchard (2022)", picture: "4K HEVC SDR")
+        let request = TranscodeRequest(source: original, quality: .hd, choices: TranscodeChoices())
+        let job = DownloadJob(item: movie, plan: .transcode(original, request))
+        #expect(job.versionLine == request.label)
+    }
+}
+
+struct DownloadProgressTextTests {
+    @Test func saysTheSizeAloneBeforeTheFirstByte() {
+        #expect(JobProgress.amount(received: 0, total: 2_410_000_000, isEstimate: false) == "2.41 GB")
+        #expect(JobProgress.amount(received: 0, total: 2_410_000_000, isEstimate: true) == "About 2.41 GB")
+        #expect(JobProgress.amount(received: 22_800_000, total: 1_660_000_000, isEstimate: true) == "22.8 MB of about 1.66 GB")
+        #expect(JobProgress.amount(received: 22_800_000, total: 1_660_000_000, isEstimate: false) == "22.8 MB of 1.66 GB")
+        #expect(JobProgress.amount(received: 5_000_000, total: nil, isEstimate: false) == "5 MB")
+    }
+
+    @Test func saysTheTimeLeftFromTheSpeed() {
+        #expect(JobProgress.timeLeft(remaining: 720_000_000, bytesPerSecond: 1_000_000) == "12 min left")
+        #expect(JobProgress.timeLeft(remaining: 3_900_000_000, bytesPerSecond: 1_000_000) == "1 hr, 5 min left")
+        #expect(JobProgress.timeLeft(remaining: 30_000_000, bytesPerSecond: 1_000_000) == "Less than a minute left")
+        // Rounded up: a little over 11 minutes is 12.
+        #expect(JobProgress.timeLeft(remaining: 661_000_000, bytesPerSecond: 1_000_000) == "12 min left")
+        #expect(JobProgress.timeLeft(remaining: 720_000_000, bytesPerSecond: 0) == nil)
+        #expect(JobProgress.timeLeft(remaining: 0, bytesPerSecond: 1_000_000) == nil)
+    }
+}
 #endif

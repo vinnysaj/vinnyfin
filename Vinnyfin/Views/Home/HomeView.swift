@@ -157,7 +157,7 @@ struct HomeView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             AdaptiveStack {
-                Button("Sign In Again") { Task { await accounts.signOut() } }
+                Button("Sign In Again") { accounts.signOut() }
                     .accessibilityIdentifier("home.signInAgain")
                 #if !os(tvOS)
                 Button("Watch Downloads", action: openDownloads)

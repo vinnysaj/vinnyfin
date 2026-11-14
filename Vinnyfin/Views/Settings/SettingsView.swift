@@ -44,7 +44,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Playback")
                 } footer: {
-                    Text("Plays the best version up to this quality, untouched.\(displayNote) When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up, and once streams above a bitrate keep buffering on several days, keeps this \(Device.name) below it until you reset it. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
+                    Text("Plays the best version up to this quality\(displayNote) as it is, and with Adaptive Quality, a smaller one when the connection can't keep up.")
                 }
                 Section {
                     SettingPicker("Audio Language", selection: $settings.audioLanguage) {
@@ -74,7 +74,7 @@ struct SettingsView: View {
                         ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
                     }
                     .accessibilityIdentifier("settings.downloadQuality")
-                    Toggle("Transcode When No Version Fits", isOn: $settings.transcodeDownloads)
+                    Toggle("Transcode Downloads When No Version Fits", isOn: $settings.transcodeDownloads)
                         .accessibilityIdentifier("settings.transcodeDownloads")
                     Toggle("Delete Watched Episodes", isOn: $settings.deleteWatchedEpisodes)
                         .accessibilityIdentifier("settings.deleteWatched")
@@ -86,11 +86,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Downloads")
                 } footer: {
-                    #if os(iOS) || os(visionOS)
-                    Text("Downloads take the best version up to this quality, untouched. When every version is bigger, the smallest downloads as it is; with Transcode When No Version Fits on, the server makes one at this quality instead, which takes longer, as the server works through the whole title first. Watched episodes are deleted once they're watched here or on any of your devices. Diagnostics shows what the system reports about why vinnyfin stopped running.")
-                    #else
-                    Text("Downloads take the best version up to this quality, untouched. When every version is bigger, the smallest downloads as it is; with Transcode When No Version Fits on, the server makes one at this quality instead, which takes longer, as the server works through the whole title first. Watched episodes are deleted once they're watched here or on any of your devices.")
-                    #endif
+                    Text("Downloads take the best version up to this quality, or when every version is bigger, the smallest, unless the server is to make one at it, which takes longer.")
                 }
                 whenToDownload
                 storage
@@ -111,6 +107,19 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
             .screenTitle("Settings")
+            #if os(tvOS)
+            .toggleStyle(SettingToggleStyle())
+            // Rows fade out as they scroll up under the sidebar's tab in the top corner.
+            .mask {
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: Self.tabBottom)
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                        .frame(height: Self.fadeHeight)
+                    Color.black
+                }
+                .ignoresSafeArea()
+            }
+            #endif
             #if os(macOS)
             // The Mac's Settings window is a window of its own, outside the root view.
             .preferredColorScheme(settings.appearance.colorScheme)
@@ -139,9 +148,16 @@ struct SettingsView: View {
         }
     }
 
+    #if os(tvOS)
+    /// How far down the screen the sidebar's tab, collapsed in the top corner, reaches.
+    private static let tabBottom: CGFloat = 100
+    /// Below the tab, where rows fade in, ending above the first section's header.
+    private static let fadeHeight: CGFloat = 28
+    #endif
+
     /// On an Apple TV whose output makes use of no more than 1080p, that it streams no more.
     private var displayNote: String {
-        DisplayOutput.streamingHeight == nil ? "" : " This Apple TV outputs 1080p, so it streams 1080p at most."
+        DisplayOutput.streamingHeight == nil ? "" : " (1080p at most, as this Apple TV outputs 1080p)"
     }
 
     @ViewBuilder private var account: some View {
@@ -152,24 +168,32 @@ struct SettingsView: View {
                 LabeledContent("Signed In As", value: account.userName)
                 LabeledContent("Remote Control", value: socket.state.label)
                     .accessibilityIdentifier("settings.remoteControl")
-                Button("Sign Out", role: .destructive) { confirmingSignOut = true }
-                    .accessibilityIdentifier("settings.signOut")
-                    .confirmationDialog("Sign out of \(account.serverName ?? "the server")?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
-                        Button("Sign Out", role: .destructive) {
-                            #if os(tvOS)
-                            Task { await accounts.signOut() }
-                            #else
-                            Task { await accounts.signOut(cancelling: downloads) }
-                            #endif
-                            dismiss()
-                        }
-                    } message: {
+                Button(role: .destructive) {
+                    confirmingSignOut = true
+                } label: {
+                    #if os(tvOS)
+                    DestructiveTitle("Sign Out")
+                    #else
+                    Text("Sign Out")
+                    #endif
+                }
+                .accessibilityIdentifier("settings.signOut")
+                .confirmationDialog("Sign out of \(account.serverName ?? "the server")?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
+                    Button("Sign Out", role: .destructive) {
                         #if os(tvOS)
-                        Text("You can sign in again at any time.")
+                        accounts.signOut()
                         #else
-                        Text("Unfinished downloads are cancelled. Finished downloads stay and still play.")
+                        accounts.signOut(cancelling: downloads)
                         #endif
+                        dismiss()
                     }
+                } message: {
+                    #if os(tvOS)
+                    Text("You can sign in again at any time.")
+                    #else
+                    Text("Unfinished downloads are cancelled. Finished downloads stay and still play.")
+                    #endif
+                }
             } header: {
                 Text("Server")
             } footer: {
@@ -189,7 +213,7 @@ struct SettingsView: View {
         } header: {
             Text("When to Download")
         } footer: {
-            Text("Downloads also wait while Low Data Mode is on. vinnyfin starts waiting downloads when the system next lets it, so they can begin a while after you plug in. If you unplug while vinnyfin is in the background, the download it's on can carry on until it's done; the rest wait. Download Now on a waiting download starts it anyway.")
+            Text("Downloads also wait while Low Data Mode is on, and Download Now on a waiting one starts it anyway.")
         }
     }
 
@@ -206,7 +230,7 @@ struct SettingsView: View {
         } header: {
             Text("Storage")
         } footer: {
-            Text("When a download needs room, under the limit or on this \(Device.name), the downloads you watched longest ago, since you downloaded them, are deleted to make it. Unwatched and partly watched downloads are never deleted, nor ones you'd already watched when you downloaded them; if there's still no room, the download waits.")
+            Text("To make room, the downloads you watched longest ago since downloading them go first, and unwatched or partly watched ones never do.")
         }
     }
 
@@ -229,7 +253,7 @@ struct SettingsView: View {
                 #endif
             }
         } footer: {
-            Text("Tells you when downloads are ready to watch offline, a show's episodes together, and when one needs you: it failed, there's no room for it, or your server has been out of reach for a while.")
+            Text("Tells you when downloads are ready to watch offline, and when one fails or waits for room or for your server.")
         }
         .task { await downloadNotifications.refreshAuthorization() }
     }
@@ -254,7 +278,7 @@ struct SettingsView: View {
             } header: {
                 Text("Spotlight")
             } footer: {
-                Text("Search on the Home Screen finds your server's movies, shows and episodes and opens them here. A library of up to \(SpotlightPlan.limit.formatted()) goes in whole; a bigger one, what you're watching, have downloaded or made a favourite, what you watched last and what's new. It's brought up to date once a day while vinnyfin is open.")
+                Text("Search on the Home Screen finds up to \(SpotlightPlan.limit.formatted()) of your server's movies, shows and episodes, and opens them here.")
             }
         }
     }
@@ -276,11 +300,41 @@ struct SettingsView: View {
 #if !os(tvOS)
 extension AccountStore {
     /// Signs out, cancelling the downloads that haven't finished: only this sign-in can fetch
-    /// them. The server's copies of their transcodes are deleted while it still can be.
-    func signOut(cancelling downloads: DownloadManager) async {
+    /// them. The server's copies of their transcodes are deleted before it's told, while the
+    /// sign-in still works there.
+    func signOut(cancelling downloads: DownloadManager) {
         downloads.removeUnfinished()
-        await downloads.transcodes.finishCleanups()
-        await signOut()
+        let transcodes = downloads.transcodes
+        signOut { await transcodes.finishCleanups() }
+    }
+}
+#endif
+
+#if os(tvOS)
+/// The system's toggle with its name in the text's color, which turns dark on the white of a
+/// focused row. Left to itself it draws the name of one that's on in the tint, pale on that white.
+/// `.primary` won't do: a form draws that in the tint too.
+private struct SettingToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(isOn: configuration.$isOn) {
+            configuration.label.foregroundStyle(Color.primary)
+        }
+        .toggleStyle(.automatic)
+    }
+}
+
+/// A destructive action's title: red, and dark red on the white of a focused row, where the
+/// system's red turns pale pink.
+private struct DestructiveTitle: View {
+    let title: LocalizedStringKey
+    @Environment(\.isFocused) private var isFocused
+
+    init(_ title: LocalizedStringKey) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title).foregroundStyle(isFocused ? Color(red: 0.7, green: 0.04, blue: 0.04) : .red)
     }
 }
 #endif

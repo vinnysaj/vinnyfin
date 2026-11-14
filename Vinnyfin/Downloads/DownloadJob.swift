@@ -130,6 +130,27 @@ nonisolated struct DownloadJob: Codable, Identifiable, Sendable {
     var isEpisode: Bool { item?.isEpisode ?? (subtitle != nil) }
     /// The version line: a transcode's says what the server made, once it has said.
     var versionLabel: String { transcode?.label ?? versionName }
+
+    /// What its row says of the version: what a transcode made, or the version's name when it
+    /// tells it apart, then its picture. "Transcoded 720p", "Director's Cut · 2160p HEVC HDR10",
+    /// "1080p H264 SDR". Nil when there's nothing to say.
+    var versionLine: String? {
+        if let transcode { return transcode.label }
+        let name = Self.distinctName(versionName, title: title, stem: destinationStem)
+        let picture = item?.mediaSources?.first?.videoStream?.displayTitle
+        let parts = [name, picture].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// A version's name, when it tells the version apart: not when it's the title, nor the start
+    /// of the file's name, as Jellyfin names a title's only version after its file ("Glass
+    /// Orchard (2022)", "Port Ellery - S01E02"). `stem` is the file's path without its extension.
+    static func distinctName(_ name: String?, title: String, stem: String) -> String? {
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty, name != "Default" else { return nil }
+        let fileName = String(stem.split(separator: "/").last ?? "")
+        let repeats = [title, fileName].contains { $0.range(of: name, options: [.caseInsensitive, .anchored]) != nil }
+        return repeats ? nil : name
+    }
     var ignoresRules: Bool { downloadNowAt != nil }
 
     /// A short name for notifications and the system's UI: "Show S01E02" for an episode, else the title.

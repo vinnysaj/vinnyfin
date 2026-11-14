@@ -241,7 +241,9 @@ private struct JobRow: View {
                 if let subtitle = job.subtitle {
                     Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
                 }
-                Text(job.versionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                if let line = job.versionLine {
+                    Text(line).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                }
                 Group {
                     JobProgress(job: job)
                     JobStatusLine(job: job)
@@ -334,10 +336,9 @@ private struct DownloadedRow: View {
                             .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                             .accessibilityLabel(job.isEpisode ? [job.item?.spokenEpisodeCode, job.title].compactMap(\.self).joined(separator: ", ")
                                                               : job.title)
-                        Text([job.versionLabel, DownloadManager.bytes(job.storedBytes)].joined(separator: " · "))
+                        detailLine
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                         if isWatched {
                             Label("Watched", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.tint)
                         }
@@ -373,7 +374,7 @@ private struct DownloadedRow: View {
         .confirmationDialog("Delete \(job.title)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete Download", role: .destructive) { downloads.deleteDownloads(ofItem: job.itemId) }
         } message: {
-            Text("This deletes \(job.savedPath ?? "the file") from \(FinishedFiles.place).")
+            Text("Frees \(DownloadManager.bytes(freedBytes)). You can download it again any time.")
         }
     }
 
@@ -381,6 +382,29 @@ private struct DownloadedRow: View {
         Button("Show in \(FinishedFiles.browser)", systemImage: "folder") {
             openURL(FinishedFiles.browserURL(for: file.deletingLastPathComponent()))
         }
+    }
+
+    /// What the version is, then its size, which is never what's cut short.
+    @ViewBuilder private var detailLine: some View {
+        let size = DownloadManager.bytes(job.storedBytes)
+        if let version = job.versionLine {
+            if dynamicTypeSize.isAccessibilitySize {
+                Text("\(version) · \(size)")
+            } else {
+                HStack(spacing: 0) {
+                    Text(version).lineLimit(1)
+                    Text(" · \(size)").lineLimit(1).layoutPriority(1)
+                }
+            }
+        } else {
+            Text(size)
+        }
+    }
+
+    /// What deleting it frees: its downloads, finished and not, as far as they've got.
+    private var freedBytes: Int64 {
+        downloads.jobs.filter { $0.itemId == job.itemId }
+            .reduce(0) { $0 + ($1.status == .completed ? $1.storedBytes : $1.bytesOnDisk) }
     }
 
     private var entry: WatchHistory.Entry? { history.entry(for: job.itemId) }

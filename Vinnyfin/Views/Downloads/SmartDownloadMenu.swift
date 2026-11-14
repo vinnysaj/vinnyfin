@@ -2,12 +2,12 @@
 import SwiftUI
 
 /// The ways to keep a show downloaded, as a menu: the next few episodes, or every unwatched one,
-/// which first says how much space that takes; and a way to stop. `downloadNow` goes above them,
-/// for one-off downloads.
-struct SmartDownloadMenu<DownloadNow: View, MenuLabel: View>: View {
+/// which first says how much space that takes; and a way to stop. `actions` go above them: one-off
+/// downloads, or what to do with what's downloaded.
+struct SmartDownloadMenu<Actions: View, MenuLabel: View>: View {
     let seriesId: String
     let seriesName: String
-    @ViewBuilder var downloadNow: () -> DownloadNow
+    @ViewBuilder var actions: () -> Actions
     @ViewBuilder var label: () -> MenuLabel
 
     @Environment(SmartDownloads.self) private var smartDownloads
@@ -17,31 +17,21 @@ struct SmartDownloadMenu<DownloadNow: View, MenuLabel: View>: View {
     /// What keeping every unwatched episode would add, while it waits to be confirmed.
     @State private var estimate: DownloadEstimate?
 
-    static var counts: [Int] { [3, 5, 10, 20] }
-
     var body: some View {
         let rule = smartDownloads.rule(for: seriesId)
         Menu {
-            downloadNow()
+            actions()
             Section("Keep Downloaded") {
-                ForEach(Self.counts, id: \.self) { count in
-                    Button {
-                        smartDownloads.setRule(seriesId: seriesId, seriesName: seriesName, episodesAhead: count)
-                    } label: {
-                        choice("Next \(count) Episodes", isChosen: rule?.episodesAhead == count)
-                    }
-                }
+                SmartDownloadCounts(seriesId: seriesId, seriesName: seriesName)
                 Button {
                     Task { await estimateEveryUnwatched() }
                 } label: {
-                    choice("Every Unwatched Episode", isChosen: rule != nil && rule?.episodesAhead == nil)
+                    SmartDownloadChoice(title: "Every Unwatched Episode", isChosen: rule != nil && rule?.episodesAhead == nil)
                 }
                 .disabled(rule != nil && rule?.episodesAhead == nil)
             }
             if rule != nil {
-                Button("Stop Smart Downloads", systemImage: "xmark", role: .destructive) {
-                    smartDownloads.removeRule(seriesId: seriesId)
-                }
+                StopSmartDownloads(seriesId: seriesId)
             }
         } label: {
             label()
@@ -57,10 +47,6 @@ struct SmartDownloadMenu<DownloadNow: View, MenuLabel: View>: View {
         } message: { estimate in
             Text(message(for: estimate))
         }
-    }
-
-    @ViewBuilder private func choice(_ title: String, isChosen: Bool) -> some View {
-        if isChosen { Label(title, systemImage: "checkmark") } else { Text(title) }
     }
 
     private func estimateEveryUnwatched() async {
@@ -81,6 +67,56 @@ struct SmartDownloadMenu<DownloadNow: View, MenuLabel: View>: View {
         let space = downloads.spaceForNewDownloads()
         let room = estimate.shortfall(space: space) ?? space.map { "\(DownloadEstimate.text(max(0, $0))) is free for downloads." }
         return [size, room, ongoing].compactMap(\.self).joined(separator: " ")
+    }
+}
+
+/// The counts of episodes ahead a show can be kept downloaded with, the one it's kept with
+/// checked; for a menu. A count it was kept with that isn't among them is offered too, checked.
+struct SmartDownloadCounts: View {
+    let seriesId: String
+    let seriesName: String
+    @Environment(SmartDownloads.self) private var smartDownloads
+
+    static let counts = [3, 5, 10, 20]
+
+    /// The counts offered, given the one a show is kept with, if any: the standard ones, and the
+    /// show's own among them in order.
+    static func counts(keeping chosen: Int?) -> [Int] {
+        guard let chosen, !counts.contains(chosen) else { return counts }
+        return (counts + [chosen]).sorted()
+    }
+
+    var body: some View {
+        let chosen = smartDownloads.rule(for: seriesId)?.episodesAhead
+        ForEach(Self.counts(keeping: chosen), id: \.self) { count in
+            Button {
+                smartDownloads.setRule(seriesId: seriesId, seriesName: seriesName, episodesAhead: count)
+            } label: {
+                SmartDownloadChoice(title: "Next \(count) Episodes", isChosen: chosen == count)
+            }
+        }
+    }
+}
+
+/// Stops keeping a show downloaded; what's downloaded stays.
+struct StopSmartDownloads: View {
+    let seriesId: String
+    @Environment(SmartDownloads.self) private var smartDownloads
+
+    var body: some View {
+        Button("Stop Smart Downloads", systemImage: "xmark", role: .destructive) {
+            smartDownloads.removeRule(seriesId: seriesId)
+        }
+    }
+}
+
+/// A choice in a menu, checked when it's the one made.
+private struct SmartDownloadChoice: View {
+    let title: String
+    let isChosen: Bool
+
+    var body: some View {
+        if isChosen { Label(title, systemImage: "checkmark") } else { Text(title) }
     }
 }
 #endif

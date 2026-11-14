@@ -149,7 +149,8 @@ final class VinnyfinUITests: XCTestCase {
         tap(app.buttons["Next 3 Episodes"])
 
         tap(app.buttons["Downloads"].firstMatch)
-        XCTAssertTrue(app.staticTexts["Next 3 episodes"].waitForExistence(timeout: timeout), "The smart download isn't listed")
+        XCTAssertTrue(app.staticTexts["Keeping the next 3 downloaded"].waitForExistence(timeout: timeout),
+                      "The smart download isn't listed")
         let downloaded = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'downloaded.'"))
         let three = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count >= 3"), object: downloaded)
         XCTAssertEqual(XCTWaiter.wait(for: [three], timeout: 60), .completed, "Smart downloads didn't fetch three episodes")
@@ -162,9 +163,12 @@ import XCTest
 
 /// Browses the library grids and Search against the showcase server `AppStore/screenshots.sh`
 /// runs, as Alex, who has no favorite Drama movie: the grid keeps its place coming back to it,
-/// its filters clear from an empty grid, Search never says "No Results" before it has looked,
-/// and a found episode leads to its show. On Apple TV, a focused result is wholly on screen.
-/// Skipped without that server. Nothing on the server is changed.
+/// its filters clear from an empty grid, Search's landing page has genres and recent searches,
+/// a genre opens its grid, whose sort chip turns its order around, Search never says
+/// "No Results" before it has looked, and a found episode leads to its show. On Apple TV, a
+/// focused result is wholly on screen. Skipped without that server. Nothing on the server is
+/// changed; what the app keeps on the device, Movies' filters and the recent searches, each test
+/// leaves as it found it.
 final class LibraryAndSearchUITests: XCTestCase {
     private var server = ""
 
@@ -225,6 +229,8 @@ final class LibraryAndSearchUITests: XCTestCase {
         tap(menu)
         tap(app.buttons["All Genres"])
         tap(app.buttons["Drama"])
+        // The genres stay open for picking another; a tap outside closes them.
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)).tap()
 
         let clear = app.buttons["library.clearFilters"]
         XCTAssertTrue(clear.waitForExistence(timeout: uiTimeout), "An empty filtered grid offers no way to clear its filters")
@@ -235,6 +241,52 @@ final class LibraryAndSearchUITests: XCTestCase {
         XCTAssertTrue(amber.waitForExistence(timeout: uiTimeout), "Clear Filters didn't bring the grid back")
         XCTAssertFalse(clear.exists)
         XCTAssertEqual(menu.label, "Sort and Filter")
+    }
+
+    @MainActor
+    func testSearchLandsOnGenresAndRecentSearches() {
+        let app = launchSignedIn()
+        tap(tab("Search", in: app))
+        XCTAssertTrue(app.buttons["genre.Drama"].waitForExistence(timeout: uiTimeout), "Search's landing page has no genres")
+        keep(app.screenshot(), named: "search-landing")
+
+        let field = app.searchFields.firstMatch
+        tap(field)
+        field.typeText("port\n")
+        XCTAssertTrue(app.buttons["poster.Port Ellery"].waitForExistence(timeout: uiTimeout), "Searching \"port\" never found Port Ellery")
+        // Emptied, the field gives back the landing page, with the search just made.
+        tap(field.buttons["Clear text"])
+        let recent = app.buttons["search.recent.port"]
+        XCTAssertTrue(recent.waitForExistence(timeout: uiTimeout), "The search just made isn't among the recent ones")
+        tap(recent)
+        XCTAssertTrue(app.buttons["poster.Port Ellery"].waitForExistence(timeout: uiTimeout), "A recent search didn't search again")
+
+        tap(field.buttons["Clear text"])
+        tap(app.buttons["search.clearRecents"])
+        XCTAssertTrue(recent.waitForNonExistence(timeout: uiTimeout), "Clear left the recent searches")
+        XCTAssertTrue(app.buttons["genre.Drama"].exists)
+    }
+
+    @MainActor
+    func testAGenreOpensItsGridBestFirst() {
+        let app = launchSignedIn()
+        tap(tab("Search", in: app))
+        tap(app.buttons["genre.Drama"])
+        XCTAssertTrue(app.navigationBars["Drama"].waitForExistence(timeout: uiTimeout), "The Drama tile didn't open its grid")
+        // Its movies and shows together, the best rated first.
+        let sort = app.buttons["library.sortChip"]
+        XCTAssertTrue(sort.waitForExistence(timeout: uiTimeout))
+        XCTAssertEqual(sort.label, "Sorted by Rating, Highest First")
+        XCTAssertTrue(app.buttons["poster.Port Ellery"].waitForExistence(timeout: uiTimeout), "Drama's grid doesn't have the show Port Ellery")
+        XCTAssertTrue(app.buttons["poster.The Last Ferry to Ilsa"].exists, "Drama's grid doesn't have the movie The Last Ferry to Ilsa")
+        let first = firstVisiblePoster(in: app)
+        keep(app.screenshot(), named: "genre-grid")
+
+        tap(sort)
+        XCTAssertTrue(sort.wait(for: \.label, toEqual: "Sorted by Rating, Lowest First", timeout: uiTimeout), "The sort chip didn't turn the order around")
+        let deadline = Date.now.addingTimeInterval(uiTimeout)
+        while Date.now < deadline, firstVisiblePoster(in: app) == first { RunLoop.current.run(until: .now.addingTimeInterval(0.25)) }
+        XCTAssertNotEqual(firstVisiblePoster(in: app), first, "The grid's order didn't change")
     }
 
     @MainActor

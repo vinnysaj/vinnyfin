@@ -4,7 +4,8 @@ import SwiftUI
 /// The avatar on Home: who's signed in to which server, the other sign-ins kept on this device to
 /// switch to, a way to add one, and Settings.
 struct AccountMenu: View {
-    /// Opens Settings; nil on the Mac, where Settings is a window of its own.
+    /// Opens Settings; nil where Settings is a tab of its own (`MainTabs.hasSettingsTab`), and on
+    /// the Mac, where it's a window of its own that the menu opens itself.
     var openSettings: (() -> Void)?
 
     @Environment(AccountStore.self) private var accounts

@@ -74,15 +74,19 @@ final class AccessibilityUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         #elseif os(tvOS)
         openTab("Settings", in: app)
-        XCTAssertTrue(app.buttons["settings.signOut"].waitForExistence(timeout: uiTimeout), "Settings never opened")
+        XCTAssertTrue(app.buttons["settings.account"].waitForExistence(timeout: uiTimeout), "Settings never opened")
         try await check(app, "settings")
         #else
-        openSettingsFromHome(app)
-        // Done, not a setting: at the largest text sizes the settings start below the screen.
-        let done = app.buttons["Done"]
-        XCTAssertTrue(done.waitForExistence(timeout: uiTimeout), "Settings never opened")
-        try await check(app, "settings", isSheet: true)
-        tap(done)
+        if openSettings(app) {
+            // Done, not a setting: at the largest text sizes the settings start below the screen.
+            let done = app.buttons["Done"]
+            XCTAssertTrue(done.waitForExistence(timeout: uiTimeout), "Settings never opened")
+            try await check(app, "settings", isSheet: true)
+            tap(done)
+        } else {
+            XCTAssertTrue(app.buttons["settings.account"].waitForExistence(timeout: uiTimeout), "Settings never opened")
+            try await check(app, "settings")
+        }
         #endif
 
         #if !os(tvOS)

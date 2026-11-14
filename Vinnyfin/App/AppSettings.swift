@@ -48,6 +48,12 @@ final class AppSettings {
     /// The browsing screens' look; the player is always dark.
     var appearance = Appearance.system { didSet { store(appearance.rawValue, Keys.appearance) } }
     var streamingQuality = VideoQuality.original { didSet { store(streamingQuality.rawValue, Keys.streamingQuality) } }
+    /// The most streams may be on cellular data, a Personal Hotspot or in Low Data Mode, where
+    /// `streamingQuality` at its best would take tens of gigabytes an hour; never more than
+    /// `streamingQuality` (see `streamingQuality(on:)`).
+    var cellularStreamingQuality = VideoQuality.hd {
+        didSet { store(cellularStreamingQuality.rawValue, Keys.cellularStreamingQuality) }
+    }
     /// Lets the server scale a version down when none matches `streamingQuality`.
     var allowTranscoding = true { didSet { store(allowTranscoding, Keys.allowTranscoding) } }
     /// Moves a stream the connection can't keep up with to a smaller version, or to a transcode
@@ -64,8 +70,6 @@ final class AppSettings {
     var transcodeDownloads = false { didSet { store(transcodeDownloads, Keys.transcodeDownloads) } }
     /// Deletes a downloaded episode once it has been watched, here or on another device.
     var deleteWatchedEpisodes = true { didSet { store(deleteWatchedEpisodes, Keys.deleteWatchedEpisodes) } }
-    /// How many episodes a new smart download keeps ahead.
-    var smartDownloadCount = 10 { didSet { store(smartDownloadCount, Keys.smartDownloadCount) } }
     /// Lets downloads use cellular data and Personal Hotspots.
     var downloadOverCellular = false { didSet { store(downloadOverCellular, Keys.downloadOverCellular) } }
     /// Downloads wait while the device isn't plugged in.
@@ -98,13 +102,13 @@ final class AppSettings {
         static let prefix = "settings."
         static let appearance = "settings.appearance"
         static let streamingQuality = "settings.streamingQuality"
+        static let cellularStreamingQuality = "settings.cellularStreamingQuality"
         static let allowTranscoding = "settings.allowTranscoding"
         static let adaptiveQuality = "settings.adaptiveQuality"
         static let learnedQuality = "settings.learnedQuality"
         static let downloadQuality = "settings.downloadQuality"
         static let transcodeDownloads = "settings.transcodeDownloads"
         static let deleteWatchedEpisodes = "settings.deleteWatchedEpisodes"
-        static let smartDownloadCount = "settings.smartDownloadCount"
         static let downloadOverCellular = "settings.downloadOverCellular"
         static let downloadOnlyWhileCharging = "settings.downloadOnlyWhileCharging"
         static let downloadStorageLimit = "settings.downloadStorageLimit"
@@ -118,12 +122,23 @@ final class AppSettings {
         static let subtitleScale = "settings.subtitleScale"
         static let matchContent = "settings.matchContent"
         static let sound = "settings.sound"
+        /// Settings no longer offered. Left in the defaults, they'd go to iCloud with the rest.
+        static let retired = ["settings.smartDownloadCount"]
     }
 
     init(defaults: UserDefaults = .standard, cloud: (any CloudKeyValues)? = nil) {
         self.defaults = defaults
         self.cloud = cloud
+        for key in Keys.retired { defaults.removeObject(forKey: key) }
         load()
+    }
+
+    /// The most a stream may be on `network`: the streaming quality, or on a network that saves
+    /// data, the cellular streaming quality when it's lower.
+    func streamingQuality(on network: StreamingNetwork) -> VideoQuality {
+        guard network.savesData else { return streamingQuality }
+        return [streamingQuality, cellularStreamingQuality].min { ($0.maxHeight ?? .max) < ($1.maxHeight ?? .max) }
+            ?? cellularStreamingQuality
     }
 
     /// Reads the settings from the defaults; one never chosen keeps its default.
@@ -132,6 +147,8 @@ final class AppSettings {
         defer { isLoading = false }
         appearance = defaults.string(forKey: Keys.appearance).flatMap(Appearance.init) ?? appearance
         streamingQuality = defaults.string(forKey: Keys.streamingQuality).flatMap(VideoQuality.init) ?? streamingQuality
+        cellularStreamingQuality = defaults.string(forKey: Keys.cellularStreamingQuality).flatMap(VideoQuality.init)
+            ?? cellularStreamingQuality
         allowTranscoding = defaults.object(forKey: Keys.allowTranscoding) as? Bool ?? allowTranscoding
         adaptiveQuality = defaults.object(forKey: Keys.adaptiveQuality) as? Bool ?? adaptiveQuality
         learnedQuality = defaults.data(forKey: Keys.learnedQuality).flatMap { try? JSONDecoder().decode(QualityLearning.self, from: $0) }
@@ -139,7 +156,6 @@ final class AppSettings {
         downloadQuality = defaults.string(forKey: Keys.downloadQuality).flatMap(VideoQuality.init) ?? downloadQuality
         transcodeDownloads = defaults.object(forKey: Keys.transcodeDownloads) as? Bool ?? transcodeDownloads
         deleteWatchedEpisodes = defaults.object(forKey: Keys.deleteWatchedEpisodes) as? Bool ?? deleteWatchedEpisodes
-        smartDownloadCount = defaults.object(forKey: Keys.smartDownloadCount) as? Int ?? smartDownloadCount
         downloadOverCellular = defaults.object(forKey: Keys.downloadOverCellular) as? Bool ?? downloadOverCellular
         downloadOnlyWhileCharging = defaults.object(forKey: Keys.downloadOnlyWhileCharging) as? Bool ?? downloadOnlyWhileCharging
         downloadStorageLimit = defaults.object(forKey: Keys.downloadStorageLimit) as? Int ?? downloadStorageLimit
@@ -163,14 +179,14 @@ final class AppSettings {
     // MARK: iCloud
 
     /// The settings that stay on the device they're chosen on, as what suits one device doesn't
-    /// suit another: the streaming quality suits its screen and its connection, as does the bitrate
-    /// it learned its connection carries; the episodes smart downloads keep and the space downloads
-    /// may take suit its storage, as a Mac's isn't an iPhone's; cellular data and charging suit how
-    /// it's carried and powered; and matching the frame rate and dynamic range suits the TV it's
-    /// plugged into. The download quality, whether downloads may be transcoded to it, their
-    /// notifications and the sound Sounds plays are the person's taste, and follow them.
+    /// suit another: the streaming qualities suit its screen and its connections, as does the
+    /// bitrate it learned its connection carries; the space downloads may take suits its storage,
+    /// as a Mac's isn't an iPhone's; cellular data and charging suit how it's carried and powered;
+    /// and matching the frame rate and dynamic range suits the TV it's plugged into. The download
+    /// quality, whether downloads may be transcoded to it, their notifications and the sound
+    /// Sounds plays are the person's taste, and follow them.
     nonisolated static let deviceOnlyKeys: Set<String> = [
-        Keys.streamingQuality, Keys.learnedQuality, Keys.smartDownloadCount, Keys.downloadStorageLimit,
+        Keys.streamingQuality, Keys.cellularStreamingQuality, Keys.learnedQuality, Keys.downloadStorageLimit,
         Keys.downloadOverCellular, Keys.downloadOnlyWhileCharging, Keys.matchContent,
     ]
 

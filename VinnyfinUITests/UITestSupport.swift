@@ -179,8 +179,9 @@ extension XCTestCase {
     }
     #endif
 
-    /// Signs out in Settings: a sheet from Home on iPhone, iPad and Vision Pro, a window of its
-    /// own on the Mac, and a tab of the sidebar on Apple TV.
+    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone, iPad and Vision
+    /// Pro and in a tab of the sidebar on Apple TV, and in the General pane of the Mac's Settings
+    /// window.
     @MainActor
     func signOut(_ app: XCUIApplication) {
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign Out' AND identifier != 'settings.signOut'")).firstMatch
@@ -192,7 +193,9 @@ extension XCTestCase {
         for _ in 0..<12 where !focusedRow.waitForExistence(timeout: 1) { XCUIRemote.shared.press(.left) }
         focus(sidebar.buttons["Settings"], in: app)
         XCUIRemote.shared.press(.select)
-        focus(app.buttons["settings.signOut"], in: app, moving: [.right, .down])
+        focus(app.buttons["settings.account"], in: app, moving: [.right, .up])
+        XCUIRemote.shared.press(.select)
+        focus(app.buttons["settings.signOut"], in: app, moving: [.down])
         XCUIRemote.shared.press(.select)
         // The dialog's buttons are side by side, Cancel first.
         focus(confirm, in: app, moving: [.right, .left])
@@ -203,8 +206,9 @@ extension XCTestCase {
         tap(confirm)
         app.typeKey("w", modifierFlags: .command)
         #else
-        openSettingsFromHome(app)
-        // Down the list to it, past the screen's bottom at the largest text sizes.
+        openSettings(app)
+        tap(app.buttons["settings.account"])
+        // Down the page to it, past the screen's bottom at the largest text sizes.
         let signOut = app.buttons["settings.signOut"]
         for _ in 0..<8 where !signOut.waitForExistence(timeout: 2) { app.swipeUp() }
         tap(signOut)
@@ -213,12 +217,20 @@ extension XCTestCase {
     }
 
     #if os(iOS) || os(visionOS)
-    /// Opens Settings from the account menu, Home's avatar. A menu's items are known to XCUITest
-    /// by their labels.
-    @MainActor
-    func openSettingsFromHome(_ app: XCUIApplication) {
-        tap(app.buttons["home.settings"])
-        tap(app.buttons.matching(NSPredicate(format: "identifier == 'home.openSettings' OR label == 'Settings'")).firstMatch)
+    /// Opens Settings: on iPhone a sheet from the account menu, Home's avatar, whose items XCUITest
+    /// knows by their labels; on iPad and Vision Pro a tab of its own. Whether it's a sheet, which
+    /// Done closes.
+    @MainActor @discardableResult
+    func openSettings(_ app: XCUIApplication) -> Bool {
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            tap(app.buttons["home.settings"])
+            tap(app.buttons.matching(NSPredicate(format: "identifier == 'home.openSettings' OR label == 'Settings'")).firstMatch)
+            return true
+        }
+        #endif
+        tap(tab("Settings", in: app))
+        return false
     }
     #endif
 

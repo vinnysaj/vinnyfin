@@ -93,6 +93,14 @@ final class SmartDownloads {
         rules.first { $0.seriesId == seriesId && isInUse($0) }
     }
 
+    /// One rule a show, as Downloads lists them: the sign-in in use's, or else another's, which
+    /// waits for its sign-in.
+    var rulesByShow: [Rule] {
+        var shown: [String: Rule] = [:]
+        for rule in rules where shown[rule.seriesId] == nil || isInUse(rule) { shown[rule.seriesId] = rule }
+        return Array(shown.values)
+    }
+
     /// The sign-in a rule waits for, while another is in use or none is; nil for the one in use.
     func pausedOwner(of rule: Rule) -> AccountStore.Account? {
         isInUse(rule) ? nil : rule.owner

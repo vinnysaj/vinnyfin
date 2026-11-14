@@ -2,8 +2,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Everything on this device: downloads in progress and done, the shows kept downloaded, and
-/// video files from elsewhere. Works with or without a connection.
+/// Everything on this device: downloads in progress and done, movies and then each show with
+/// what's downloaded of it and how it's kept downloaded, and video files from elsewhere. Works
+/// with or without a connection.
 struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(DownloadNotifications.self) private var downloadNotifications
@@ -20,27 +21,22 @@ struct DownloadsView: View {
     #endif
     @Environment(\.openURL) private var openURL
     @State private var importing = false
+    /// The tab's pages, which a link opens a title on; nil when Downloads keeps its own, as a sheet.
+    private let tabPath: Binding<NavigationPath>?
+    @State private var ownPath = NavigationPath()
+
+    init(path: Binding<NavigationPath>? = nil) {
+        tabPath = path
+    }
+
+    /// The pages open on top of Downloads: the titles it leads to.
+    private var path: Binding<NavigationPath> { tabPath ?? $ownPath }
 
     private var unfinished: [DownloadJob] { downloads.jobs.filter { $0.status != .completed } }
-    private var finished: [DownloadJob] { downloads.jobs.filter { $0.status == .completed } }
-    private var movies: [DownloadJob] {
-        finished.filter { !$0.isEpisode }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    }
-    /// Downloaded episodes by show, shows by name and episodes in order.
-    private var shows: [(name: String, episodes: [DownloadJob])] {
-        let grouped = Dictionary(grouping: finished.filter(\.isEpisode)) { (job: DownloadJob) -> String in
-            job.item?.seriesName ?? job.subtitle ?? "Other"
-        }
-        let shows = grouped.map { (name: $0.key, episodes: $0.value.sorted { Self.order(of: $0) < Self.order(of: $1) }) }
-        return shows.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    private static func order(of job: DownloadJob) -> Int {
-        (job.item?.parentIndexNumber ?? 0) * 10_000 + (job.item?.indexNumber ?? 0)
-    }
 
     var body: some View {
-        NavigationStack {
+        let groups = DownloadGroups(finished: downloads.jobs.filter { $0.status == .completed }, rules: smartDownloads.rulesByShow)
+        NavigationStack(path: path) {
             List {
                 problems
                 #if os(iOS) || os(visionOS)
@@ -67,25 +63,12 @@ struct DownloadsView: View {
                         }
                     }
                 }
-                if !smartDownloads.rules.isEmpty {
-                    Section {
-                        ForEach(smartDownloads.rules) { rule in SmartRuleRow(rule: rule) }
-                    } header: {
-                        Text("Smart Downloads")
-                    } footer: {
-                        Text("These shows stay downloaded ahead of where you're watching, wherever you watch, and new episodes download as they're added. They're checked whenever vinnyfin opens, regularly while it's open, and every few hours in the background.")
-                    }
-                }
-                if !movies.isEmpty {
+                if !groups.movies.isEmpty {
                     Section("Movies") {
-                        ForEach(movies) { job in DownloadedRow(job: job) }
+                        ForEach(groups.movies) { job in DownloadedRow(job: job) }
                     }
                 }
-                ForEach(shows, id: \.name) { show in
-                    Section(show.name) {
-                        ForEach(show.episodes) { job in DownloadedRow(job: job) }
-                    }
-                }
+                ForEach(groups.shows) { show in ShowSection(show: show) }
                 LocalFilesSection()
                 Section {
                     storageSummary
@@ -99,15 +82,17 @@ struct DownloadsView: View {
                 openPicked(result)
             }
             .onAppear { localLibrary.scanFolder(excluding: Set(downloads.jobs.compactMap(\.savedPath))) }
+            .itemDestinations()
         }
+        .opensTitles(on: path)
     }
 
     private var isEmpty: Bool {
-        downloads.jobs.isEmpty && localLibrary.recents.isEmpty && localLibrary.folderFiles.isEmpty
+        downloads.jobs.isEmpty && smartDownloads.rules.isEmpty && localLibrary.recents.isEmpty && localLibrary.folderFiles.isEmpty
     }
 
     /// In the list above the storage summary: over the list, in the middle of the screen, it would
-    /// run into the summary at the larger text sizes, and into Smart Downloads and notices at any.
+    /// run into the summary at the larger text sizes, and into notices at any.
     private var emptyState: some View {
         ContentUnavailableView {
             Label("Nothing Downloaded", systemImage: "arrow.down.circle")
@@ -183,6 +168,7 @@ struct DownloadsView: View {
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .barTrailing) {
             Button("Open File", systemImage: "folder.badge.plus") { importing = true }
+                .help("Open a video file")
                 .accessibilityIdentifier("downloads.openFile")
         }
         ToolbarItem(placement: .barTrailing) {
@@ -199,6 +185,7 @@ struct DownloadsView: View {
             } label: {
                 Label("More", systemImage: "ellipsis")
             }
+            .help("More")
             .accessibilityIdentifier("downloads.more")
         }
     }
@@ -219,7 +206,7 @@ struct DownloadsView: View {
     }
 }
 
-/// A download that hasn't finished, with its progress and controls.
+/// A download that hasn't finished, with its progress and a ring to pause or resume it by.
 private struct JobRow: View {
     let job: DownloadJob
     /// First in the list, so first to download.
@@ -233,26 +220,30 @@ private struct JobRow: View {
     }
 
     var body: some View {
-        AdaptiveStack(spacing: 12) {
-            OfflineArtwork(itemId: job.itemId, aspectRatio: job.isEpisode ? 16.0 / 9.0 : 2.0 / 3.0)
-                .frame(width: job.isEpisode ? 96 : 44)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(job.title).font(.headline).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                if let subtitle = job.subtitle {
-                    Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+        HStack(spacing: 12) {
+            AdaptiveStack(spacing: 12) {
+                OfflineArtwork(itemId: job.itemId, aspectRatio: job.isEpisode ? 16.0 / 9.0 : 2.0 / 3.0)
+                    .frame(width: job.isEpisode ? 96 : 44)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(job.title).font(.headline).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                    if let subtitle = job.subtitle {
+                        Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    if let line = job.versionLine {
+                        Text(line).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    }
+                    Group {
+                        JobProgress(job: job)
+                        JobStatusLine(job: job)
+                    }
+                    .font(.caption)
                 }
-                if let line = job.versionLine {
-                    Text(line).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
-                }
-                Group {
-                    JobProgress(job: job)
-                    JobStatusLine(job: job)
-                }
-                .font(.caption)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            JobRing(job: job)
         }
         .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("job.\(job.title)")
         .swipeActions(edge: .trailing) {
             Button("Cancel", systemImage: "xmark", role: .destructive) { downloads.remove(job.id) }
@@ -309,12 +300,236 @@ private struct JobRow: View {
     }
 }
 
-/// A finished download: plays when chosen, shows how far it was watched.
+/// How far a download has got, round the one thing to do with it from here: pause it while it
+/// downloads or waits, resume it once paused, retry it once it failed.
+private struct JobRing: View {
+    let job: DownloadJob
+    @Environment(DownloadManager.self) private var downloads
+    /// The height of a line of title text, growing with it.
+    @ScaledMetric(relativeTo: .title2) private var diameter: CGFloat = 30
+
+    var body: some View {
+        Button(action: act) {
+            ZStack {
+                Circle().stroke(.secondary.opacity(0.3), lineWidth: 2.5)
+                Circle().trim(from: 0, to: DownloadRing.fraction(of: job, downloads: downloads))
+                    .stroke(job.status == .failed ? AnyShapeStyle(.red) : AnyShapeStyle(.tint),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: symbol)
+                    .font(.system(size: diameter * 0.36, weight: .bold))
+                    .foregroundStyle(job.status == .failed ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+            }
+            .frame(width: diameter, height: diameter)
+            .padding(6)
+            .contentShape(.circle)
+        }
+        .buttonStyle(.borderless)
+        .help(title)
+        .accessibilityLabel(title)
+        .accessibilityValue(DownloadRing.spokenProgress(of: job, downloads: downloads))
+        .accessibilityIdentifier("job.\(job.title).ring")
+    }
+
+    private var title: String {
+        switch job.status {
+        case .active, .completed: "Pause"
+        case .paused: "Resume"
+        case .failed: "Retry"
+        }
+    }
+
+    private var symbol: String {
+        switch job.status {
+        case .active, .completed: "pause.fill"
+        case .paused: "arrow.down"
+        case .failed: "arrow.clockwise"
+        }
+    }
+
+    private func act() {
+        switch job.status {
+        case .active: downloads.pause(job.id)
+        case .paused, .failed: downloads.resume(job.id)
+        case .completed: break
+        }
+    }
+}
+
+/// A show's downloads: a row with its poster, what's downloaded and how it's kept downloaded,
+/// with the way to its page, to the ways to keep it and to delete what's downloaded; then the
+/// episodes; then, below, the watched ones lately deleted.
+private struct ShowSection: View {
+    let show: DownloadGroups.Show
+    @Environment(DownloadManager.self) private var downloads
+
+    var body: some View {
+        Section {
+            ShowRow(show: show)
+            ForEach(show.episodes) { job in DownloadedRow(job: job) }
+        } footer: {
+            if let removal = downloads.watchedRemovals[show.id], removal.isRecent(at: .now) {
+                Text(Self.note(removal))
+            }
+        }
+    }
+
+    /// "S01E01 was deleted yesterday, once you'd watched it (812 MB)."
+    static func note(_ removal: WatchedRemoval) -> String {
+        let episodes = ListFormatter.localizedString(byJoining: removal.episodes)
+        let verb = removal.episodes.count == 1 ? "was" : "were"
+        let when = removal.date.formatted(.relative(presentation: .named))
+        let pronoun = removal.episodes.count == 1 ? "it" : "them"
+        return "\(episodes) \(verb) deleted \(when), once you'd watched \(pronoun) (\(DownloadManager.bytes(removal.bytes)))."
+    }
+}
+
+/// The first row of a show's section in Downloads.
+private struct ShowRow: View {
+    let show: DownloadGroups.Show
+    @Environment(\.session) private var session
+    @Environment(\.openTitle) private var openTitle
+    @Environment(DownloadManager.self) private var downloads
+    @Environment(SmartDownloads.self) private var smartDownloads
+    @Environment(WatchHistory.self) private var history
+    @State private var deleting: Deletion?
+
+    private enum Deletion: Identifiable {
+        case watched([DownloadJob])
+        case all
+
+        var id: String {
+            switch self {
+            case .watched: "watched"
+            case .all: "all"
+            }
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                OfflineArtwork(itemId: show.seriesId ?? show.id, aspectRatio: 2.0 / 3.0).frame(width: 44)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(show.name).font(.headline)
+                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                    if let rule = show.rule {
+                        Label {
+                            Text(rule.episodesAhead.map { "Keeping the next \($0) downloaded" } ?? "Keeping every unwatched episode")
+                                .foregroundStyle(.secondary)
+                        } icon: {
+                            Image(systemName: "sparkles").foregroundStyle(.tint)
+                        }
+                        .labelStyle(InlineLabelStyle())
+                        .font(.caption)
+                        if let owner = smartDownloads.pausedOwner(of: rule) {
+                            Label(DownloadWait.account(owner).status, systemImage: DownloadWait.account(owner).systemImage)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            menu
+        }
+        .accessibilityIdentifier("show.\(show.name)")
+        .confirmationDialog(dialogTitle, isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                            titleVisibility: .visible, presenting: deleting) { deletion in
+            switch deletion {
+            case .watched(let watched):
+                Button("Delete Watched Episodes", role: .destructive) {
+                    for job in watched { downloads.deleteDownloads(ofItem: job.itemId) }
+                }
+            case .all:
+                Button(show.rule == nil ? "Delete All Episodes" : "Delete All and Stop Smart Downloads", role: .destructive) {
+                    if let rule = show.rule { smartDownloads.remove(rule) }
+                    for job in downloads.jobs where job.isEpisode && job.showKey == show.id {
+                        downloads.deleteDownloads(ofItem: job.itemId)
+                    }
+                }
+            }
+        } message: { deletion in
+            Text(dialogMessage(deletion))
+        }
+    }
+
+    /// "3 episodes · 25.5 MB", or with none downloaded, that the next are on their way.
+    private var summary: String {
+        guard !show.episodes.isEmpty else { return "No episodes downloaded right now" }
+        let count = show.episodes.count == 1 ? "1 episode" : "\(show.episodes.count) episodes"
+        return "\(count) · \(DownloadManager.bytes(show.bytes))"
+    }
+
+    @ViewBuilder private var menu: some View {
+        if let seriesId = show.seriesId {
+            SmartDownloadMenu(seriesId: seriesId, seriesName: show.name) {
+                actions
+            } label: {
+                menuLabel
+            }
+            .accessibilityLabel("Options for \(show.name)")
+        } else {
+            Menu { actions } label: { menuLabel }
+                .accessibilityLabel("Options for \(show.name)")
+        }
+    }
+
+    private var menuLabel: some View {
+        Image(systemName: "ellipsis.circle").font(.title2).padding(6).contentShape(.rect)
+            .help("Options for \(show.name)")
+    }
+
+    @ViewBuilder private var actions: some View {
+        // Another sign-in's, which the menu's own Stop, for the sign-in in use's, doesn't stop.
+        if let rule = show.rule, smartDownloads.pausedOwner(of: rule) != nil {
+            Button("Stop Smart Downloads", systemImage: "xmark", role: .destructive) { smartDownloads.remove(rule) }
+        }
+        if session != nil, let seriesId = show.seriesId, let openTitle {
+            Button("Go to Show", systemImage: "tv") {
+                openTitle(JellyfinItem(id: seriesId, name: show.name, type: "Series"))
+            }
+        }
+        if !show.episodes.isEmpty {
+            let watched = watchedEpisodes
+            Button("Delete Watched", systemImage: "checkmark.circle") { deleting = .watched(watched) }
+                .disabled(watched.isEmpty)
+            Button("Delete All", systemImage: "trash", role: .destructive) { deleting = .all }
+        }
+    }
+
+    private var watchedEpisodes: [DownloadJob] {
+        show.episodes.filter { $0.watchState(local: history.entry(for: $0.itemId)).isWatched }
+    }
+
+    private var dialogTitle: String {
+        switch deleting {
+        case .watched(let watched): "Delete \(watched.count == 1 ? "1 watched episode" : "\(watched.count) watched episodes") of \(show.name)?"
+        case .all, nil: "Delete every downloaded episode of \(show.name)?"
+        }
+    }
+
+    private func dialogMessage(_ deletion: Deletion) -> String {
+        switch deletion {
+        case .watched(let watched):
+            return "Frees \(DownloadManager.bytes(watched.reduce(0) { $0 + $1.storedBytes }))."
+        case .all:
+            let frees = "Frees \(DownloadManager.bytes(show.bytes))"
+            return show.rule == nil ? "\(frees)." : "\(frees), and stops keeping \(show.name) downloaded."
+        }
+    }
+}
+
+/// A finished download: plays when chosen, shows how far it was watched, and leads to its title.
 private struct DownloadedRow: View {
     let job: DownloadJob
     @Environment(DownloadManager.self) private var downloads
     @Environment(WatchHistory.self) private var history
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.session) private var session
+    @Environment(\.openTitle) private var openTitle
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var confirmingDelete = false
@@ -340,7 +555,14 @@ private struct DownloadedRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if isWatched {
-                            Label("Watched", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.tint)
+                            // The tint on the mark alone: the green reads at under 3 to 1 as text.
+                            Label {
+                                Text("Watched").foregroundStyle(.secondary)
+                            } icon: {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
+                            }
+                            .labelStyle(InlineLabelStyle())
+                            .font(.caption)
                         }
                     }
                     Spacer(minLength: 0)
@@ -359,6 +581,7 @@ private struct DownloadedRow: View {
             Button("Delete", systemImage: "trash") { confirmingDelete = true }.tint(.red)
         }
         .contextMenu {
+            goToTitle
             if let file = downloads.savedFileURL(of: job) {
                 showInFiles(file)
                 ShareLink(item: file)
@@ -369,12 +592,30 @@ private struct DownloadedRow: View {
         // and Switch Control already have. Sharing needs the menu's own sheet, which a long press
         // still opens for them: VoiceOver's double-tap held, Voice Control's "Long press".
         .accessibilityActions {
+            goToTitle
             if let file = downloads.savedFileURL(of: job) { showInFiles(file) }
         }
         .confirmationDialog("Delete \(job.title)?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button("Delete Download", role: .destructive) { downloads.deleteDownloads(ofItem: job.itemId) }
         } message: {
             Text("Frees \(DownloadManager.bytes(freedBytes)). You can download it again any time.")
+        }
+    }
+
+    /// The show's page for an episode, the movie's for a movie, while signed in where they're from.
+    @ViewBuilder private var goToTitle: some View {
+        if session != nil, let openTitle {
+            if job.isEpisode {
+                if let seriesId = job.seriesId {
+                    Button("Go to Show", systemImage: "tv") {
+                        openTitle(JellyfinItem(id: seriesId, name: job.showName, type: "Series"))
+                    }
+                }
+            } else {
+                Button("Go to Movie", systemImage: "film") {
+                    openTitle(job.item ?? JellyfinItem(id: job.itemId, name: job.title, type: "Movie"))
+                }
+            }
         }
     }
 
@@ -418,45 +659,6 @@ private struct DownloadedRow: View {
             return entry.position / duration
         }
         return entry == nil ? job.item?.progress : nil
-    }
-}
-
-/// A show kept downloaded, with its count and a way to change or stop it; another sign-in's
-/// says whose it is and can only be stopped.
-private struct SmartRuleRow: View {
-    let rule: SmartDownloads.Rule
-    @Environment(SmartDownloads.self) private var smartDownloads
-
-    var body: some View {
-        let pausedOwner = smartDownloads.pausedOwner(of: rule)
-        HStack(spacing: 12) {
-            OfflineArtwork(itemId: rule.seriesId, aspectRatio: 2.0 / 3.0).frame(width: 40)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rule.seriesName).font(.body.weight(.medium))
-                Text(rule.episodesAhead.map { "Next \($0) episodes" } ?? "Every unwatched episode")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let pausedOwner {
-                    Label(DownloadWait.account(pausedOwner).status, systemImage: DownloadWait.account(pausedOwner).systemImage)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            }
-            Spacer()
-            if pausedOwner == nil {
-                SmartDownloadMenu(seriesId: rule.seriesId, seriesName: rule.seriesName) {
-                    EmptyView()
-                } label: {
-                    Image(systemName: "ellipsis.circle").font(.title3)
-                }
-                .accessibilityLabel("Change \(rule.seriesName)")
-            } else {
-                Button("Stop", role: .destructive) { smartDownloads.remove(rule) }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("Stop Keeping \(rule.seriesName) Downloaded")
-            }
-        }
-        .accessibilityIdentifier("rule.\(rule.seriesName)")
     }
 }
 

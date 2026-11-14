@@ -162,6 +162,7 @@ struct HomeView: View {
     private var soundsButton: some View {
         Button("Sounds", systemImage: "waveform") { showingSounds = true }
             .symbolEffect(.variableColor.iterative, isActive: sounds.state == .playing && !sounds.isSteppedAside)
+            .help("Sounds")
             .accessibilityIdentifier("home.sounds")
     }
     #endif
@@ -182,9 +183,10 @@ struct HomeView: View {
     #endif
 
     #if os(iOS) || os(visionOS)
-    /// The avatar: who's signed in, switching to another sign-in, adding one, and Settings.
+    /// The avatar: who's signed in, switching to another sign-in, adding one, and Settings where
+    /// it isn't a tab of its own.
     private var settingsButton: some View {
-        AccountMenu { showingSettings = true }
+        AccountMenu(openSettings: MainTabs.hasSettingsTab ? nil : { showingSettings = true })
     }
     #endif
 
@@ -512,7 +514,7 @@ private struct HeroBanner: View {
             if titled {
                 Label("Details", systemImage: "info.circle")
             } else {
-                Label("Details", systemImage: "info.circle").labelStyle(.iconOnly)
+                Label("Details", systemImage: "info.circle").labelStyle(.iconOnly).help("Details")
             }
         }
         .buttonStyle(.platformGlass)

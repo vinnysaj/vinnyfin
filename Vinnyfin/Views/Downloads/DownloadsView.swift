@@ -35,7 +35,7 @@ struct DownloadsView: View {
     private var unfinished: [DownloadJob] { downloads.jobs.filter { $0.status != .completed } }
 
     var body: some View {
-        let groups = DownloadGroups(finished: downloads.jobs.filter { $0.status == .completed }, rules: smartDownloads.rules)
+        let groups = DownloadGroups(finished: downloads.jobs.filter { $0.status == .completed }, rules: smartDownloads.rulesByShow)
         NavigationStack(path: path) {
             List {
                 problems
@@ -422,6 +422,11 @@ private struct ShowRow: View {
                         }
                         .labelStyle(InlineLabelStyle())
                         .font(.caption)
+                        if let owner = smartDownloads.pausedOwner(of: rule) {
+                            Label(DownloadWait.account(owner).status, systemImage: DownloadWait.account(owner).systemImage)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                 }
             }
@@ -440,7 +445,7 @@ private struct ShowRow: View {
                 }
             case .all:
                 Button(show.rule == nil ? "Delete All Episodes" : "Delete All and Stop Smart Downloads", role: .destructive) {
-                    if let seriesId = show.seriesId { smartDownloads.removeRule(seriesId: seriesId) }
+                    if let rule = show.rule { smartDownloads.remove(rule) }
                     for job in downloads.jobs where job.isEpisode && job.showKey == show.id {
                         downloads.deleteDownloads(ofItem: job.itemId)
                     }
@@ -478,6 +483,10 @@ private struct ShowRow: View {
     }
 
     @ViewBuilder private var actions: some View {
+        // Another sign-in's, which the menu's own Stop, for the sign-in in use's, doesn't stop.
+        if let rule = show.rule, smartDownloads.pausedOwner(of: rule) != nil {
+            Button("Stop Smart Downloads", systemImage: "xmark", role: .destructive) { smartDownloads.remove(rule) }
+        }
         if session != nil, let seriesId = show.seriesId, let openTitle {
             Button("Go to Show", systemImage: "tv") {
                 openTitle(JellyfinItem(id: seriesId, name: show.name, type: "Series"))

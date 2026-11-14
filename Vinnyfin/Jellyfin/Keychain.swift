@@ -1,8 +1,9 @@
 import Foundation
 import Security
 
-/// The sign-in tokens, one generic password per server, readable after the first unlock so
-/// downloads carry on while the device is locked. On Apple TV, iPhone, iPad and the Mac they're
+/// The sign-in tokens, one generic password per sign-in, named for its server and user
+/// (`AccountStore.Account.tokenKey`), readable after the first unlock so downloads carry on while
+/// the device is locked. On Apple TV, iPhone, iPad and the Mac they're
 /// kept in the app group, which doubles as a Keychain access group, so the app's extensions read
 /// them too: the Top Shelf and the Up Next widgets. On the Mac access groups are the data
 /// protection keychain's, and the app group must be authorized by the provisioning profile for
@@ -11,7 +12,7 @@ nonisolated enum Keychain {
     private static let service = "net.vinnysaj.vinnyfin.token"
     private static let passwordService = "net.vinnysaj.vinnyfin.password"
 
-    /// The server's token; nil when there's none.
+    /// The token kept under `account`, the Keychain item's name; nil when there's none.
     static func token(for account: String) throws -> String? {
         try readToken(sharedQuery(account))
     }

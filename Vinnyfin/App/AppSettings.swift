@@ -259,6 +259,46 @@ final class AppSettings {
         load()
     }
 
+    // MARK: Languages from the first sign-in
+
+    /// Whether the audio or the subtitle language has never been chosen in vinnyfin, on this
+    /// device or, as far as iCloud has said, another of the person's.
+    var needsLanguageDefaults: Bool {
+        !isChosen(Keys.audioLanguage) || !isChosen(Keys.subtitleLanguage)
+    }
+
+    /// Defaults the audio and subtitle languages never chosen to the Jellyfin user's own, or
+    /// else the device's (`languageDefault`). The default stays on this device until iCloud has
+    /// what the person chose elsewhere, which then replaces it, or has nothing, which it then
+    /// takes (`reconcileWithCloud`). Once defaulted, a language counts as chosen.
+    func defaultLanguages(audio: String?, subtitle: String?, device: String? = Locale.preferredLanguages.first) {
+        var values: [String: Any] = [:]
+        if let code = Self.languageDefault(chosen: isChosen(Keys.audioLanguage), server: audio, device: device) {
+            values[Keys.audioLanguage] = code
+        }
+        if let code = Self.languageDefault(chosen: isChosen(Keys.subtitleLanguage), server: subtitle, device: device) {
+            values[Keys.subtitleLanguage] = code
+        }
+        adopt(values)
+    }
+
+    /// The language to default to: none for one chosen in vinnyfin; else the server's, when
+    /// vinnyfin offers it; else the device's, when vinnyfin offers it.
+    nonisolated static func languageDefault(chosen: Bool, server: String?, device: String?) -> String? {
+        guard !chosen else { return nil }
+        return offeredCode(for: server) ?? offeredCode(for: device)
+    }
+
+    /// The code vinnyfin offers for a language tag in any of its forms, "ger", "deu", "de" or
+    /// "de-AT"; nil for one it doesn't offer.
+    nonisolated static func offeredCode(for tag: String?) -> String? {
+        languages.first { sameLanguage($0.code, tag) }?.code
+    }
+
+    private func isChosen(_ key: String) -> Bool {
+        defaults.object(forKey: key) != nil || cloud?.object(forKey: key) != nil
+    }
+
     /// The storage limits offered, in gigabytes; 0 is no limit.
     nonisolated static let storageLimitChoices = [0, 10, 25, 50, 100, 250, 500]
 

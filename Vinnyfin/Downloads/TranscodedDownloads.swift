@@ -185,7 +185,8 @@ final class TranscodedDownloads {
     @ObservationIgnored private var polledAt: [UUID: Date] = [:]
     /// Requests to delete the server's copies, for signing out to wait for.
     @ObservationIgnored private var cleanups: [Task<Void, Never>] = []
-    @ObservationIgnored private var policy: (value: DownloadPolicy, fetchedAt: Date)?
+    /// The permissions the server last gave, and the sign-in they're for (`Account.tokenKey`).
+    @ObservationIgnored private var policy: (value: DownloadPolicy, fetchedAt: Date, account: String)?
     @ObservationIgnored private var retryTimer: Task<Void, Never>?
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "downloads")
@@ -1149,7 +1150,7 @@ final class TranscodedDownloads {
         let serverName = accounts.account?.serverTitle ?? "The server"
         do {
             let user: CurrentUser = try await client.currentUser()
-            policy = (user.policy, .now)
+            if let account = accounts.account { policy = (user.policy, .now, account.tokenKey) }
             let source = job.item?.mediaSources?.first ?? MediaSource(id: job.mediaSourceId)
             if let refusal = user.policy.refusal(for: .transcode(source, state.request), serverName: serverName) {
                 host?.stopJob(id, because: refusal)
@@ -1607,22 +1608,25 @@ final class TranscodedDownloads {
 
     var proposal: Proposal?
 
+    /// The sign-in in use's permissions, as the server last gave them for it within `maxAge`.
     private func currentPolicy(maxAge: TimeInterval = policyLifetime) async throws -> DownloadPolicy {
-        if let policy, Date.now.timeIntervalSince(policy.fetchedAt) < maxAge { return policy.value }
-        guard let client else { throw JellyfinError.invalidCredentials }
+        guard let client, let account = accounts.account else { throw JellyfinError.invalidCredentials }
+        if let policy, policy.account == account.tokenKey, Date.now.timeIntervalSince(policy.fetchedAt) < maxAge { return policy.value }
         let user: CurrentUser = try await client.currentUser()
-        policy = (user.policy, .now)
+        policy = (user.policy, .now, account.tokenKey)
         return user.policy
     }
 
-    /// Looks at whether the account may still download, after `recheckAfter` without looking,
-    /// and stops what's queued when it no longer may.
+    /// Looks at whether the sign-in in use may still download, after `recheckAfter` without
+    /// looking, and stops what it has queued when it no longer may.
     func recheckPolicy() async {
-        guard let host, host.jobs.contains(where: { $0.status == .active }), let account = accounts.account else { return }
+        guard let host, let account = accounts.account else { return }
+        let isQueued = { (job: DownloadJob) in job.status == .active && job.belongs(to: account) }
+        guard host.jobs.contains(where: isQueued) else { return }
         do {
             let policy = try await currentPolicy(maxAge: Self.recheckAfter)
             guard let refusal = policy.downloadRefusal(serverName: account.serverTitle) else { return }
-            for job in host.jobs where job.status == .active { host.stopJob(job.id, because: refusal) }
+            for job in host.jobs where isQueued(job) { host.stopJob(job.id, because: refusal) }
         } catch {
             Self.log.notice("Couldn't look at the account's permissions: \(error.localizedDescription, privacy: .public)")
         }

@@ -1,8 +1,13 @@
 import Foundation
 
 /// The sign-in screen's two steps, what's entered in them, and where each outcome takes them.
-/// The account step asks who is signing in and the server step where. A sign-in that fails goes
-/// to the step whose fields can put it right, and names the field that needs attention there.
+/// The account step asks who is signing in and the server step where. Someone new starts on the
+/// server step, which finds the servers on the network, then signs in on the account step of
+/// the one picked. Anyone who has signed in before, on this device or another of theirs, starts
+/// on the account step, the server picked when they've used one here: that's also where the
+/// demo account signs in, from the server step's way to the username first. A sign-in that fails
+/// goes to the step whose fields can put it right, and names the field that needs attention
+/// there.
 nonisolated struct SignInFlow: Sendable {
     enum Step: Hashable, Sendable {
         case account, server
@@ -85,14 +90,20 @@ nonisolated struct SignInFlow: Sendable {
 
     /// What advice calls this device: "is this iPhone on the same network?"
     let deviceName: String
+    /// The step the screen opens on, under the other when that's shown.
+    private(set) var root = Step.account
     private(set) var step = Step.account
     /// Whether the server step's button gets a Quick Connect code, rather than signing in with
     /// the password.
     private(set) var isQuickConnect = false
     var username = ""
     var password = ""
-    /// The server step's fields.
+    /// The server step's address, as its field and Advanced's fields give it. The screen
+    /// changes it through `typeAddress` and `editAddress`, which keep `addressText` with it.
     var address = ServerAddress()
+    /// What the server step's address field shows: the whole address as typed, or as one line
+    /// once it comes from elsewhere (`ServerAddress.text`).
+    private(set) var addressText = ""
     private(set) var pickedServer: PickedServer?
     private(set) var accountError: String?
     /// The server step's error, with the address it's about.
@@ -129,18 +140,28 @@ nonisolated struct SignInFlow: Sendable {
     // MARK: Starting
 
     /// Starts from a server offered to sign in to, such as the one a handed-off title is from,
-    /// with its password if there's one saved, else from the last sign-in on this device, called
-    /// by the server's name when it had one. Only the first call does, so the screen appearing
-    /// again leaves what's been entered.
-    mutating func start(offer: ServerSignIn?, password: String?, lastServerURL: URL?, lastServerName: String?,
-                        lastUserName: String?) -> Next? {
+    /// with its password if there's one saved; else, adding a sign-in, from the server of the one
+    /// in use, for someone else on it; else from the last sign-in on this device, called by the
+    /// server's name when it had one. With none of those, and no servers signed in to on the
+    /// person's devices (`knowsServers`), it's someone new, who starts on the server step. Only
+    /// the first call does, so the screen appearing again leaves what's been entered.
+    mutating func start(offer: ServerSignIn?, password: String?, adding: AccountStore.Account? = nil, lastServerURL: URL?,
+                        lastServerName: String?, lastUserName: String?, knowsServers: Bool = true) -> Next? {
         guard !hasStarted else { return nil }
         hasStarted = true
         if let offer { return choose(offer, password: password) }
+        if let adding, let address = ServerAddress(savedURL: adding.serverURL) {
+            pickedServer = PickedServer(address: address, url: adding.serverURL, title: adding.serverTitle)
+            return nil
+        }
         if let lastServerURL, let address = ServerAddress(savedURL: lastServerURL) {
             pickedServer = PickedServer(address: address, url: lastServerURL, title: lastServerName ?? Self.title(of: lastServerURL))
         }
         username = lastUserName ?? ""
+        if pickedServer == nil, username.isEmpty, !knowsServers {
+            root = .server
+            show(.server)
+        }
         return nil
     }
 
@@ -180,6 +201,23 @@ nonisolated struct SignInFlow: Sendable {
         return .focus(.host)
     }
 
+    /// Someone the picked server lists on its sign-in screen: their name in the username, and
+    /// the password next, or for someone without one, the sign-in.
+    mutating func chooseUser(_ user: PublicUser) -> Next {
+        username = user.name
+        password = ""
+        guard user.hasPassword else { return submitAccount() }
+        accountError = nil
+        return .focus(.password)
+    }
+
+    /// Says on the account step why something else it offers didn't work, such as switching to
+    /// a sign-in kept on this device.
+    mutating func showAccountError(_ message: String) {
+        show(.account)
+        accountError = message
+    }
+
     /// Quick Connect from the account step: a code from the server picked, or without one, the
     /// server step asks for its address.
     mutating func useQuickConnect() -> Next {
@@ -190,17 +228,52 @@ nonisolated struct SignInFlow: Sendable {
 
     /// The server step, to change the server picked, starting from its address.
     mutating func changeServer() -> Field {
-        if let pickedServer { address = pickedServer.address }
+        if let pickedServer { setAddress(pickedServer.address) }
         show(.server)
         return .host
     }
 
+    /// Someone who knows their account but not yet the server's address, or has the demo
+    /// account, goes from the server step to the account step without a server picked.
+    mutating func useUsernameFirst() -> Field {
+        show(.account)
+        return .username
+    }
+
     // MARK: The server step
+
+    /// What's typed in the server step's address field, as the whole address: the protocol, port
+    /// and base path it gives, and none it doesn't. An address copied from a browser showing
+    /// Jellyfin's web app is at its base path (`ServerAddress(parsing:)`). The field keeps the
+    /// text as it's typed, so "nas:8096" isn't cut apart at "nas:".
+    mutating func typeAddress(_ text: String) {
+        addressText = text
+        address = ServerAddress(parsing: text) ?? ServerAddress(host: text)
+    }
+
+    /// Changes the address in Advanced's fields; the address field shows the result.
+    mutating func editAddress(_ change: (inout ServerAddress) -> Void) {
+        var address = address
+        change(&address)
+        setAddress(address)
+    }
+
+    /// Picks a server found on the network, as if its address were typed and connected to.
+    mutating func pick(_ server: DiscoveredServer) -> Next {
+        setAddress(ServerAddress(savedURL: server.address) ?? ServerAddress(host: server.address.absoluteString))
+        return connect()
+    }
+
+    private mutating func setAddress(_ address: ServerAddress) {
+        self.address = address
+        addressText = address.text
+    }
 
     /// The server step's button. Once a server answers at the address, the password signs in to
     /// it or Quick Connect gets a code from it; without a username, the account step asks for one.
     mutating func connect() -> Next {
         address.splitHost()
+        setAddress(address)
         if case .failure(let problem) = address.url {
             show(.server, quickConnect: isQuickConnect)
             serverProblem = (Trouble(message: problem.localizedDescription), address)
@@ -210,9 +283,9 @@ nonisolated struct SignInFlow: Sendable {
         return begin(Attempt(address: address, goal: goal))
     }
 
-    /// Back to the account step, with the server as it was picked.
+    /// Back to the step under this one, with the server as it was picked.
     mutating func back() {
-        show(.account)
+        show(root)
     }
 
     /// The password in place of Quick Connect, which is off on the server: the account step, with
@@ -238,7 +311,7 @@ nonisolated struct SignInFlow: Sendable {
         guard !attempt.isDemo else { return .signIn(attempt) }
         guard !isStale(attempt) else { return .stale }
         pickedServer = PickedServer(address: address, url: server.url, title: server.title)
-        if step == .server { self.address = address }
+        if step == .server { setAddress(address) }
         guard attempt.goal == .server else { return .signIn(Attempt(address: address, goal: attempt.goal)) }
         show(.account)
         return .picked(.username)
@@ -260,7 +333,7 @@ nonisolated struct SignInFlow: Sendable {
         }
         switch problem {
         case .address(let field):
-            address = attempt.address
+            setAddress(attempt.address)
             show(.server, quickConnect: attempt.goal == .quickConnect)
             serverProblem = (trouble, attempt.address)
             return field
@@ -269,7 +342,7 @@ nonisolated struct SignInFlow: Sendable {
             accountError = trouble.message
             return .password
         case .quickConnectOff:
-            address = attempt.address
+            setAddress(attempt.address)
             show(.server, quickConnect: true)
             serverProblem = (trouble, attempt.address)
             offersPassword = true
@@ -285,7 +358,7 @@ nonisolated struct SignInFlow: Sendable {
 
     /// The server step's address on HTTP, for a server whose HTTPS failed.
     mutating func useHTTP() {
-        address.choose(.http)
+        editAddress { $0.choose(.http) }
     }
 
     /// What went wrong reaching the server at `address`, said as what to do about it: the system's
@@ -357,5 +430,34 @@ nonisolated struct SignInFlow: Sendable {
     static func isDemoAccount(username: String, password: String) -> Bool {
         username.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(demoUserName) == .orderedSame
             && password == demoPassword
+    }
+}
+
+/// The languages a Jellyfin user prefers for audio and subtitles, from their configuration on the
+/// server (`/Users/Me`), which a first sign-in defaults vinnyfin's to
+/// (`AppSettings.defaultLanguages`). Empty or missing when they haven't said.
+nonisolated struct UserLanguages: Decodable, Sendable {
+    let audio: String?
+    let subtitle: String?
+
+    private enum CodingKeys: String, CodingKey { case configuration = "Configuration" }
+    private enum ConfigurationKeys: String, CodingKey {
+        case audio = "AudioLanguagePreference", subtitle = "SubtitleLanguagePreference"
+    }
+
+    init(audio: String?, subtitle: String?) {
+        self.audio = audio
+        self.subtitle = subtitle
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.configuration) else {
+            self.init(audio: nil, subtitle: nil)
+            return
+        }
+        let configuration = try container.nestedContainer(keyedBy: ConfigurationKeys.self, forKey: .configuration)
+        self.init(audio: try configuration.decodeIfPresent(String.self, forKey: .audio),
+                  subtitle: try configuration.decodeIfPresent(String.self, forKey: .subtitle))
     }
 }

@@ -382,7 +382,7 @@ struct MainTabs: View {
     #if os(iOS) || os(visionOS)
     /// Settings is a tab where there's a sidebar to hold it, as on Apple TV: on iPad and Vision
     /// Pro. On iPhone it opens from Home, and on the Mac in a window of its own.
-    private static var hasSettingsTab: Bool {
+    static var hasSettingsTab: Bool {
         #if os(visionOS)
         true
         #else

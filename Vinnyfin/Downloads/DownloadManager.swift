@@ -379,6 +379,7 @@ final class DownloadManager {
         if hasJobs { removeUnusedArtwork() }
         // What a chunk wrote before the app was killed partway through writing it.
         for job in jobs where job.status != .completed { releaseUnrecorded(of: job.id) }
+        if let account = accounts.account { adoptUnowned(by: account) }
     }
 
     private static func setAsideUnreadableJobs(_ storage: DownloadStorage, error: any Error) -> String {
@@ -533,7 +534,8 @@ final class DownloadManager {
     func enqueue(_ item: JellyfinItem, plan: DownloadPlan, startedByUser: Bool) {
         let known = jobs.contains { $0.itemId == item.id && $0.mediaSourceId == plan.source.id }
         guard !known else { return }
-        let job = DownloadJob(item: item, plan: plan)
+        var job = DownloadJob(item: item, plan: plan)
+        job.owner = accounts.account
         jobs.append(job)
         if startedByUser {
             noteStartedByUser([job.id])
@@ -738,17 +740,31 @@ final class DownloadManager {
         }
     }
 
-    /// Looks at the queue again, and for missing extras, whenever someone signs in: both need
-    /// the server, so downloads queued while nobody was (a sign-in that ran out, say) wait for it.
+    /// Looks at the queue again, and for missing extras, whenever the sign-in in use changes:
+    /// both need the server, so downloads queued while nobody was (a sign-in that ran out, say)
+    /// wait for it, and each sign-in's downloads wait while another is in use.
     private func followSignIns() {
         let accounts = accounts
         Task { [weak self] in
-            for await account in Observations({ accounts.client == nil ? nil : accounts.account }) where account != nil {
+            for await account in Observations({ accounts.client == nil ? nil : accounts.account }) {
                 guard let self else { return }
+                if let account { self.adoptUnowned(by: account) }
                 self.pump()
                 self.fetchExtrasSoon()
             }
         }
+    }
+
+    /// Whether the download is the sign-in in use's, or saved before downloads had one.
+    func belongsToSignInInUse(_ job: DownloadJob) -> Bool {
+        job.belongs(to: accounts.account)
+    }
+
+    /// Gives the downloads saved before downloads had a sign-in to the one in use.
+    private func adoptUnowned(by account: AccountStore.Account) {
+        guard jobs.contains(where: { $0.owner == nil }) else { return }
+        for index in jobs.indices where jobs[index].owner == nil { jobs[index].owner = account }
+        save()
     }
 
     /// Looks at the queue again whenever Settings change what the rules allow.
@@ -905,16 +921,17 @@ final class DownloadManager {
         return true
     }
 
-    /// Stops and forgets every unfinished job, with the artwork of items no finished one is
-    /// left for, for signing out. Finished files stay.
-    func removeUnfinished() {
-        for job in jobs where job.status != .completed {
+    /// Stops and forgets every unfinished job of the sign-in, with the artwork of items no
+    /// finished one is left for, for signing out of it. Finished files stay.
+    func removeUnfinished(of account: AccountStore.Account) {
+        let isGoing = { (job: DownloadJob) in job.status != .completed && job.belongs(to: account) }
+        for job in jobs where isGoing(job) {
             transcodes.leave(job)
             cancelTransfers(of: job.id)
             removePartial(of: job.id)
             removeExtras(of: job, besideFile: false)
         }
-        jobs.removeAll { $0.status != .completed }
+        jobs.removeAll(where: isGoing)
         removeUnusedArtwork()
         isSpaceCheckDue = true
         save()
@@ -989,7 +1006,7 @@ final class DownloadManager {
     /// watched. Never while a player is open.
     func dropWatchedEpisodes(ofShows seriesIds: Set<String>) {
         guard players.isEmpty else { return }
-        let watched = DownloadJob.watchedWhileQueued(jobs, ofShows: seriesIds) { history.entry(for: $0) }
+        let watched = DownloadJob.watchedWhileQueued(jobs.filter(belongsToSignInInUse), ofShows: seriesIds) { history.entry(for: $0) }
         guard !watched.isEmpty else { return }
         for job in watched {
             Self.log.info("Dropping \(job.shortName, privacy: .public), watched while it was queued")
@@ -1000,12 +1017,12 @@ final class DownloadManager {
         pump()
     }
 
-    /// Keeps what the server says about how downloads were watched, finished or not, so what
-    /// counts as watched holds offline and in the background too.
+    /// Keeps what the server says about how the sign-in in use's downloads were watched,
+    /// finished or not, so what counts as watched holds offline and in the background too.
     func recordWatchState(from items: [JellyfinItem]) {
         let server = Dictionary(items.map { ($0.id, $0.userData) }) { first, _ in first }
         var changed = false
-        for index in jobs.indices where jobs[index].item != nil {
+        for index in jobs.indices where jobs[index].item != nil && belongsToSignInInUse(jobs[index]) {
             guard let data = server[jobs[index].itemId], jobs[index].item?.userData != data else { continue }
             jobs[index].item?.userData = data
             changed = true
@@ -1015,11 +1032,12 @@ final class DownloadManager {
         save()
     }
 
-    /// The finished downloads watched since they were queued, the one watched longest ago
-    /// first: what goes to make room, and for Delete Watched Episodes.
+    /// The sign-in in use's finished downloads watched since they were queued, the one watched
+    /// longest ago first: what goes to make room, and for Delete Watched Episodes. Another
+    /// sign-in's are left alone: what this one watched says nothing of theirs.
     private func watchedDownloads() -> [DownloadJob] {
         jobs.compactMap { job -> (job: DownloadJob, watchedAt: Date)? in
-            guard job.status == .completed,
+            guard job.status == .completed, belongsToSignInInUse(job),
                   case .watched(let date) = job.watchState(local: history.entry(for: job.itemId))
             else { return nil }
             return (job, date)
@@ -1145,12 +1163,20 @@ final class DownloadManager {
         }
     }
 
-    /// Works out what holds each queued download back: room first, then the rules.
+    /// Works out what holds each queued download back: another sign-in's in use, then room,
+    /// then the rules. Room is shared out among the sign-in in use's downloads alone.
     private func updateWaits(now: Date) {
         let rules = rules
-        let queued = DownloadJob.queued(jobs)
-        checkSpaceIfDue(queued, rules: rules, now: now)
         var waits: [UUID: DownloadWait] = [:]
+        var queued: [DownloadJob] = []
+        for job in DownloadJob.queued(jobs) {
+            if let wait = job.ownerWait(signedIn: accounts.account) {
+                waits[job.id] = wait
+            } else {
+                queued.append(job)
+            }
+        }
+        checkSpaceIfDue(queued, rules: rules, now: now)
         for job in queued {
             if let needed = spaceShortfalls[job.id] {
                 waits[job.id] = .space(needed: needed)
@@ -1914,7 +1940,7 @@ final class DownloadManager {
         let exists = { (file: URL) in FileManager.default.fileExists(atPath: file.path) }
         let rules = rules
         for job in jobs.sorted(by: { $0.createdAt < $1.createdAt })
-        where (job.status == .active || job.status == .completed) && !extrasDone.contains(job.id)
+        where (job.status == .active || job.status == .completed) && !extrasDone.contains(job.id) && belongsToSignInInUse(job)
             && (extrasFailures[job.id]?.retryAt ?? .distantPast) <= now
             // A download's extras keep to its network and charging rules.
             && rules.wait(for: job, network: network, isOnPower: isOnPower) == nil

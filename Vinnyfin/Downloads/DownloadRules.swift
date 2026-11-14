@@ -90,10 +90,15 @@ nonisolated enum DownloadWait: Equatable, Sendable {
     /// There's no room for it under the storage limit or on the device, even once every watched
     /// download is deleted; it needs this many bytes more.
     case space(needed: Int64)
+    /// It's another sign-in's, which isn't in use (`DownloadJob.owner`).
+    case account(AccountStore.Account)
 
-    /// The rules hold it back rather than the device: Download Now lifts them.
+    /// The rules hold it back rather than the device or the sign-in: Download Now lifts them.
     var isRule: Bool {
-        if case .space = self { false } else { true }
+        switch self {
+        case .wifi, .lowDataMode, .power: true
+        case .space, .account: false
+        }
     }
 
     /// Its transfers can go to the session to wait for a network they may use; the app holds
@@ -109,6 +114,7 @@ extension DownloadWait {
         case .lowDataMode: "Waiting while Low Data Mode is on"
         case .power: "Waiting until your \(Device.name) is charging"
         case .space(let needed): "Waiting for space: \(needed.formatted(.byteCount(style: .file))) more needed"
+        case .account(let owner): "Paused: sign in to \(owner.serverTitle) as \(owner.userName)"
         }
     }
 
@@ -119,6 +125,7 @@ extension DownloadWait {
         case .lowDataMode: "then waits while Low Data Mode is on"
         case .power: "then waits until your \(Device.name) is charging"
         case .space(let needed): "then waits for space: \(needed.formatted(.byteCount(style: .file))) more needed"
+        case .account(let owner): "then pauses until you sign in to \(owner.serverTitle) as \(owner.userName)"
         }
     }
 
@@ -128,6 +135,7 @@ extension DownloadWait {
         case .lowDataMode: "arrow.down.circle.dotted"
         case .power: "powerplug"
         case .space: "externaldrive.badge.exclamationmark"
+        case .account: "person.crop.circle.badge.clock"
         }
     }
 }

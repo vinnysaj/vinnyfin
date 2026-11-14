@@ -445,25 +445,34 @@ nonisolated struct JellyfinClient: Sendable {
         return page.items
     }
 
-    /// The episode after `episodeId` in the show's order, if there is one. Neither neighbour
-    /// lookup takes an episode the server lists from its metadata without a file (missing), which
-    /// a user's "display missing episodes" puts in the list, and which can't be played.
+    /// The episode after `episodeId` in the show's order that the player can go on to
+    /// (`UpNext.canGoOn(to:now:)`), if there is one within a few. Neither neighbour lookup takes a
+    /// special, or an episode the server lists from its metadata without a file, which a user's
+    /// "display missing episodes" puts in the list: one not aired yet, or missing from the library.
     func episode(after episodeId: String, seriesId: String, userId: String) async throws -> JellyfinItem? {
         let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: [
-            "userId": userId, "startItemId": episodeId, "limit": "2", "enableUserData": "true", "isMissing": "false",
-            "fields": Self.listFields,
+            "userId": userId, "startItemId": episodeId, "limit": String(UpNext.neighbourReach + 1), "enableUserData": "true",
+            "isMissing": "false", "fields": Self.listFields,
         ])
-        return page.items.dropFirst().first { $0.parentIndexNumber != 0 }
+        return UpNext.episode(after: episodeId, in: page.items, now: .now)
     }
 
-    /// The episode before `episodeId` in the show's order, if there is one.
+    /// The episode before `episodeId` in the show's order that the player can go on to, if there
+    /// is one within a few. The server lists only an episode's neighbours, so this steps back one
+    /// at a time past those it can't.
     func episode(before episodeId: String, seriesId: String, userId: String) async throws -> JellyfinItem? {
-        let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: [
-            "userId": userId, "adjacentTo": episodeId, "enableUserData": "true", "isMissing": "false",
-            "fields": Self.listFields,
-        ])
-        guard let index = page.items.firstIndex(where: { $0.id == episodeId }), index > 0 else { return nil }
-        return page.items[index - 1]
+        var current = episodeId
+        for _ in 0..<UpNext.neighbourReach {
+            let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: [
+                "userId": userId, "adjacentTo": current, "enableUserData": "true", "isMissing": "false",
+                "fields": Self.listFields,
+            ])
+            guard let index = page.items.firstIndex(where: { $0.id == current }), index > 0 else { return nil }
+            let previous = page.items[index - 1]
+            if UpNext.canGoOn(to: previous, now: .now) { return previous }
+            current = previous.id
+        }
+        return nil
     }
 
     /// Every kind of segment; `MediaSegment.skipTitle` picks the ones worth skipping. Jellyfin's

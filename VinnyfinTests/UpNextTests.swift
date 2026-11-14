@@ -78,6 +78,29 @@ struct UpNextTests {
         #expect(UpNext.firstToWatch(after: finished, in: [finished, unaired], now: Self.now) == nil)
     }
 
+    @Test func thePlayersNextEpisodeIsTheFirstItCanGoOnTo() {
+        let playing = Self.episode("e3", 3)
+        let following = [
+            playing,
+            Self.episode("sp", season: 0, 1),
+            Self.episode("e4", 4, location: "Virtual"),
+            Self.episode("e5", 5, premiere: "2026-11-20T00:00:00.0000000Z"),
+            // Watched already, which the Next button doesn't mind.
+            Self.episode("e6", 6, played: true),
+            Self.episode("e7", 7),
+        ]
+        #expect(UpNext.episode(after: "e3", in: following, now: Self.now)?.id == "e6")
+        #expect(UpNext.episode(after: "e3", in: Array(following.prefix(4)), now: Self.now) == nil)
+        #expect(UpNext.episode(after: "e7", in: following, now: Self.now) == nil)
+    }
+
+    @Test func thePlayerGoesOnOnlyToAnAiredEpisodeWithSomethingToPlay() {
+        #expect(UpNext.canGoOn(to: Self.episode("e2", 2, location: "FileSystem"), now: Self.now))
+        #expect(!UpNext.canGoOn(to: Self.episode("sp", season: 0, 1, location: "FileSystem"), now: Self.now))
+        #expect(!UpNext.canGoOn(to: Self.episode("e4", 4, location: "Virtual"), now: Self.now))
+        #expect(!UpNext.canGoOn(to: Self.episode("e5", 5, premiere: "2026-11-20T00:00:00Z"), now: Self.now))
+    }
+
     @Test func aShowNothingOfHasBeenWatchedStartsWithTheServersPick() {
         let first = Self.episode("e1", 1)
         #expect(UpNext.pick(for: UpNext.Show(seriesId: "s1", serverNext: first), now: Self.now) == .episode(first))

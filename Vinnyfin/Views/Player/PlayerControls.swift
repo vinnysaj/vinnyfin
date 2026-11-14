@@ -54,6 +54,11 @@ struct PlayerControls: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     #endif
+    #if !os(tvOS)
+    /// The skips back and forward so far, each of which turns its button's arrow.
+    @State private var backSkips = 0
+    @State private var forwardSkips = 0
+    #endif
 
     var body: some View {
         Group {
@@ -78,6 +83,11 @@ struct PlayerControls: View {
             if opened == nil, let closed { focus.wrappedValue = .panel(closed) }
         }
         .animation(.easeInOut(duration: 0.25), value: isCompact)
+        #else
+        .onChange(of: model.scrubbing.skipRun) { _, run in
+            guard let run else { return }
+            if run.seconds < 0 { backSkips += 1 } else { forwardSkips += 1 }
+        }
         #endif
     }
 
@@ -298,16 +308,27 @@ struct PlayerControls: View {
         let scale: CGFloat = isBelowFold ? 0.75 : 1
         #endif
         return HStack(spacing: 44 * scale) {
-            transportButton("gobackward.10", label: "Back 10 Seconds", size: 30 * scale) { model.skip(by: -PlayerModel.skipInterval) }
+            transportButton("gobackward.10", label: "Back 10 Seconds", size: 30 * scale,
+                            turn: .rotate.counterClockwise.byLayer, turns: backSkips) {
+                model.skip(by: -PlayerModel.skipInterval)
+            }
+            .overlay(alignment: .top) { skipTally(back: true) }
             transportButton(playPauseSymbol, label: playPauseLabel, size: 44 * scale, showsProgress: isWaiting) {
                 model.togglePlayPause()
             }
             .accessibilityIdentifier("player.playPause")
-            transportButton("goforward.10", label: "Forward 10 Seconds", size: 30 * scale) { model.skip(by: PlayerModel.skipInterval) }
+            transportButton("goforward.10", label: "Forward 10 Seconds", size: 30 * scale,
+                            turn: .rotate.clockwise.byLayer, turns: forwardSkips) {
+                model.skip(by: PlayerModel.skipInterval)
+            }
+            .overlay(alignment: .top) { skipTally(back: false) }
         }
+        .animation(.snappy, value: model.scrubbing.skipRun)
     }
 
+    /// `turns` counts the presses that turned the symbol by `turn`, once each.
     private func transportButton(_ symbol: String, label: String, size: CGFloat, showsProgress: Bool = false,
+                                 turn: RotateSymbolEffect = .rotate, turns: Int = 0,
                                  action: @escaping () -> Void) -> some View {
         Button {
             action()
@@ -321,6 +342,7 @@ struct PlayerControls: View {
                     Image(systemName: symbol)
                         .font(.system(size: size, weight: .semibold))
                         .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(turn, options: .speed(2), value: turns)
                         .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
             }
@@ -332,6 +354,21 @@ struct PlayerControls: View {
         .buttonBorderShape(.circle)
         .accessibilityLabel(label)
         .accessibilityShowsLargeContentViewer()
+    }
+
+    /// The run of skips, over the button that took it: "+30". On Vision Pro the timeline is
+    /// there instead.
+    @ViewBuilder private func skipTally(back: Bool) -> some View {
+        #if !os(visionOS)
+        if let run = model.scrubbing.skipRun, (run.seconds < 0) == back {
+            SkipTally(seconds: run.seconds)
+                .fixedSize()
+                // Standing on the button's top edge, clear of it.
+                .frame(height: 0, alignment: .bottom)
+                .offset(y: -10)
+                .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .bottom)))
+        }
+        #endif
     }
     #endif
 
@@ -842,24 +879,34 @@ private struct ScrubPreview: View {
     }
 }
 
-#if os(tvOS)
-/// The sum of the skips in a row, over the playhead: "+30", "−1:00".
+/// The sum of the skips in a row: "+30", "−1:00". On Apple TV over the playhead, with the way it
+/// went; elsewhere over the skip button, which shows the way itself.
 private struct SkipTally: View {
     let seconds: Double
 
     var body: some View {
         Label(text, systemImage: seconds < 0 ? "gobackward" : "goforward")
-            .font(.callout.weight(.semibold))
+            #if !os(tvOS)
+            .labelStyle(.titleOnly)
+            #endif
+            .font(Self.font)
             .monospacedDigit()
             .contentTransition(.numericText(value: seconds))
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
+            .padding(.horizontal, Self.padding.width)
+            .padding(.vertical, Self.padding.height)
             .platformGlass(in: .capsule)
             .accessibilityHidden(true)
     }
 
+    #if os(tvOS)
     /// Kept this far from the timeline's ends, about half its width.
     static let halfWidth: CGFloat = 80
+    private static let font = Font.callout.weight(.semibold)
+    private static let padding = CGSize(width: 20, height: 10)
+    #else
+    private static let font = Font.subheadline.weight(.semibold)
+    private static let padding = CGSize(width: 12, height: 6)
+    #endif
 
     private var text: String {
         let magnitude = abs(seconds)
@@ -867,7 +914,6 @@ private struct SkipTally: View {
         return (seconds < 0 ? "\u{2212}" : "+") + amount
     }
 }
-#endif
 
 /// One thumbnail cut from its sheet of scrub previews, which comes from the image cache, or from
 /// disk for a download.

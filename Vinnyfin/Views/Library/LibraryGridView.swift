@@ -4,73 +4,66 @@ import SwiftUI
 /// It loads a page at a time around what's on screen, so it opens at once and scrolls the same
 /// at any length. Sorted by name it has an A–Z index down the leading side. Coming back to it,
 /// from a title's page or another tab, it's where it was left, refreshed in place.
+///
+/// A list that's a query can be sorted either way, shuffled, and narrowed by watch state, genres
+/// and library, from the Sort and Filter menu; a row of chips under the title shows the order and
+/// each filter, which a tap reverses or takes away. The Movies and Shows tabs keep theirs from
+/// one launch to the next (see `BrowseList.refinementsKey`).
 struct LibraryGridView: View {
-    enum Sort: String, CaseIterable, Identifiable {
-        case name, dateAdded, releaseDate, rating, lastPlayed
-
-        var id: Self { self }
-        var label: String {
-            switch self {
-            case .name: "Name"
-            case .dateAdded: "Date Added"
-            case .releaseDate: "Release Date"
-            case .rating: "Rating"
-            case .lastPlayed: "Recently Watched"
-            }
-        }
-
-        /// The server's field for it. A show counts as added when an episode last was.
-        func serverField(for types: [String]) -> String {
-            switch self {
-            case .name: "SortName"
-            case .dateAdded: types == ["Series"] ? "DateLastContentAdded" : "DateCreated"
-            case .releaseDate: "PremiereDate"
-            case .rating: "CommunityRating"
-            case .lastPlayed: "DatePlayed"
-            }
-        }
-
-        /// The sort a query uses, if it's one of these.
-        init?(_ query: JellyfinClient.ItemQuery) {
-            guard let sort = Self.allCases.first(where: { $0.serverField(for: query.types) == query.sortBy }) else { return nil }
-            self = sort
-        }
-
-        func apply(to query: inout JellyfinClient.ItemQuery) {
-            query.sortBy = serverField(for: query.types)
-            query.ascending = self == .name
-        }
-    }
-
-    enum Filter: String, CaseIterable, Identifiable {
-        case all, unwatched, favorites
-        var id: Self { self }
-        var label: String {
-            switch self {
-            case .all: "All"
-            case .unwatched: "Unwatched"
-            case .favorites: "Favorites"
-            }
-        }
-
-        init(_ query: JellyfinClient.ItemQuery) {
-            self = query.isFavorite == true ? .favorites : query.isPlayed == false ? .unwatched : .all
-        }
-
-        func apply(to query: inout JellyfinClient.ItemQuery) {
-            query.isPlayed = self == .unwatched ? false : nil
-            query.isFavorite = self == .favorites ? true : nil
-        }
-    }
-
     let list: BrowseList
+    @Environment(\.session) private var session
+
+    var body: some View {
+        LibraryGrid(list: list, memory: memory)
+    }
+
+    /// Where the list's sort and filter are kept for this sign-in, for a tab's list.
+    private var memory: LibraryMemory? {
+        guard let key = list.refinementsKey, let session else { return nil }
+        return LibraryMemory(list: key, serverId: session.account.serverId, userId: session.userId)
+    }
+
+    /// What to call `list` sorted by `sort`, a server field or "Random". A list picked out by its
+    /// order, such as Top Rated Movies or Recently Added Shows, is every title of its kind, which
+    /// another order shows for what it is: "Movies", "Shows", "Unwatched Drama Movies". One sorted
+    /// by name, or that a person, a collection, a library, a search or its genre picks out, keeps
+    /// its title.
+    nonisolated static func title(of list: BrowseList, sortedBy sort: String?) -> String {
+        guard case .items(let base) = list.source, let sort, sort != base.sortBy, base.sortBy != "SortName",
+              base.searchTerm == nil, base.personIds.isEmpty, base.parentId == nil, base.ids.isEmpty,
+              base.genres != [list.title] else { return list.title }
+        let kinds = base.types.map { type in
+            switch type {
+            case "Movie": "Movies"
+            case "Series": "Shows"
+            case "Episode": "Episodes"
+            case "BoxSet": "Collections"
+            case "Video": "Videos"
+            case "MusicVideo": "Music Videos"
+            default: type
+            }
+        }
+        var words: [String] = []
+        if base.isFavorite == true { words.append("Favorite") }
+        if let played = base.isPlayed { words.append(played ? "Watched" : "Unwatched") }
+        if !base.genres.isEmpty { words.append(base.genres.formatted(.list(type: .or))) }
+        words.append(kinds.formatted(.list(type: .and)))
+        return words.joined(separator: " ")
+    }
+}
+
+private struct LibraryGrid: View {
+    let list: BrowseList
+    let memory: LibraryMemory?
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.cardScale) private var cardScale
-    /// The list's query as the menu has changed it; nil for a list that isn't a query.
-    @State private var query: JellyfinClient.ItemQuery?
+    /// How the menu and chips have refined the list; nil for a list that isn't a query.
+    @State private var refinements: LibraryRefinements?
+    /// The order a random sort shuffles the list into; Shuffle Again picks another.
+    @State private var shuffleSeed = UInt64.random(in: .min ... .max)
     @State private var items: PagedItems?
     @State private var refreshProblem: String?
     @State private var genres: [String] = []
@@ -94,9 +87,11 @@ struct LibraryGridView: View {
     @State private var focusedLetter: String?
     #endif
 
-    init(list: BrowseList) {
+    init(list: BrowseList, memory: LibraryMemory?) {
         self.list = list
-        _query = State(initialValue: Self.query(of: list))
+        self.memory = memory
+        let base = Self.query(of: list)
+        _refinements = State(initialValue: base.map { memory?.load() ?? LibraryRefinements(of: $0) })
     }
 
     private static func query(of list: BrowseList) -> JellyfinClient.ItemQuery? {
@@ -107,12 +102,25 @@ struct LibraryGridView: View {
 
     /// The list's own query, which the menu refines but whose filters it leaves alone.
     private var base: JellyfinClient.ItemQuery? { Self.query(of: list) }
-    private var source: JellyfinClient.ItemSource { query.map { .items($0) } ?? list.source }
+    /// The list's query as the menu and chips have refined it.
+    private var query: JellyfinClient.ItemQuery? {
+        guard let base, let refinements else { return nil }
+        return refinements.applied(to: base)
+    }
+    private var source: JellyfinClient.ItemSource {
+        guard let base, let refinements else { return list.source }
+        return refinements.source(for: base, seed: shuffleSeed)
+    }
     private var showsIndex: Bool { items?.isSortedByName == true && (items?.count ?? 0) > 30 }
 
     var body: some View {
         EdgeToEdgeScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                #if !os(tvOS)
+                if refinements != nil {
+                    chips.padding(.bottom, Metrics.gridSpacing)
+                }
+                #endif
                 if let columnCount {
                     if let items, let count = items.count {
                         grid(items, count: count, columns: columnCount)
@@ -160,8 +168,12 @@ struct LibraryGridView: View {
         .pageBackground()
         .screenTitle(title)
         #if !os(tvOS)
+        #if !os(visionOS)
+        // Vision Pro has no subtitle under a title; the chips say the same.
+        .navigationSubtitle(filterSubtitle)
+        #endif
         .toolbar {
-            if query != nil {
+            if refinements != nil {
                 ToolbarItem(placement: .primaryAction) { sortAndFilter }
             }
         }
@@ -177,6 +189,9 @@ struct LibraryGridView: View {
             }
         }
         .onChange(of: player.endedPlayback) { items?.update(from: player.endedPlayback) }
+        .onChange(of: refinements) { _, refinements in
+            if let refinements { memory?.save(refinements) }
+        }
         .task { await loadFilters() }
         .refreshable { await load(startingOver: false) }
     }
@@ -314,22 +329,35 @@ struct LibraryGridView: View {
 
     #if os(tvOS)
     /// Above the grid on Apple TV, where the bar stays over what scrolls under it: the title of a
-    /// list opened from another screen, and Sort and Filter. It's a focus section as wide as the
-    /// grid, so moving up from any card of the first row reaches Sort and Filter at its end.
+    /// list opened from another screen, then at the trailing end the order and filters as chips
+    /// beside Sort and Filter. There the first title, not a chip, is what's nearest the top-leading
+    /// corner, where focus lands coming from the sidebar. It's a focus section as wide as the grid,
+    /// so moving up from any card of the first row reaches it.
     @ViewBuilder private var head: some View {
-        if isPresented || query != nil {
-            HStack {
+        if isPresented || refinements != nil {
+            HStack(spacing: 24) {
                 if isPresented {
                     Text(title).font(.title2.bold())
                 }
                 Spacer()
-                if query != nil { sortAndFilter.buttonStyle(.platformGlass) }
+                if refinements != nil {
+                    chips
+                    sortAndFilter.buttonStyle(.platformGlass)
+                }
             }
             .frame(maxWidth: .infinity)
             .focusSection()
         }
     }
     #endif
+
+    /// The order and each filter, under the title.
+    @ViewBuilder private var chips: some View {
+        if let current = refinements {
+            RefinementChips(refinements: Binding { refinements ?? current } set: { refinements = $0 },
+                            libraries: libraries, reshuffle: reshuffle)
+        }
+    }
 
     /// Scrolls to a letter's first title.
     private func jump(to letter: String, in items: PagedItems) {
@@ -359,31 +387,47 @@ struct LibraryGridView: View {
     }
 
     /// Sort and Filter, filled while a filter narrows the list. Each group has its heading, which
-    /// a picker shown inline in a menu leaves out, so the sorts and filters are checkmarked
-    /// toggles under one; genres and libraries are submenus named for the one chosen.
+    /// a picker shown inline in a menu leaves out. The sort in use shows which way it goes, and
+    /// choosing it again turns it the other way, as in Files, or shuffled, shuffles again. The
+    /// watch-state filters are side by side in one row, or on Apple TV, whose menus have no such
+    /// row, checkmarked toggles; genres and libraries are submenus named for those chosen.
+    /// Several genres can be picked, the menu staying open for each, and the list then has
+    /// titles of any.
     private var sortAndFilter: some View {
         Menu {
             Section("Sort By") {
-                ForEach(Sort.allCases) { sort in
-                    Toggle(sort.label, isOn: choosing(Optional(sort), in: sortSelection))
+                ForEach(LibraryGridView.Sort.allCases) { sort in
+                    sortButton(sort)
                 }
             }
             if base?.isPlayed == nil, base?.isFavorite == nil {
                 Section("Show") {
-                    ForEach(Filter.allCases) { filter in
-                        Toggle(filter.label, isOn: choosing(filter, in: filterSelection))
+                    #if os(tvOS)
+                    ForEach(LibraryGridView.Filter.allCases) { filter in
+                        Toggle(filter.label, isOn: showing(filter))
                     }
+                    #else
+                    Picker("Show", selection: filterSelection) {
+                        ForEach(LibraryGridView.Filter.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.palette)
+                    #endif
                 }
             }
             if !genres.isEmpty {
                 Section("Genre") {
-                    Picker(selection: genreSelection) {
-                        Text("All Genres").tag(String?.none)
-                        ForEach(genres, id: \.self) { Text($0).tag(Optional($0)) }
+                    Menu {
+                        Button("All Genres") { refinements?.genres = [] }
+                        ForEach(genres, id: \.self) { genre in
+                            Toggle(genre, isOn: picking(genre: genre))
+                                #if !os(macOS)
+                                // Open for picking another. A Mac's menus close on each choice.
+                                .menuActionDismissBehavior(.disabled)
+                                #endif
+                        }
                     } label: {
-                        Text(query?.genres.first ?? "All Genres")
+                        Text(refinements?.genres.isEmpty == false ? refinements?.genres.formatted(.list(type: .or)) ?? "" : "All Genres")
                     }
-                    .pickerStyle(.menu)
                 }
             }
             if libraries.count > 1 {
@@ -392,7 +436,7 @@ struct LibraryGridView: View {
                         Text("All Libraries").tag(String?.none)
                         ForEach(libraries) { Text($0.name).tag(Optional($0.id)) }
                     } label: {
-                        Text(libraries.first { $0.id == query?.parentId }?.name ?? "All Libraries")
+                        Text(libraries.first { $0.id == refinements?.libraryId }?.name ?? "All Libraries")
                     }
                     .pickerStyle(.menu)
                 }
@@ -412,101 +456,70 @@ struct LibraryGridView: View {
     }
 
     /// Whether the menu narrows the list to some of its titles, beyond what the list itself does.
-    private var isFiltered: Bool {
-        guard let query, let base else { return false }
-        return query.isPlayed != base.isPlayed || query.isFavorite != base.isFavorite || query.genres != base.genres
-            || query.parentId != base.parentId
-    }
+    private var isFiltered: Bool { refinements?.isFiltered == true }
 
     /// The filters the menu has set, as they read in a sentence: "Favorites and Drama".
-    private var filterSummary: String {
-        guard let query, let base else { return "" }
-        var parts: [String] = []
-        if query.isPlayed != base.isPlayed || query.isFavorite != base.isFavorite { parts.append(Filter(query).label) }
-        if query.genres != base.genres { parts += query.genres }
-        if query.parentId != base.parentId, let library = libraries.first(where: { $0.id == query.parentId }) {
-            parts.append(library.name)
-        }
-        return parts.formatted(.list(type: .and))
-    }
+    private var filterSummary: String { refinements?.filterSummary(libraries: libraries) ?? "" }
+
+    /// The filters under the title, while there are any: "Favorites · Drama".
+    private var filterSubtitle: String { refinements?.filterSubtitle(libraries: libraries) ?? "" }
 
     /// Takes away the menu's filters, leaving its sort.
     private func clearFilters() {
-        guard var cleared = query, let base else { return }
-        cleared.isPlayed = base.isPlayed
-        cleared.isFavorite = base.isFavorite
-        cleared.genres = base.genres
-        cleared.parentId = base.parentId
-        query = cleared
+        refinements?.clearFilters()
+    }
+
+    /// Shuffles the list into another order.
+    private func reshuffle() {
+        shuffleSeed = .random(in: .min ... .max)
     }
 
     /// The list's title, or once the menu has put a list picked by its order in another, what
-    /// the list holds then (see `title(of:sortedBy:)`).
-    private var title: String { Self.title(of: list, sortedBy: query?.sortBy) }
+    /// the list holds then (see `LibraryGridView.title(of:sortedBy:)`).
+    private var title: String {
+        LibraryGridView.title(of: list, sortedBy: refinements?.sort == .random ? "Random" : query?.sortBy)
+    }
 
-    /// What to call `list` sorted by `sort`. A list picked out by its order, such as Top Rated
-    /// Movies or Recently Added Shows, is every title of its kind, which another order shows
-    /// for what it is: "Movies", "Shows", "Unwatched Drama Movies". One sorted by name, or that
-    /// a person, a collection or a search picks out, keeps its title.
-    nonisolated static func title(of list: BrowseList, sortedBy sort: String?) -> String {
-        guard case .items(let base) = list.source, let sort, sort != base.sortBy, base.sortBy != "SortName",
-              base.searchTerm == nil, base.personIds.isEmpty, base.parentId == nil, base.ids.isEmpty else { return list.title }
-        let kinds = base.types.map { type in
-            switch type {
-            case "Movie": "Movies"
-            case "Series": "Shows"
-            case "Episode": "Episodes"
-            case "BoxSet": "Collections"
-            default: type
+    /// A sort in the menu: chosen, it goes its usual way; chosen again, the other way, or
+    /// shuffled, into another order. The one in use shows which way it goes.
+    private func sortButton(_ sort: LibraryGridView.Sort) -> some View {
+        let isCurrent = refinements?.sort == sort
+        let ascending = refinements?.ascending == true
+        return Button {
+            if !isCurrent {
+                refinements?.choose(sort)
+            } else if sort == .random {
+                reshuffle()
+            } else {
+                refinements?.ascending.toggle()
+            }
+        } label: {
+            if isCurrent {
+                Label(sort.label, systemImage: sort == .random ? "shuffle" : ascending ? "chevron.up" : "chevron.down")
+            } else {
+                Text(sort.label)
             }
         }
-        var words: [String] = []
-        if base.isFavorite == true { words.append("Favorite") }
-        if let played = base.isPlayed { words.append(played ? "Watched" : "Unwatched") }
-        if !base.genres.isEmpty { words.append(base.genres.formatted(.list(type: .or))) }
-        words.append(kinds.formatted(.list(type: .and)))
-        return words.joined(separator: " ")
+        .accessibilityValue(isCurrent ? sort.direction(ascending: ascending) ?? "Shuffled" : "")
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
     }
 
-    /// On while `selection` is `value`; turned on, it chooses it.
-    private func choosing<Value: Equatable>(_ value: Value, in selection: Binding<Value>) -> Binding<Bool> {
-        Binding { selection.wrappedValue == value } set: { if $0 { selection.wrappedValue = value } }
+    private func showing(_ filter: LibraryGridView.Filter) -> Binding<Bool> {
+        Binding { refinements?.filter == filter } set: { if $0 { refinements?.filter = filter } }
     }
 
-    private var sortSelection: Binding<Sort?> {
-        Binding {
-            query.flatMap(Sort.init)
-        } set: { sort in
-            guard let sort, var changed = query else { return }
-            sort.apply(to: &changed)
-            query = changed
-        }
+    private var filterSelection: Binding<LibraryGridView.Filter> {
+        Binding { refinements?.filter ?? .all } set: { refinements?.filter = $0 }
     }
 
-    private var filterSelection: Binding<Filter> {
-        Binding {
-            query.map(Filter.init) ?? .all
-        } set: { filter in
-            guard var changed = query else { return }
-            filter.apply(to: &changed)
-            query = changed
-        }
-    }
-
-    private var genreSelection: Binding<String?> {
-        Binding {
-            query?.genres.first
-        } set: { genre in
-            query?.genres = genre.map { [$0] } ?? []
+    private func picking(genre: String) -> Binding<Bool> {
+        Binding { refinements?.genres.contains(genre) == true } set: { isOn in
+            if isOn != (refinements?.genres.contains(genre) == true) { refinements?.toggle(genre: genre) }
         }
     }
 
     private var librarySelection: Binding<String?> {
-        Binding {
-            query?.parentId
-        } set: { library in
-            query?.parentId = library
-        }
+        Binding { refinements?.libraryId } set: { refinements?.libraryId = $0 }
     }
 
     // MARK: Loading
@@ -554,7 +567,7 @@ struct LibraryGridView: View {
                 genres = try await session.client.genres(userId: session.userId, types: base.types).map(\.name)
             }
             if base.parentId == nil {
-                let kinds = Set(base.types.compactMap(Self.collectionType))
+                let kinds = Set(base.types.flatMap(Self.collectionTypes))
                 libraries = try await session.client.libraries(userId: session.userId).filter { kinds.contains($0.collectionType ?? "") }
             }
             filterProblem = nil
@@ -563,13 +576,16 @@ struct LibraryGridView: View {
         }
     }
 
-    /// The kind of library an item type lives in.
-    private static func collectionType(of type: String) -> String? {
-        switch type {
+    /// The kinds of library an item type lives in: its own, and a library of mixed content.
+    private static func collectionTypes(of type: String) -> [String] {
+        let own: String? = switch type {
         case "Movie": "movies"
         case "Series", "Episode": "tvshows"
+        case "Video": "homevideos"
+        case "MusicVideo": "musicvideos"
         default: nil
         }
+        return own.map { [$0, "mixed", ""] } ?? []
     }
 }
 

@@ -2,27 +2,80 @@
 import Foundation
 import WidgetKit
 
-/// The Continue Watching widget on iPhone, iPad and the Mac: the first titles of Home's row of
-/// that name, each playing from where it was left. The widget extension asks the signed-in server
-/// for them, with their pictures, each time its timeline reloads; the app has it reload as a
+/// The widgets of titles on iPhone, iPad and the Mac: Continue Watching, the first titles of
+/// Home's row of that name, each playing from where it was left; Recently Added, the newest
+/// movies and shows together; and Favorites, as Home's row of that name lists them, A to Z, each
+/// of the last two opening its title's page. The widget extension asks the signed-in server for
+/// them, with their pictures, each time a widget's timeline reloads; the app has them reload as a
 /// playback stops and as the app leaves the foreground, since what was watched and who is signed
 /// in may have changed.
 nonisolated enum UpNextWidgets {
-    /// Which of Home's rows a widget shows.
+    /// Which list of titles a widget shows.
     enum Row: String, CaseIterable, Sendable {
-        case continueWatching
+        case continueWatching, recentlyAdded, favorites
 
         /// The widget's kind, by which the app has it reload.
         var kind: String { "net.vinnysaj.vinnyfin.\(rawValue)" }
 
-        var title: String { "Continue Watching" }
+        var title: String {
+            switch self {
+            case .continueWatching: "Continue Watching"
+            case .recentlyAdded: "Recently Added"
+            case .favorites: "Favorites"
+            }
+        }
 
-        var description: String { "Movies you're partway through and the next episode of each show you're watching." }
+        var description: String {
+            switch self {
+            case .continueWatching: "Movies you're partway through and the next episode of each show you're watching."
+            case .recentlyAdded: "The movies and shows added to your server last, a show counting when an episode is."
+            case .favorites: "The movies and shows you've marked as favorites."
+            }
+        }
 
         /// What the widget says with nothing in the row.
-        var emptyMessage: String { "Nothing to continue." }
+        var emptyMessage: String {
+            switch self {
+            case .continueWatching: "Nothing to continue."
+            case .recentlyAdded: "Nothing has been added yet."
+            case .favorites: "No favorites yet. Mark a movie or show as a favorite to see it here."
+            }
+        }
 
-        var source: JellyfinClient.ItemSource { .upNext }
+        /// What the widget says when nobody is signed in.
+        var signInMessage: String {
+            switch self {
+            case .continueWatching: "Sign in to vinnyfin to see what's up next."
+            case .recentlyAdded: "Sign in to vinnyfin to see what's new."
+            case .favorites: "Sign in to vinnyfin to see your favorites."
+            }
+        }
+
+        /// The symbol that stands for the row where there's no room for pictures.
+        var symbol: String {
+            switch self {
+            case .continueWatching: "play.fill"
+            case .recentlyAdded: "sparkles.tv"
+            case .favorites: "star.fill"
+            }
+        }
+
+        /// Whether a tile plays its title, from where it was left, rather than opening its page.
+        var plays: Bool { self == .continueWatching }
+
+        var source: JellyfinClient.ItemSource {
+            switch self {
+            case .continueWatching:
+                return .upNext
+            case .recentlyAdded:
+                return .recentlyAdded
+            case .favorites:
+                var query = JellyfinClient.ItemQuery(types: ["Movie", "Series"])
+                query.isFavorite = true
+                query.fields = JellyfinClient.cardFields
+                return .items(query)
+            }
+        }
     }
 
     /// Has the system ask the widgets for their titles again.
@@ -32,7 +85,7 @@ nonisolated enum UpNextWidgets {
         }
     }
 
-    /// A title as a widget shows it, with what it plays.
+    /// A title as a widget shows it, with where a tap on it goes.
     struct Tile: Identifiable, Equatable, Sendable {
         let itemId: String
         /// Its show, or the film's name.
@@ -41,19 +94,20 @@ nonisolated enum UpNextWidgets {
         let detail: String
         /// How far through it playback got, 0...1.
         let progress: Double?
-        /// Plays it from where it was left, as the app's Resume does.
-        let playLink: URL
+        /// Plays it from where it was left, as the app's Resume does, or opens its page, as the
+        /// row has it (`Row.plays`).
+        let link: URL
         /// Its picture as a small JPEG, at the size the widget draws it. Nil without one.
         var artwork: Data?
 
         var id: String { itemId }
 
-        init(_ item: JellyfinItem) {
+        init(_ item: JellyfinItem, plays: Bool = true) {
             itemId = item.id
             title = item.titleName
             detail = item.cardDetail
             progress = item.progress
-            playLink = AppLink(.play, item).url
+            link = AppLink(plays ? .play : .open, item).url
         }
     }
 
@@ -71,9 +125,9 @@ nonisolated enum UpNextWidgets {
         case unreachable(server: String, reason: String)
     }
 
-    /// The row's titles that play, the first `limit` of them.
-    static func tiles(from items: [JellyfinItem], limit: Int) -> [Tile] {
-        items.filter(\.isPlayable).prefix(limit).map(Tile.init)
+    /// The first `limit` of the row's titles: for a row whose tiles play them, those that play.
+    static func tiles(from items: [JellyfinItem], limit: Int, for row: Row = .continueWatching) -> [Tile] {
+        items.filter { !row.plays || $0.isPlayable }.prefix(limit).map { Tile($0, plays: row.plays) }
     }
 
     /// What a widget shows when asking the server failed.

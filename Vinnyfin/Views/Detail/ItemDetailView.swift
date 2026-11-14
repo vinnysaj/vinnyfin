@@ -145,6 +145,8 @@ struct ItemDetailView: View {
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
             similar = player.endedPlayback.applied(to: similar)
+            // Started here, the playback may have moved on to a later episode, which shows instead.
+            if let watched = player.endedPlayback.episodeToShow(onPageOf: page) { return showEpisode(watched) }
             Task { await loadDetail() }
         }
         #if os(tvOS)
@@ -320,7 +322,7 @@ struct PlayButton: View {
 
     var body: some View {
         Button {
-            player.play(.item(item, mediaSourceId: mediaSourceId))
+            player.play(.item(item, mediaSourceId: mediaSourceId, loaded: item))
         } label: {
             Label(label, systemImage: "play.fill")
                 .frame(minWidth: 120)
@@ -338,7 +340,7 @@ struct PlayButton: View {
         #endif
         if item.resumeSeconds != nil {
             Button {
-                player.play(.item(item, mediaSourceId: mediaSourceId, fromBeginning: true))
+                player.play(.item(item, mediaSourceId: mediaSourceId, fromBeginning: true, loaded: item))
             } label: {
                 Label("Start Over", systemImage: "arrow.counterclockwise")
             }

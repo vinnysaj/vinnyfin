@@ -305,6 +305,10 @@ private struct PlaybackSettings: View {
         Section {
             Toggle("Play the Next Episode Automatically", isOn: $settings.autoplayNextEpisode)
             Toggle("Offer to Skip Intros and Credits", isOn: $settings.showSkipButtons)
+            SettingPicker("Skip Intros", selection: $settings.introSkipping) {
+                ForEach(AppSettings.IntroSkipping.allCases) { Text($0.label).tag($0) }
+            }
+            .accessibilityIdentifier("settings.introSkipping")
             #if os(tvOS)
             Toggle("Match Frame Rate and Dynamic Range", isOn: $settings.matchContent)
             #endif

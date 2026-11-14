@@ -41,6 +41,11 @@ final class PlayerCoordinator {
     /// What the last player to close played, once the server has heard it stop: pages showing a
     /// title's watch state load it again, and lists put it on their cards.
     private(set) var endedPlayback = EndedPlayback()
+    /// The title whose page is on screen, as the pages say (`View.handoffPage`).
+    @ObservationIgnored var pageOnScreen: String?
+    /// The title whose page was on screen as the player opened, which closing the player goes
+    /// back to.
+    @ObservationIgnored private(set) var pageUnderPlayer: String?
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "player")
 
@@ -99,6 +104,7 @@ final class PlayerCoordinator {
 
     /// Plays without asking: for what another device or the group asks for.
     func open(_ request: PlaybackRequest) {
+        pageUnderPlayer = pageOnScreen
         #if os(macOS)
         if playsOnTV { pendingTVRequest = request } else { pendingWindowRequest = request }
         #elseif os(visionOS)
@@ -189,9 +195,11 @@ final class PlayerCoordinator {
             #endif
             let reported = model?.stopReport
             let played = model?.playedTitleIds ?? []
+            let startedItemId = model?.startedItemId
+            let lastItem = model?.item
             Task {
                 await reported?.value
-                await self?.endPlayback(of: played)
+                await self?.endPlayback(of: played, startedFrom: startedItemId, last: lastItem)
             }
         }
         return model
@@ -199,8 +207,9 @@ final class PlayerCoordinator {
 
     /// Asks the server for the watch state of what was played, here or on a device this one was
     /// the remote for. A title it can't be asked about keeps the state its cards show until they
-    /// load again. The Up Next widgets ask the server for theirs again.
-    func endPlayback(of titleIds: Set<String>) async {
+    /// load again. The Up Next widgets ask the server for theirs again. `startedFrom` is the item
+    /// the player opened on, and `last` the one it played last.
+    func endPlayback(of titleIds: Set<String>, startedFrom startedItemId: String? = nil, last lastItem: JellyfinItem? = nil) async {
         #if os(iOS) || os(macOS)
         if !titleIds.isEmpty { UpNextWidgets.reload() }
         #endif
@@ -220,7 +229,7 @@ final class PlayerCoordinator {
                 }
             }
         }
-        endedPlayback = EndedPlayback(count: endedPlayback.count + 1, userData: userData)
+        endedPlayback = EndedPlayback(count: endedPlayback.count + 1, userData: userData, startedItemId: startedItemId, lastItem: lastItem)
     }
 
     private func sharedEngine() -> AetherEngine? {
@@ -252,6 +261,19 @@ nonisolated struct EndedPlayback: Equatable, Sendable {
     var count = 0
     /// By id: the titles played, and the shows of the episodes among them.
     var userData: [String: UserItemData] = [:]
+    /// The server item the player opened on.
+    var startedItemId: String?
+    /// The server item it played last, which autoplay or Next may have moved on to.
+    var lastItem: JellyfinItem?
+
+    /// The episode the player moved on to from the one `page` shows, which it opened on, for the
+    /// page to show in its place: closing the player lands on the episode watched last, rather
+    /// than on one already finished.
+    func episodeToShow(onPageOf page: JellyfinItem) -> JellyfinItem? {
+        guard let lastItem, startedItemId == page.id, lastItem.id != page.id, lastItem.isEpisode,
+              let seriesId = lastItem.seriesId, seriesId == page.seriesId else { return nil }
+        return applied(to: lastItem)
+    }
 
     /// `item` with the watch state the playback left it in.
     func applied(to item: JellyfinItem) -> JellyfinItem {

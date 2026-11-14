@@ -97,9 +97,10 @@ struct PlayerControls: View {
         #endif
     }
 
-    /// Only the top bar stays, its Close and AirPlay, over a failure's own way on.
+    /// Only the top bar stays, its Close and AirPlay, over a failure's own way on, through a try
+    /// again's first moment too, while the failure stays up (`PlayerModel.shownFailure`).
     private var isFailed: Bool {
-        if case .failed = model.status { true } else { false }
+        model.shownFailure != nil
     }
 
     /// While the timeline moves in a short window, the transport makes way for its preview.
@@ -398,14 +399,14 @@ struct PlayerControls: View {
     /// as it does while it plays, rather than to play what's already coming.
     private var playPauseLabel: String {
         switch model.status {
-        case .ended: "Play Again"
+        case .ended: model.nextEpisode != nil ? "Next Episode" : "Play Again"
         default: model.status.isUnderway ? "Pause" : "Play"
         }
     }
 
     private var playPauseSymbol: String {
         switch model.status {
-        case .ended: "arrow.counterclockwise"
+        case .ended: model.nextEpisode != nil ? "forward.end.fill" : "arrow.counterclockwise"
         default: model.status.isUnderway ? "pause.fill" : "play.fill"
         }
     }

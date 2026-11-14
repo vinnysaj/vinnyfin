@@ -33,18 +33,37 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
     /// saves the player asking for it again. Not kept when the request is saved: by the time a
     /// saved request plays again, the item may have changed.
     var loadedItem: JellyfinItem?
+    /// The title as the screen it was picked on had it, whose picture the player shows while it
+    /// asks the server for the rest. Not kept when the request is saved.
+    var shownItem: JellyfinItem?
 
     private enum CodingKeys: String, CodingKey {
         case id, source, title, startFromBeginning, startingPoint
     }
 
     /// `continuingFrom` is where another of the person's devices had got to, for a playback it
-    /// handed off.
+    /// handed off. `loaded` is the item as the title's page has it, which saves asking for it again
+    /// when it's the page's own (`hasDetails`).
     static func item(_ item: JellyfinItem, mediaSourceId: String? = nil, fromBeginning: Bool = false,
-                     continuingFrom position: Double? = nil) -> PlaybackRequest {
-        PlaybackRequest(source: .item(id: item.id, mediaSourceId: mediaSourceId), title: item.name, startFromBeginning: fromBeginning,
-                        startingPoint: position.map { StartingPoint(position: $0, yieldsToLaterResume: true) })
+                     continuingFrom position: Double? = nil, loaded: JellyfinItem? = nil) -> PlaybackRequest {
+        var request = PlaybackRequest(source: .item(id: item.id, mediaSourceId: mediaSourceId), title: item.name,
+                                      startFromBeginning: fromBeginning,
+                                      startingPoint: position.map { StartingPoint(position: $0, yieldsToLaterResume: true) })
+        request.shownItem = item
+        if let loaded, loaded.id == item.id, hasDetails(loaded) { request.loadedItem = loaded }
+        return request
     }
+
+    /// Whether `item` is as `JellyfinClient.item(id:userId:)` gives it, versions, chapters and
+    /// scrub previews and all, which a playback starts from. Lists leave out the chapters, and
+    /// most leave out the versions.
+    static func hasDetails(_ item: JellyfinItem) -> Bool {
+        item.mediaSources != nil && item.chapters != nil
+    }
+
+    /// How far before a saved position a resume starts, so the scene picks up rather than
+    /// starting mid-sentence.
+    static let resumeLeadIn: Double = 5
 
     /// The same title again from `position`, as a playback that ended plays again when it's moved
     /// back: from the start at 0, else from exactly there, whatever the title's resume position.
@@ -74,12 +93,19 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
         }
     }
 
-    /// Where to start, given where the title resumes: there, unless another device asked for
-    /// somewhere else.
+    /// Where to start, given where the title resumes: `resumeLeadIn` before it, unless another
+    /// device, a link or the group watching together asked for somewhere else, which starts
+    /// exactly there.
     func start(resuming resume: Double?) -> Double? {
-        guard let startingPoint else { return resume }
+        guard let startingPoint else { return resume.map { max(0, $0 - Self.resumeLeadIn) } }
         guard startingPoint.yieldsToLaterResume else { return startingPoint.position }
         return max(startingPoint.position, resume ?? 0)
+    }
+
+    /// Whether a playback that starts where `start(resuming:)` says picks up the title's saved
+    /// position, which the player says it did and offers to start over from.
+    func resumesSavedPosition(_ resume: Double?) -> Bool {
+        startingPoint == nil && (start(resuming: resume) ?? 0) > 0
     }
 
     /// Bookmarks a file the user picked. The caller holds access to it while this runs.
@@ -132,6 +158,11 @@ struct ResolvedPlayback {
     var chapters: [ChapterMark] = []
     /// A security-scoped URL to stop accessing when playback ends.
     var scopedURL: URL?
+    /// It starts at the title's saved position (`PlaybackRequest.resumesSavedPosition`).
+    var resumesSavedPosition = false
+    /// The audio and subtitles the viewer picked for the show, this session or last time, which
+    /// the version's tracks are chosen by where nothing comes before them (`TrackPicks`).
+    var trackPicks: TrackPicks?
 
     var isTranscode: Bool { transcode != nil }
 
@@ -282,17 +313,28 @@ struct PlaybackResolver {
     }
 
     /// `tracks` are the audio and subtitles a playback of the title had, which a transcode is asked
-    /// for; a version that plays as it is picks its own from them once it's loaded.
-    func resolve(_ request: PlaybackRequest, carrying tracks: TrackSelection? = nil) async throws -> ResolvedPlayback {
+    /// for; a version that plays as it is picks its own from them once it's loaded. `picks` are
+    /// those the viewer picked in a show this session, which its episodes start with.
+    func resolve(_ request: PlaybackRequest, carrying tracks: TrackSelection? = nil, picks: ShowPicks? = nil) async throws -> ResolvedPlayback {
         switch request.source {
         case .file(let bookmark, let name):
             return try resolveFile(bookmark: bookmark, name: name, request: request)
         case .item(let id, let mediaSourceId):
             if let copy = downloadedCopy(id, mediaSourceId) {
-                return resolveDownload(copy, itemId: id, request: request)
+                var resolved = resolveDownload(copy, itemId: id, request: request)
+                resolved.trackPicks = resolved.item.flatMap { trackPicks(for: $0, session: picks) }
+                return resolved
             }
-            return try await resolveStream(itemId: id, mediaSourceId: mediaSourceId, request: request, tracks: tracks)
+            return try await resolveStream(itemId: id, mediaSourceId: mediaSourceId, request: request, tracks: tracks, picks: picks)
         }
+    }
+
+    /// The audio and subtitles the viewer picked for `item`'s show: this session's, else those
+    /// remembered from last time.
+    private func trackPicks(for item: JellyfinItem, session: ShowPicks?) -> TrackPicks? {
+        guard let seriesId = item.seriesId else { return nil }
+        return TrackPicks.starting(session: session?.seriesId == seriesId ? session?.picks : nil,
+                                   remembered: settings.trackMemory.picks(forShow: seriesId))
     }
 
     // MARK: Files
@@ -311,15 +353,18 @@ struct PlaybackResolver {
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 }.map(Int64.init) ?? 0
         let key = WatchHistory.fileKey(name: url.lastPathComponent, size: size)
         let externalSubtitles = Self.sidecarSubtitles(for: url)
-        return ResolvedPlayback(
+        let resume = request.startFromBeginning ? nil : history.resumePosition(for: key)
+        var resolved = ResolvedPlayback(
             url: url,
             title: url.deletingPathExtension().lastPathComponent,
-            startPosition: request.start(resuming: request.startFromBeginning ? nil : history.resumePosition(for: key)),
+            startPosition: request.start(resuming: resume),
             duration: history.entry(for: key)?.duration,
             externalSubtitles: externalSubtitles,
             historyKey: key,
             scopedURL: scoped ? url : nil
         )
+        resolved.resumesSavedPosition = request.resumesSavedPosition(resume)
+        return resolved
     }
 
     /// Subtitle files next to a video that share its name: "Movie.en.srt" for "Movie.mkv".
@@ -368,13 +413,14 @@ struct PlaybackResolver {
         let saved = source.map { ExternalSubtitleTrack.of($0) { _, index, _ in copy.subtitleFiles[index] } } ?? []
         let savedFiles = Set(copy.subtitleFiles.values.map(\.standardizedFileURL))
         let others = Self.sidecarSubtitles(for: copy.url).filter { !savedFiles.contains($0.url.standardizedFileURL) }
+        let resume = request.startFromBeginning ? nil : Self.resumable(start, length: length)
         return ResolvedPlayback(
             url: copy.url,
             title: item?.titleWithYear ?? request.title,
             subtitle: item.flatMap(Self.subtitle),
             item: item,
             mediaSource: source,
-            startPosition: request.start(resuming: request.startFromBeginning ? nil : Self.resumable(start, length: length)),
+            startPosition: request.start(resuming: resume),
             duration: length,
             externalSubtitles: saved + others,
             historyKey: itemId,
@@ -384,14 +430,15 @@ struct PlaybackResolver {
             trickplay: item.flatMap { item in
                 source.flatMap { TrickplayTiles.of(item, sourceId: $0.id) { _, index in copy.trickplaySheets[index] } }
             },
-            chapters: item.map { ChapterMark.of($0) { index, _ in copy.chapterImages[index] } } ?? []
+            chapters: item.map { ChapterMark.of($0) { index, _ in copy.chapterImages[index] } } ?? [],
+            resumesSavedPosition: request.resumesSavedPosition(resume)
         )
     }
 
     // MARK: Streaming
 
     private func resolveStream(itemId: String, mediaSourceId: String?, request: PlaybackRequest,
-                               tracks: TrackSelection?) async throws -> ResolvedPlayback {
+                               tracks: TrackSelection?, picks: ShowPicks?) async throws -> ResolvedPlayback {
         guard let client = accounts.client, let account = accounts.account else { throw PlaybackError.notSignedIn }
         let item: JellyfinItem
         if let loaded = request.loadedItem, loaded.id == itemId {
@@ -410,24 +457,43 @@ struct PlaybackResolver {
         }
 
         let asked = request.startingPoint
-        let resume = request.start(resuming: Self.resumable(start, length: plan.source.runtimeSeconds ?? item.runtimeSeconds))
+        let saved = Self.resumable(start, length: plan.source.runtimeSeconds ?? item.runtimeSeconds)
+        let resume = request.start(resuming: saved)
+        let picks = trackPicks(for: item, session: picks)
+        var resolved: ResolvedPlayback
         switch plan {
         case .direct(let source):
-            return try direct(item: item, source: source, start: resume)
+            resolved = try direct(item: item, source: source, start: resume)
         case .transcode(let source, let quality):
-            let carried = tracks?.streamIndexes(in: source, settings: settings)
-            let audioIndex = asked?.audioStreamIndex ?? carried?.audio
-                ?? Self.preferredAudioIndex(in: source, language: settings.audioLanguage)
-            let subtitleIndex: Int? = if let asked = asked?.subtitleStreamIndex {
-                asked < 0 ? nil : asked
-            } else if let carried {
-                carried.subtitle
-            } else {
-                Self.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
-            }
-            return try await transcode(item: item, source: source, quality: quality, audioIndex: audioIndex,
-                                       subtitleIndex: subtitleIndex, start: resume)
+            let streams = Self.streamIndexes(in: source, asked: asked, carrying: tracks, picks: picks, settings: settings)
+            resolved = try await transcode(item: item, source: source, quality: quality, audioIndex: streams.audio,
+                                           subtitleIndex: streams.subtitle, start: resume)
         }
+        resolved.resumesSavedPosition = request.resumesSavedPosition(saved)
+        resolved.trackPicks = picks
+        return resolved
+    }
+
+    /// The server's indexes of the audio and subtitle streams of `source` to ask a transcode for:
+    /// those another device asked for, then the same as a stream of the title had (`tracks`),
+    /// then the viewer's picks for the show, then what the language settings ask for. Nil
+    /// subtitles are off.
+    static func streamIndexes(in source: MediaSource, asked: PlaybackRequest.StartingPoint?, carrying tracks: TrackSelection?,
+                              picks: TrackPicks?, settings: AppSettings) -> (audio: Int?, subtitle: Int?) {
+        let carried = tracks?.streamIndexes(in: source, settings: settings)
+        let audioIndex = asked?.audioStreamIndex ?? carried?.audio
+            ?? picks?.audio(in: source.audioStreams.compactMap(TrackChooser.Candidate.init))
+            ?? preferredAudioIndex(in: source, language: settings.audioLanguage)
+        let subtitleIndex: Int? = if let asked = asked?.subtitleStreamIndex {
+            asked < 0 ? nil : asked
+        } else if let carried {
+            carried.subtitle
+        } else if let picked = picks?.subtitles(in: source.subtitleStreams.compactMap(TrackChooser.Candidate.init)) {
+            picked.trackId
+        } else {
+            preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
+        }
+        return (audioIndex, subtitleIndex)
     }
 
     /// How a stream of `item` would get to the screen: the version picked, or the one the streaming
@@ -619,6 +685,122 @@ struct TrackSelection {
             ?? TrackChooser.same(as: subtitle, in: source.subtitleStreams.compactMap(TrackChooser.Candidate.init))
             ?? PlaybackResolver.preferredSubtitleIndex(in: source, audioIndex: audioIndex, settings: settings)
         return (audioIndex, subtitleIndex)
+    }
+}
+
+/// The audio and subtitles the viewer picked in the player, described by language and kind so
+/// another episode of the show can find its own (`TrackChooser.same`). What wasn't picked stays
+/// with the language settings: an episode with forced subtitles where the one before had none
+/// still gets them, unless subtitles were turned off.
+///
+/// An episode's tracks come from, first to last: the streams another device asked for
+/// (`PlaybackRequest.StartingPoint`), the tracks a stream of the same title had (`TrackSelection`),
+/// the picks made in the show this session, those remembered from last time (`TrackMemory`), and
+/// the language settings.
+nonisolated struct TrackPicks: Codable, Equatable, Sendable {
+    /// A track as picked, without its number, which other episodes' tracks don't share.
+    struct Track: Codable, Equatable, Sendable {
+        var language: String?
+        var isForced = false
+        var isHearingImpaired = false
+        var name: String?
+        var describesVideo = false
+
+        init(_ candidate: TrackChooser.Candidate) {
+            language = candidate.language
+            isForced = candidate.isForced
+            isHearingImpaired = candidate.isHearingImpaired
+            name = candidate.name
+            describesVideo = candidate.describesVideo
+        }
+
+        var candidate: TrackChooser.Candidate {
+            TrackChooser.Candidate(id: -1, language: language, isForced: isForced, isHearingImpaired: isHearingImpaired,
+                                   isDefault: false, name: name, describesVideo: describesVideo)
+        }
+    }
+
+    enum Subtitles: Codable, Equatable, Sendable {
+        case off
+        case track(Track)
+    }
+
+    /// What the picks make of the subtitles among an episode's tracks.
+    enum SubtitleChoice: Equatable {
+        case off
+        case track(Int)
+
+        /// The track to turn on; nil turns them off.
+        var trackId: Int? {
+            if case .track(let id) = self { id } else { nil }
+        }
+    }
+
+    var audio: Track?
+    var subtitles: Subtitles?
+
+    var isEmpty: Bool { audio == nil && subtitles == nil }
+
+    /// These picks, and `fallback`'s where these have none.
+    func over(_ fallback: TrackPicks?) -> TrackPicks {
+        TrackPicks(audio: audio ?? fallback?.audio, subtitles: subtitles ?? fallback?.subtitles)
+    }
+
+    /// What an episode starts with: this session's picks in the show, and for what wasn't picked
+    /// this session, those remembered. Nil with neither.
+    static func starting(session: TrackPicks?, remembered: TrackPicks?) -> TrackPicks? {
+        let picks = (session ?? TrackPicks()).over(remembered)
+        return picks.isEmpty ? nil : picks
+    }
+
+    /// The audio among `candidates` that's the same as the one picked; nil when audio wasn't
+    /// picked or none is, which leaves it to the language settings.
+    func audio(in candidates: [TrackChooser.Candidate]) -> Int? {
+        audio.flatMap { TrackChooser.same(as: $0.candidate, in: candidates) }
+    }
+
+    /// The subtitles among `candidates` the picks ask for: off, or the same track as the one
+    /// picked. Nil when they weren't picked or none is the same, which leaves them to the
+    /// subtitle setting.
+    func subtitles(in candidates: [TrackChooser.Candidate]) -> SubtitleChoice? {
+        switch subtitles {
+        case nil: nil
+        case .off: .off
+        case .track(let track): TrackChooser.same(as: track.candidate, in: candidates).map(SubtitleChoice.track)
+        }
+    }
+}
+
+/// The picks made in one show during a player's session.
+nonisolated struct ShowPicks: Equatable, Sendable {
+    let seriesId: String
+    var picks: TrackPicks
+}
+
+/// The last audio and subtitles the viewer picked in each show, which its episodes start with
+/// next time, ahead of the language settings. Holds the `capacity` shows picked in most recently.
+nonisolated struct TrackMemory: Codable, Equatable, Sendable {
+    private struct Entry: Codable, Equatable, Sendable {
+        let seriesId: String
+        var picks: TrackPicks
+    }
+
+    /// Oldest first.
+    private var entries: [Entry] = []
+
+    static let capacity = 200
+
+    func picks(forShow seriesId: String) -> TrackPicks? {
+        entries.last { $0.seriesId == seriesId }?.picks
+    }
+
+    /// Keeps `picks` for the show, over what it had: picking subtitles keeps the audio picked
+    /// before.
+    mutating func remember(_ picks: TrackPicks, forShow seriesId: String) {
+        let merged = picks.over(self.picks(forShow: seriesId))
+        entries.removeAll { $0.seriesId == seriesId }
+        entries.append(Entry(seriesId: seriesId, picks: merged))
+        if entries.count > Self.capacity { entries.removeFirst(entries.count - Self.capacity) }
     }
 }
 

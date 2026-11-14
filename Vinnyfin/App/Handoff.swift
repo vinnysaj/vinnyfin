@@ -134,12 +134,14 @@ nonisolated struct Handoff: Equatable, Sendable {
 
 extension View {
     /// Offers the title's page to the person's other devices while it's on screen and the player
-    /// doesn't cover it. Apple TV has no Handoff.
+    /// doesn't cover it, and tells the player whose page is on screen, which the end of a title
+    /// leads back to. Apple TV has no Handoff.
     func handoffPage(_ item: JellyfinItem) -> some View {
         #if os(tvOS)
-        self
+        modifier(TitlePageOnScreen(itemId: item.id))
         #else
-        modifier(PageHandoff(item: item))
+        modifier(TitlePageOnScreen(itemId: item.id))
+            .modifier(PageHandoff(item: item))
         #endif
     }
 
@@ -149,6 +151,29 @@ extension View {
         modifier(PlaybackHandoff(model: model))
     }
     #endif
+}
+
+/// Tells the player which title's page is on screen (`PlayerCoordinator.pageOnScreen`).
+private struct TitlePageOnScreen: ViewModifier {
+    let itemId: String
+    @Environment(PlayerCoordinator.self) private var player
+    @State private var isOnScreen = false
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                isOnScreen = true
+                player.pageOnScreen = itemId
+            }
+            .onDisappear {
+                isOnScreen = false
+                if player.pageOnScreen == itemId { player.pageOnScreen = nil }
+            }
+            // Another episode picked on the page shows in its place.
+            .onChange(of: itemId) { _, id in
+                if isOnScreen { player.pageOnScreen = id }
+            }
+    }
 }
 
 #if !os(tvOS)
@@ -178,10 +203,15 @@ private struct PlaybackHandoff: ViewModifier {
     let model: PlayerModel
     @Environment(\.session) private var session
 
+    /// The title on offer: none once it has ended, which another device would only start over.
+    private var offered: JellyfinItem? {
+        model.status == .ended ? nil : model.item
+    }
+
     func body(content: Content) -> some View {
         content
-            .task(id: model.item?.id) {
-                guard let item = model.item, let session else { return }
+            .task(id: offered?.id) {
+                guard let item = offered, let session else { return }
                 let activity = NSUserActivity(activityType: Handoff.activityType)
                 defer { activity.invalidate() }
                 while !Task.isCancelled {

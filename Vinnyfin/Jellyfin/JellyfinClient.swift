@@ -771,7 +771,9 @@ nonisolated struct PlaybackInfoRequest: Encodable, Sendable {
     let MaxStreamingBitrate: Int
     let StartTimeTicks: Int64
     let AudioStreamIndex: Int?
-    let SubtitleStreamIndex: Int?
+    /// -1 for none. Left out, the server picks one by the user's subtitle settings in Jellyfin,
+    /// which favor a track flagged default, often full captions.
+    let SubtitleStreamIndex: Int
     let DeviceProfile: DeviceProfile
     var EnableDirectPlay = false
     var EnableDirectStream = false

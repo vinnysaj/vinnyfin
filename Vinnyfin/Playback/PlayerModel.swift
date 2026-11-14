@@ -540,11 +540,14 @@ final class PlayerModel: Identifiable {
                 stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.codec?.uppercased()) }
             }
             selectedSubtitle = transcode.subtitleIndex
-            // The server lists its text subtitles as HLS renditions; turn on the one asked for.
+            // The server lists its text subtitles as HLS renditions; turn on the one asked for, and
+            // with none asked for, off any a rendition's DEFAULT turned on.
             if let index = transcode.subtitleIndex,
                let asked = source.subtitleStreams.first(where: { $0.index == index }).flatMap(TrackChooser.Candidate.init),
                let rendition = TrackChooser.same(as: asked, in: tracks.map(TrackChooser.Candidate.init)), active != rendition {
                 engine.selectSubtitleTrack(index: rendition)
+            } else if transcode.subtitleIndex == nil, active != nil {
+                engine.clearSubtitle()
             }
             return
         }

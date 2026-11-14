@@ -96,8 +96,21 @@ struct TrackChooserTests {
         #expect(TrackChooser.subtitle(from: [english, named], audioLanguage: "eng", mode: .forcedOnly, language: "eng") == 8)
         #expect(TrackChooser.subtitle(from: [named, english], audioLanguage: "jpn", mode: .smart, language: "eng") == 3)
         #expect(TrackChooser.namesForced("Foreign Parts Only"))
+        #expect(TrackChooser.namesForced("en--forced--"))
         #expect(!TrackChooser.namesForced("English SDH"))
         #expect(!TrackChooser.namesForced("Reinforcement"))
+    }
+
+    /// Real tracks: a full SDH track flagged forced, and SDH ones without the flag for it.
+    @Test func goesByWhatTitlesSayOfFullSubtitlesAndCaptions() {
+        let flaggedSDH = TrackChooser.Candidate(id: 9, language: "eng", isForced: true, isHearingImpaired: false, isDefault: true,
+                                                name: "English SDH - TipsMovieZ")
+        #expect(TrackChooser.subtitle(from: [flaggedSDH], audioLanguage: "eng", mode: .forcedOnly, language: "eng") == nil)
+        let namedSDH = TrackChooser.Candidate(id: 10, language: "eng", isForced: false, isHearingImpaired: false, isDefault: true,
+                                              name: "SDH")
+        #expect(TrackChooser.subtitle(from: [namedSDH, english], audioLanguage: "eng", mode: .always, language: "eng") == 3)
+        #expect(TrackChooser.subtitle(from: [english, namedSDH], audioLanguage: "eng", mode: .off, language: "eng", captions: true) == 10)
+        #expect(!TrackChooser.namesCaptions("Accent"))
     }
 
     @Test func smartShowsFullSubtitlesForForeignAudio() {

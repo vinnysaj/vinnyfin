@@ -70,8 +70,6 @@ final class AppSettings {
     var transcodeDownloads = false { didSet { store(transcodeDownloads, Keys.transcodeDownloads) } }
     /// Deletes a downloaded episode once it has been watched, here or on another device.
     var deleteWatchedEpisodes = true { didSet { store(deleteWatchedEpisodes, Keys.deleteWatchedEpisodes) } }
-    /// How many episodes a new smart download keeps ahead.
-    var smartDownloadCount = 10 { didSet { store(smartDownloadCount, Keys.smartDownloadCount) } }
     /// Lets downloads use cellular data and Personal Hotspots.
     var downloadOverCellular = false { didSet { store(downloadOverCellular, Keys.downloadOverCellular) } }
     /// Downloads wait while the device isn't plugged in.
@@ -111,7 +109,6 @@ final class AppSettings {
         static let downloadQuality = "settings.downloadQuality"
         static let transcodeDownloads = "settings.transcodeDownloads"
         static let deleteWatchedEpisodes = "settings.deleteWatchedEpisodes"
-        static let smartDownloadCount = "settings.smartDownloadCount"
         static let downloadOverCellular = "settings.downloadOverCellular"
         static let downloadOnlyWhileCharging = "settings.downloadOnlyWhileCharging"
         static let downloadStorageLimit = "settings.downloadStorageLimit"
@@ -125,11 +122,14 @@ final class AppSettings {
         static let subtitleScale = "settings.subtitleScale"
         static let matchContent = "settings.matchContent"
         static let sound = "settings.sound"
+        /// Settings no longer offered. Left in the defaults, they'd go to iCloud with the rest.
+        static let retired = ["settings.smartDownloadCount"]
     }
 
     init(defaults: UserDefaults = .standard, cloud: (any CloudKeyValues)? = nil) {
         self.defaults = defaults
         self.cloud = cloud
+        for key in Keys.retired { defaults.removeObject(forKey: key) }
         load()
     }
 
@@ -156,7 +156,6 @@ final class AppSettings {
         downloadQuality = defaults.string(forKey: Keys.downloadQuality).flatMap(VideoQuality.init) ?? downloadQuality
         transcodeDownloads = defaults.object(forKey: Keys.transcodeDownloads) as? Bool ?? transcodeDownloads
         deleteWatchedEpisodes = defaults.object(forKey: Keys.deleteWatchedEpisodes) as? Bool ?? deleteWatchedEpisodes
-        smartDownloadCount = defaults.object(forKey: Keys.smartDownloadCount) as? Int ?? smartDownloadCount
         downloadOverCellular = defaults.object(forKey: Keys.downloadOverCellular) as? Bool ?? downloadOverCellular
         downloadOnlyWhileCharging = defaults.object(forKey: Keys.downloadOnlyWhileCharging) as? Bool ?? downloadOnlyWhileCharging
         downloadStorageLimit = defaults.object(forKey: Keys.downloadStorageLimit) as? Int ?? downloadStorageLimit
@@ -181,15 +180,14 @@ final class AppSettings {
 
     /// The settings that stay on the device they're chosen on, as what suits one device doesn't
     /// suit another: the streaming qualities suit its screen and its connections, as does the
-    /// bitrate it learned its connection carries; the episodes smart downloads keep and the space
-    /// downloads may take suit its storage, as a Mac's isn't an iPhone's; cellular data and
-    /// charging suit how it's carried and powered; and matching the frame rate and dynamic range
-    /// suits the TV it's plugged into. The download quality, whether downloads may be transcoded
-    /// to it, their notifications and the sound Sounds plays are the person's taste, and follow
-    /// them.
+    /// bitrate it learned its connection carries; the space downloads may take suits its storage,
+    /// as a Mac's isn't an iPhone's; cellular data and charging suit how it's carried and powered;
+    /// and matching the frame rate and dynamic range suits the TV it's plugged into. The download
+    /// quality, whether downloads may be transcoded to it, their notifications and the sound
+    /// Sounds plays are the person's taste, and follow them.
     nonisolated static let deviceOnlyKeys: Set<String> = [
-        Keys.streamingQuality, Keys.cellularStreamingQuality, Keys.learnedQuality, Keys.smartDownloadCount,
-        Keys.downloadStorageLimit, Keys.downloadOverCellular, Keys.downloadOnlyWhileCharging, Keys.matchContent,
+        Keys.streamingQuality, Keys.cellularStreamingQuality, Keys.learnedQuality, Keys.downloadStorageLimit,
+        Keys.downloadOverCellular, Keys.downloadOnlyWhileCharging, Keys.matchContent,
     ]
 
     /// Whether the setting under `key` follows the person to their other devices.

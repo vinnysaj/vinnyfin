@@ -55,13 +55,12 @@ struct ItemContextMenu: View {
             }
         }
         if item.isSeries {
-            if smartDownloads.rule(for: item.id) == nil {
-                Button("Keep Next \(settings.smartDownloadCount) Downloaded", systemImage: "sparkles") {
-                    smartDownloads.setRule(seriesId: item.id, seriesName: item.name, episodesAhead: settings.smartDownloadCount)
-                }
-            } else {
-                Button("Stop Smart Downloads", systemImage: "sparkles") {
-                    smartDownloads.removeRule(seriesId: item.id)
+            // The show's own Download menu's choices, but for Every Unwatched Episode, which first
+            // says how much it takes in a dialog a long-press menu can't hold.
+            Menu("Keep Downloaded", systemImage: "sparkles") {
+                SmartDownloadCounts(seriesId: item.id, seriesName: item.name)
+                if smartDownloads.rule(for: item.id) != nil {
+                    StopSmartDownloads(seriesId: item.id)
                 }
             }
         }

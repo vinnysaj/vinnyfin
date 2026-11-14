@@ -117,7 +117,7 @@ struct RootView: View {
         // Others can play to this device while it's open, or while it plays in the background.
         .task(id: socketConnection) {
             guard socketConnection != nil, let client = accounts.client else { return }
-            await socket.run(client: client)
+            await socket.hold(client: client)
         }
         .onOpenURL { url in open(url) }
         // A tapped notification, Siri, Shortcuts, Spotlight and Handoff open titles as a link would.

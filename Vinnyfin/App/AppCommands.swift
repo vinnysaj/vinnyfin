@@ -145,3 +145,29 @@ struct AppCommands: Commands {
     }
 }
 #endif
+
+#if os(macOS)
+/// Portable TV in the View menu: on and off, and the library or YouTube while it's on, as the
+/// remote's switch has them.
+struct PortableTVCommands: Commands {
+    let tv: PortableTV
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Button(tv.isOn ? "Turn Off Portable TV" : "Turn On Portable TV") {
+                if tv.isOn { dismissWindow(id: PortableTVWindow.id) } else { openWindow(id: PortableTVWindow.id) }
+            }
+            .keyboardShortcut("t", modifiers: [.control, .command])
+            Button("Show Library") { tv.press(.home(.library)) }
+                .keyboardShortcut("1", modifiers: [.option, .command])
+                .disabled(!tv.isOn)
+            Button("Show YouTube") { tv.press(.home(.youTube)) }
+                .keyboardShortcut("2", modifiers: [.option, .command])
+                .disabled(!tv.isOn)
+            Divider()
+        }
+    }
+}
+#endif

@@ -97,17 +97,141 @@ nonisolated enum GeneralCommandName: String, Sendable {
     case setSubtitleStreamIndex = "SetSubtitleStreamIndex"
     case play = "Play"
     case playState = "PlayState"
+    case moveUp = "MoveUp"
+    case moveDown = "MoveDown"
+    case moveLeft = "MoveLeft"
+    case moveRight = "MoveRight"
+    case select = "Select"
+    case back = "Back"
+    case goHome = "GoHome"
+    case sendString = "SendString"
+    case sendKey = "SendKey"
+    case toggleFullscreen = "ToggleFullscreen"
 }
 
 /// What a session tells the server it can do, which makes it a target of remote control while
 /// its socket is open.
-nonisolated struct ClientCapabilities: Encodable, Sendable {
+nonisolated struct ClientCapabilities: Encodable, Equatable, Sendable {
     var PlayableMediaTypes = ["Video"]
     var SupportedCommands: [String] = [
         GeneralCommandName.setAudioStreamIndex, .setSubtitleStreamIndex, .play, .playState,
     ].map(\.rawValue)
     var SupportsMediaControl = true
     var SupportsPersistentIdentifier = true
+
+    /// While Portable TV shows `space`, the presses it takes there too. A remote lists the
+    /// sessions that take presses as TVs, and reads from them which kind of remote to be.
+    static func portableTV(showing space: TVSpace) -> ClientCapabilities {
+        var capabilities = ClientCapabilities()
+        capabilities.SupportedCommands += TVPress.commands(in: space).map(\.rawValue)
+        return capabilities
+    }
+}
+
+/// What Portable TV shows: the library, or YouTube's website.
+nonisolated enum TVSpace: String, CaseIterable, Sendable {
+    case library = "Library"
+    case youTube = "YouTube"
+}
+
+/// A press of the remote of a device showing Portable TV, sent through the server as Jellyfin's
+/// remotes send theirs. The library moves focus with the moves and Select; YouTube's website is
+/// made for a pointer, which this app's remote moves with `SendKey`, a command Jellyfin's remotes
+/// send only to type a key, so only to a vinnyfin TV.
+nonisolated enum TVPress: Equatable, Sendable {
+    case up, down, left, right, select, back
+    /// Home of the library or YouTube; nil for the one showing.
+    case home(TVSpace?)
+    /// What to search for, in full, as typed so far.
+    case text(String)
+    /// The pointer moved to `x` and `y`, fractions of the screen's width and height from its top left.
+    case point(x: Double, y: Double)
+    /// A click where the pointer is, at `x` and `y` as in `point`.
+    case click(x: Double, y: Double)
+    /// A scroll by points, positive moving the page's content up and left as a trackpad does.
+    case scroll(dx: Double, dy: Double)
+    /// The video on the page fills the screen, or stops filling it, with `ToggleFullscreen`.
+    case fullScreen
+
+    /// The commands a TV takes in `space`. Both take Select, Back, Home and text, which make a
+    /// session a TV; the library takes moves, and YouTube the pointer.
+    static func commands(in space: TVSpace) -> [GeneralCommandName] {
+        let shared: [GeneralCommandName] = [.select, .back, .goHome, .sendString]
+        switch space {
+        case .library: return [.moveUp, .moveDown, .moveLeft, .moveRight] + shared
+        case .youTube: return shared + [.sendKey, .toggleFullscreen]
+        }
+    }
+
+    /// The general command that sends the press.
+    var command: GeneralCommand {
+        switch self {
+        case .up: GeneralCommand(.moveUp)
+        case .down: GeneralCommand(.moveDown)
+        case .left: GeneralCommand(.moveLeft)
+        case .right: GeneralCommand(.moveRight)
+        case .select: GeneralCommand(.select)
+        case .back: GeneralCommand(.back)
+        case .home(let space): GeneralCommand(.goHome, arguments: space.map { [Self.homeKey: $0.rawValue] } ?? [:])
+        case .text(let text): GeneralCommand(.sendString, arguments: ["String": text])
+        case .point(let x, let y): Self.key(.point, ["X": Self.format(x), "Y": Self.format(y)])
+        case .click(let x, let y): Self.key(.click, ["X": Self.format(x), "Y": Self.format(y)])
+        case .scroll(let dx, let dy): Self.key(.scroll, ["X": Self.format(dx), "Y": Self.format(dy)])
+        case .fullScreen: GeneralCommand(.toggleFullscreen)
+        }
+    }
+
+    /// Nil for a command that isn't a press.
+    init?(_ command: GeneralCommand) {
+        func number(_ key: String) -> Double? { command.arguments[key].flatMap(Double.init).flatMap { $0.isFinite ? $0 : nil } }
+        switch GeneralCommandName(rawValue: command.name) {
+        case .moveUp: self = .up
+        case .moveDown: self = .down
+        case .moveLeft: self = .left
+        case .moveRight: self = .right
+        case .select: self = .select
+        case .back: self = .back
+        // A home this app doesn't know is Home of the one showing.
+        case .goHome: self = .home(command.arguments[Self.homeKey].flatMap(TVSpace.init))
+        case .sendString:
+            guard let text = command.arguments["String"] else { return nil }
+            self = .text(text)
+        case .toggleFullscreen:
+            self = .fullScreen
+        case .sendKey:
+            switch command.arguments["Key"].flatMap(Key.init) {
+            case .point:
+                guard let x = number("X"), let y = number("Y") else { return nil }
+                self = .point(x: x, y: y)
+            case .click:
+                guard let x = number("X"), let y = number("Y") else { return nil }
+                self = .click(x: x, y: y)
+            case .scroll:
+                guard let dx = number("X"), let dy = number("Y") else { return nil }
+                self = .scroll(dx: dx, dy: dy)
+            case nil:
+                return nil
+            }
+        default:
+            return nil
+        }
+    }
+
+    /// The `Key` of a `SendKey` that moves the pointer, clicks or scrolls.
+    private enum Key: String {
+        case point = "Pointer", click = "Click", scroll = "Scroll"
+    }
+
+    private static let homeKey = "Home"
+
+    private static func key(_ key: Key, _ arguments: [String: String] = [:]) -> GeneralCommand {
+        GeneralCommand(.sendKey, arguments: arguments.merging(["Key": key.rawValue]) { _, new in new })
+    }
+
+    /// Short enough to send many a second, fine enough for a pixel on an 8K screen.
+    private static func format(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(0...5)).locale(Locale(identifier: "en_US_POSIX")).grouping(.never))
+    }
 }
 
 /// A general command, such as a subtitle change, as it's sent to `/Sessions/{id}/Command` and
@@ -234,6 +358,8 @@ nonisolated enum RemoteCommand: Equatable, Sendable {
     case audioStream(Int)
     /// Nil turns subtitles off.
     case subtitleStream(Int?)
+    /// A press of the remote of a device showing Portable TV.
+    case tv(TVPress)
 
     /// How far Rewind and Fast Forward move, as the player's own skip buttons do.
     static let skipInterval: Double = 10
@@ -266,6 +392,10 @@ nonisolated enum RemoteCommand: Equatable, Sendable {
             case nil: return nil
             }
         case .generalCommand(let command):
+            if let press = TVPress(command) {
+                self = .tv(press)
+                return
+            }
             guard let index = command.arguments["Index"].flatMap(Int.init) else { return nil }
             switch GeneralCommandName(rawValue: command.name) {
             case .setAudioStreamIndex: self = .audioStream(index)
@@ -327,6 +457,31 @@ nonisolated struct PlayTarget: Identifiable, Equatable, Sendable {
     private var rank: Int {
         if isAppleTV { 0 } else if session.isVinnyfin { 1 } else { 2 }
     }
+}
+
+extension PlayTarget {
+    /// The sessions a remote can drive, other than this device's: vinnyfin showing Portable TV
+    /// first, then other apps that take a remote's presses, as Jellyfin's web app does, each by name.
+    static func televisions(from sessions: [RemoteSession], excludingDeviceId deviceId: String) -> [PlayTarget] {
+        let required = Set(TVPress.commands(in: .library)).intersection(TVPress.commands(in: .youTube)).map(\.rawValue)
+        return sessions
+            .filter { $0.deviceId != deviceId && $0.supportsRemoteControl && Set($0.supportedCommands).isSuperset(of: required) }
+            .map(PlayTarget.init)
+            .sorted { lhs, rhs in
+                if lhs.session.isVinnyfin != rhs.session.isVinnyfin { return lhs.session.isVinnyfin }
+                let order = lhs.name.localizedStandardCompare(rhs.name)
+                return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
+            }
+    }
+
+    /// What the TV shows, for the remote to match: YouTube while a vinnyfin TV takes the pointer
+    /// there, the library otherwise. Other apps take a key with `SendKey`, not the pointer.
+    var tvSpace: TVSpace {
+        session.isVinnyfin && session.supports(.sendKey) ? .youTube : .library
+    }
+
+    /// The TV has YouTube to switch to: vinnyfin's does.
+    var hasYouTube: Bool { session.isVinnyfin }
 }
 
 /// A vinnyfin device the Play On list has shown before. While the app there is closed the server

@@ -19,6 +19,11 @@ struct HomeView: View {
     @Environment(SoundPlayer.self) private var sounds
     @State private var showingSounds = false
     #endif
+    #if os(iOS)
+    @State private var showingRemote = false
+    #elseif os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -47,8 +52,9 @@ struct HomeView: View {
             #if os(tvOS)
             .toolbarVisibility(feed.featured.isEmpty ? .automatic : .hidden, for: .navigationBar)
             #elseif os(iOS) || os(visionOS)
-            // Over the hero the bar keeps only Sounds and Settings, floating on the artwork; on
-            // iPhone Duo they go in the vertical bar with the rest of the bar's buttons.
+            // Over the hero the bar keeps only its buttons (Remote on iPhone and iPad, Sounds and
+            // Settings), floating on the artwork; on iPhone Duo they go in the vertical bar with
+            // the rest of the bar's buttons.
             .navigationBarTitleDisplayMode(feed.featured.isEmpty ? .automatic : .inline)
             .toolbar(removing: feed.featured.isEmpty ? nil : .title)
             .toolbarBackgroundVisibility(feed.featured.isEmpty ? .automatic : .hidden, for: .navigationBar)
@@ -56,12 +62,19 @@ struct HomeView: View {
             .scrollEdgeEffectHidden(!feed.featured.isEmpty, for: .top)
             #endif
             .toolbar {
+                #if os(iOS)
+                ToolbarItem(placement: .barTrailing) { remoteButton }
+                #endif
                 ToolbarItem(placement: .barTrailing) { soundsButton }
                 ToolbarItem(placement: .barTrailing) { settingsButton }
             }
             .sheet(isPresented: $showingSettings) { SettingsView() }
+            #if os(iOS)
+            .sheet(isPresented: $showingRemote) { TVRemoteScreen() }
+            #endif
             #elseif os(macOS)
             .toolbar {
+                ToolbarItem(placement: .barTrailing) { portableTVButton }
                 ToolbarItem(placement: .barTrailing) { soundsButton }
             }
             #endif
@@ -83,6 +96,21 @@ struct HomeView: View {
         Button("Sounds", systemImage: "waveform") { showingSounds = true }
             .symbolEffect(.variableColor.iterative, isActive: sounds.state == .playing && !sounds.isSteppedAside)
             .accessibilityIdentifier("home.sounds")
+    }
+    #endif
+
+    #if os(iOS)
+    /// This iPhone or iPad as the remote of a Mac showing Portable TV.
+    private var remoteButton: some View {
+        Button("Remote", systemImage: "appletvremote.gen4") { showingRemote = true }
+            .accessibilityIdentifier("home.remote")
+    }
+    #elseif os(macOS)
+    /// This Mac as an Apple TV, on the TV it's plugged into.
+    private var portableTVButton: some View {
+        Button("Portable TV", systemImage: "tv") { openWindow(id: PortableTVWindow.id) }
+            .help("Use this Mac as a TV, with your iPhone as the remote")
+            .accessibilityIdentifier("home.portableTV")
     }
     #endif
 

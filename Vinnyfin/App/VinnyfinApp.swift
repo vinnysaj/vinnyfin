@@ -37,6 +37,9 @@ struct VinnyfinApp: App {
             }
             #endif
             AppCommands()
+            #if os(macOS)
+            PortableTVCommands(tv: appDelegate.portableTV)
+            #endif
         }
         #endif
 
@@ -66,6 +69,15 @@ struct VinnyfinApp: App {
         #endif
 
         #if os(macOS)
+        Window("Portable TV", id: PortableTVWindow.id) {
+            PortableTVWindow()
+                .withAppEnvironment(appDelegate)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1280, height: 720)
+        .restorationBehavior(.disabled)
+        .defaultLaunchBehavior(.suppressed)
+
         Settings {
             SettingsView()
                 .withAppEnvironment(appDelegate)
@@ -113,6 +125,11 @@ extension View {
             .environment(app.widgetDownloads)
             .environment(app.remote)
             #endif
+            #if os(macOS)
+            .environment(app.portableTV)
+            #elseif os(iOS)
+            .environment(app.tvRemote)
+            #endif
         #endif
     }
 }
@@ -156,6 +173,11 @@ final class AppDelegate: NSObject {
     private(set) lazy var remote = RemoteControl(accounts: accounts, socket: socket, player: player)
     private(set) lazy var widgetDownloads = WidgetDownloads(downloads: downloads, history: history)
     #endif
+    #if os(macOS)
+    private(set) lazy var portableTV = PortableTV(accounts: accounts, player: player, socket: socket)
+    #elseif os(iOS)
+    private(set) lazy var tvRemote = TVRemote(accounts: accounts)
+    #endif
 
     private func launched() {
         ImageCache.configure()
@@ -175,7 +197,15 @@ final class AppDelegate: NSObject {
         Task { await knownServers.followSignIns() }
         let player = player
         player.sharePlay = sharePlay
+        #if os(macOS)
+        // Portable TV takes its remote's presses, and the transport while YouTube shows.
+        let portableTV = portableTV
+        socket.onCommand = { command in
+            if !portableTV.handle(command) { player.perform(command) }
+        }
+        #else
         socket.onCommand = { command in player.perform(command) }
+        #endif
         // From launch, so a session started on FaceTime before the app opened is joined.
         let sharePlay = sharePlay
         Task { await sharePlay.run() }

@@ -12,6 +12,12 @@ final class PlayerCoordinator {
     var presented: PlayerModel?
     /// A playback waiting for the root view to open its window, on the Mac and Vision Pro.
     var pendingWindowRequest: PlaybackRequest?
+    #if os(macOS)
+    /// Portable TV's window is open, and plays what starts, rather than a player window.
+    var playsOnTV = false
+    /// A playback waiting for Portable TV's window to show it.
+    var pendingTVRequest: PlaybackRequest?
+    #endif
     #if os(visionOS)
     /// The playback is on the cinema's big screen, in its immersive space, rather than in its window.
     var isInCinema = false
@@ -85,7 +91,9 @@ final class PlayerCoordinator {
 
     /// Plays without asking: for what another device or the group asks for.
     func open(_ request: PlaybackRequest) {
-        #if os(macOS) || os(visionOS)
+        #if os(macOS)
+        if playsOnTV { pendingTVRequest = request } else { pendingWindowRequest = request }
+        #elseif os(visionOS)
         pendingWindowRequest = request
         #else
         Task { await present(request) }
@@ -103,7 +111,8 @@ final class PlayerCoordinator {
         // The rest are for what's playing; the server sends them only to a session that plays.
         guard let model = presented else { return }
         switch command {
-        case .play: break
+        // Portable TV's, which takes them before they get here while it shows.
+        case .play, .tv: break
         case .pause: model.pause()
         case .unpause: model.play()
         case .togglePause: model.togglePlayPause()

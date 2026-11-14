@@ -61,7 +61,7 @@ struct HomeView: View {
                     .pageRow("notice", in: rowLayout, holding: .whole)
                     #endif
                     ForEach(feed.rows) { row in
-                        HomeRowView(row: row, feed: feed) { path.append($0) }
+                        HomeRowView(row: row, feed: feed)
                             #if os(tvOS)
                             // The first row under the banner leaves what fits of it in view.
                             .pageRow(row.id, in: rowLayout, holding: row.id == leadRow ? .whole : .top)
@@ -246,7 +246,6 @@ struct HomeView: View {
 private struct HomeRowView: View {
     let row: HomeRow
     let feed: HomeFeed
-    let open: (JellyfinItem) -> Void
 
     /// Whether a row shows at all: not once it has loaded with nothing in it.
     static func isShown(_ row: HomeRow, in feed: HomeFeed) -> Bool {
@@ -277,13 +276,7 @@ private struct HomeRowView: View {
         case .landscape:
             NavigationLink(value: item) { LandscapeCard(item: item) }
                 .buttonStyle(.artwork)
-                .titleMenu(item) { feed.replace($0) } more: {
-                    if item.isEpisode, let seriesId = item.seriesId {
-                        Button("Go to Show", systemImage: "tv") {
-                            open(JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series"))
-                        }
-                    }
-                }
+                .titleMenu(item) { feed.replace($0) }
         }
     }
 

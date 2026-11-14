@@ -97,15 +97,27 @@ struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
     private static let increasedContrastFill = Color(red: 0.20658, green: 0.43823, blue: 0.27906)
 
     func makeBody(configuration: Configuration) -> some View {
-        Button(configuration)
+        let button = Button(configuration)
             #if os(visionOS)
             .buttonStyle(.borderedProminent)
             #else
             .buttonStyle(.glassProminent)
             #endif
-            #if !os(tvOS)
-            .tint(contrast == .increased ? Self.increasedContrastFill : nil)
+        #if os(tvOS)
+        button
+        #else
+        if contrast == .increased {
+            button.tint(Self.increasedContrastFill)
+        } else {
+            #if os(visionOS)
+            // Vision Pro's prominent style fills with its own gray, like the plain bordered
+            // style beside it, unless it's given the accent itself.
+            button.tint(.accentColor)
+            #else
+            button
             #endif
+        }
+        #endif
     }
 }
 
@@ -134,18 +146,39 @@ extension View {
 }
 
 extension View {
-    /// Artwork in a card that Apple TV lifts under focus, with the system's sheen, sway and glass
-    /// rim. The card's button style lifts the first picture in its label by itself, but not one
-    /// clipped to rounded corners, as `Artwork` is: without this, focus barely shows on it.
-    /// Elsewhere nothing.
+    /// Artwork in a card that lifts under focus, the pointer or the eyes. Apple TV lifts it under
+    /// focus, with the system's sheen, sway and glass rim: the card's button style lifts the first
+    /// picture in its label by itself, but not one clipped to rounded corners, as `Artwork` is,
+    /// and without this focus barely shows on it. iPad's pointer and Vision Pro's gaze lift the
+    /// artwork's rounded shape rather than the whole card with its caption, and on the Mac it
+    /// grows a little under the pointer.
     func liftsUnderFocus() -> some View {
         #if os(tvOS)
         hoverEffect(.highlight)
+        #elseif os(macOS)
+        modifier(PointerLift())
         #else
-        self
+        contentShape(.hoverEffect, .rect(cornerRadius: Metrics.cardRadius))
+            .hoverEffect(.lift)
         #endif
     }
 }
+
+#if os(macOS)
+/// Grows a card's artwork a little while the pointer is over it.
+private struct PointerLift: ViewModifier {
+    @State private var isHovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(isHovered && !reduceMotion ? 1.03 : 1)
+            .brightness(isHovered ? 0.04 : 0)
+            .animation(.snappy(duration: 0.2), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+#endif
 
 /// The title and details under a card's artwork. On Apple TV they're dimmed but for the card
 /// with focus, so it stands out beside its row, and move down out of the way of its artwork as
@@ -181,22 +214,30 @@ extension View {
 }
 
 /// For artwork cards: Apple TV lifts them under focus; elsewhere they stay untinted, with the
-/// title in the text color rather than the accent.
+/// title in the text color rather than the accent, and give a little under a finger or a click.
 #if os(tvOS)
 typealias ArtworkButtonStyle = BorderlessButtonStyle
-#else
-typealias ArtworkButtonStyle = PlainButtonStyle
-#endif
 
 extension PrimitiveButtonStyle where Self == ArtworkButtonStyle {
-    static var artwork: Self {
-        #if os(tvOS)
-        .borderless
-        #else
-        .plain
-        #endif
+    static var artwork: Self { .borderless }
+}
+#else
+struct ArtworkButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // With Reduce Motion it dims instead of moving.
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+            .opacity(configuration.isPressed && reduceMotion ? 0.7 : 1)
+            .animation(.spring(duration: 0.3, bounce: 0.4), value: configuration.isPressed)
     }
 }
+
+extension ButtonStyle where Self == ArtworkButtonStyle {
+    static var artwork: Self { ArtworkButtonStyle() }
+}
+#endif
 
 extension View {
     #if os(tvOS)
@@ -270,4 +311,13 @@ extension EnvironmentValues {
     /// How far the bars over the top of an `EdgeToEdgeScrollView` that runs up under them reach
     /// over its content; zero in one that doesn't.
     @Entry var topBarsHeight: CGFloat = 0
+}
+
+extension View {
+    /// The page's color behind a screen, under the bars too: the one its hero artwork fades into
+    /// (see `Color.pageBackground`), so moving between screens doesn't change it. On Apple TV
+    /// that's black, where the system's would be gray.
+    func pageBackground() -> some View {
+        background(Color.pageBackground.ignoresSafeArea())
+    }
 }

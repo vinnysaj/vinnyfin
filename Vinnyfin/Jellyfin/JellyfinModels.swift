@@ -76,12 +76,10 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         self.type = type
     }
 
-    // Navigation and lists key items by id; equality also looks at the watch state so a row
-    // showing it redraws when it changes.
-    static func == (lhs: JellyfinItem, rhs: JellyfinItem) -> Bool {
-        lhs.id == rhs.id && lhs.userData == rhs.userData
-    }
-
+    // Equality is every field's, as synthesized: SwiftUI skips redrawing a view whose item is
+    // equal to the one it had, so an item equal by less than all of it, such as by its id and
+    // watch state, leaves a page showing a list's item without the overview and tagline its
+    // details bring. The hash is the id's alone, which equal items share, so it stays cheap.
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }

@@ -1,28 +1,53 @@
 import SwiftUI
 
-/// Sizes that differ by how far away the screen is.
-enum Metrics {
+/// Sizes that differ by how far away the screen is. Card widths are what a card aims for: rows
+/// and grids fit their cards to the room they have around them (see `CardFit`), and a screen
+/// regular in both directions makes them larger (see `EnvironmentValues.cardScale`).
+nonisolated enum Metrics {
     #if os(tvOS)
     static let posterWidth: CGFloat = 230
     static let landscapeWidth: CGFloat = 470
     static let gridSpacing: CGFloat = 48
     static let edge: CGFloat = 80
+    static let overlayInset: CGFloat = 10
     #elseif os(visionOS)
     static let posterWidth: CGFloat = 170
     static let landscapeWidth: CGFloat = 330
     static let gridSpacing: CGFloat = 24
     static let edge: CGFloat = 32
+    static let overlayInset: CGFloat = 6
     #elseif os(macOS)
     static let posterWidth: CGFloat = 160
     static let landscapeWidth: CGFloat = 300
     static let gridSpacing: CGFloat = 20
     static let edge: CGFloat = 24
+    static let overlayInset: CGFloat = 6
     #else
-    static let posterWidth: CGFloat = 116
+    /// Three columns of posters across a grid at least 340 points wide, as every iPhone's is in
+    /// portrait without the A–Z index, and a row of three and a part of a fourth.
+    static let posterWidth: CGFloat = 104
     static let landscapeWidth: CGFloat = 270
     static let gridSpacing: CGFloat = 14
     static let edge: CGFloat = 16
+    static let overlayInset: CGFloat = 6
     #endif
+
+    /// How much larger cards are on a screen regular in both directions: iPad at full screen or
+    /// in a large window.
+    static var regularScale: CGFloat {
+        #if os(iOS)
+        1.5
+        #else
+        1
+        #endif
+    }
+
+    /// Between a page's sections: its rows, and the text and buttons around them.
+    static let sectionSpacing: CGFloat = 30
+    /// The corners of a card's artwork, and of what stands in for it.
+    static let cardRadius: CGFloat = 10
+    /// The corners of a notice on a page, such as why something couldn't load.
+    static let noticeRadius: CGFloat = 16
 
     /// The player's controls from the screen's sides, inside the safe area. A TV's safe area is
     /// already its overscan margin.
@@ -31,6 +56,50 @@ enum Metrics {
         0
         #else
         edge
+        #endif
+    }
+}
+
+/// How wide cards are for the room they have. A grid fills its width with as many columns as
+/// fit at a card's width or wider, so its margins stay even. A row fits a whole number of cards
+/// near a card's width and a part of the next, which shows that the row goes on.
+nonisolated enum CardFit {
+    /// How much of the next card a row shows after its whole ones.
+    static let peek: CGFloat = 0.3
+
+    /// The columns, `spacing` apart, that fit across `width` at `minimum` wide or wider.
+    static func columns(in width: CGFloat, minimum: CGFloat, spacing: CGFloat) -> Int {
+        guard minimum > 0 else { return 1 }
+        // A hair over, so a width that fits its columns exactly isn't a rounding error short.
+        return max(1, Int((width + spacing) / (minimum + spacing) + 0.0001))
+    }
+
+    /// The width of a row's cards, `spacing` apart, with `room` from the first card's leading
+    /// edge to the row's trailing one: whole cards near `target` wide, and `peek` of the next.
+    /// Of the widths either side of the target, the wider one while it's at most a fifth over,
+    /// or else whichever is nearer.
+    static func rowCardWidth(room: CGFloat, target: CGFloat, spacing: CGFloat) -> CGFloat {
+        guard room > 0, target > 0 else { return target }
+        func width(showing whole: Int) -> CGFloat {
+            (room - CGFloat(whole) * spacing) / (CGFloat(whole) + peek)
+        }
+        // As many whole cards as fit at the target width with a part of the next.
+        let whole = max(1, Int(((room - peek * target) / (target + spacing)).rounded(.down)))
+        let wider = width(showing: whole), narrower = width(showing: whole + 1)
+        guard narrower > 0 else { return wider }
+        return wider / target <= max(1.2, target / narrower) ? wider : narrower
+    }
+}
+
+extension EnvironmentValues {
+    /// How much larger cards are than `Metrics` has them: `Metrics.regularScale` on a screen
+    /// regular in both directions, iPad at full screen or in a large window. A large iPhone in
+    /// landscape is regular only across, and its rows are short enough as they are.
+    var cardScale: CGFloat {
+        #if os(iOS)
+        horizontalSizeClass == .regular && verticalSizeClass == .regular ? Metrics.regularScale : 1
+        #else
+        1
         #endif
     }
 }
@@ -50,20 +119,20 @@ struct PosterCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Artwork(url: session?.poster(item), aspectRatio: 2.0 / 3.0, placeholder: item.isSeries ? "tv" : "film")
                 .overlay { NotYetAvailableOverlay(item: item) }
-                .overlay(alignment: .topTrailing) { WatchBadge(item: item).padding(6) }
+                .overlay(alignment: .topTrailing) { WatchBadge(item: item).padding(Metrics.overlayInset) }
                 .overlay(alignment: .bottom) {
-                    if let progress = item.progress {
-                        ProgressBar(fraction: progress).padding(6)
+                    if let progress {
+                        ProgressBar(fraction: progress).padding(Metrics.overlayInset)
                     }
                 }
                 #if !os(tvOS)
                 .overlay(alignment: .bottomLeading) {
-                    if item.progress == nil, downloads.isDownloaded(item.id) {
+                    if progress == nil, downloads.isDownloaded(item.id) {
                         Image(systemName: "arrow.down.circle.fill")
                             .symbolRenderingMode(.palette)
                             .foregroundStyle(.white, .tint)
                             .font(.callout)
-                            .padding(6)
+                            .padding(Metrics.overlayInset)
                     }
                 }
                 #endif
@@ -71,7 +140,10 @@ struct PosterCard: View {
                 .measuresCardArtwork($artworkHeight)
             if showsTitle {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(item.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
+                    // Two lines, kept even for a short title, so the years in a row line up.
+                    Text(item.name)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(2...max(2, dynamicTypeSize.lineLimit(2)))
                     if let year = item.premiereYearText {
                         Text(year).font(.caption2).foregroundStyle(.secondary)
                     }
@@ -79,7 +151,12 @@ struct PosterCard: View {
                 .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
             }
         }
-        .contentShape(.rect)
+        .liftsArtworkIntoMenu(aspectRatio: 2.0 / 3.0)
+        .contentShape(.interaction, .rect)
+        #if os(macOS)
+        // The whole title, which the caption may cut short.
+        .help(item.name)
+        #endif
         // The name, then what the badges show: "Dune, 2021, watched, downloaded".
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.name)
@@ -87,18 +164,47 @@ struct PosterCard: View {
         .accessibilityIdentifier("poster.\(item.name)")
     }
 
+    /// How far into the title playback is. A show has none: its share of episodes watched is
+    /// what its badge counts, and as a bar it's a stub that reads as nothing.
+    private var progress: Double? {
+        item.isSeries ? nil : item.progress
+    }
+
     private var details: String {
         var parts = [item.premiereYearText, NotYetAvailableOverlay.spoken(item), WatchBadge.spokenState(of: item),
-                     item.progress.map(ProgressBar.spoken)]
+                     progress.map(ProgressBar.spoken)]
         #if !os(tvOS)
-        if item.progress == nil, downloads.isDownloaded(item.id) { parts.append("downloaded") }
+        if progress == nil, downloads.isDownloaded(item.id) { parts.append("downloaded") }
         #endif
         return parts.compactMap(\.self).joined(separator: ", ")
     }
 }
 
-/// Watched, or for a show the episodes left to watch: white on blue, the tint elsewhere. Apple
-/// TV's tint and accent color are white, which hid the badge's white text and checkmark.
+/// The artwork at the top of a card, as wide as the card at `aspectRatio`, with its rounded
+/// corners: the part of the card a long press lifts into its menu.
+struct CardArtworkShape: Shape {
+    let aspectRatio: CGFloat
+
+    nonisolated func path(in rect: CGRect) -> Path {
+        let artwork = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: min(rect.height, rect.width / aspectRatio))
+        return RoundedRectangle(cornerRadius: Metrics.cardRadius).path(in: artwork)
+    }
+}
+
+extension View {
+    /// Lifts a card's artwork alone into its long-press menu, leaving the caption behind, where
+    /// it would overlap the captions beside it. The Mac's menus lift nothing.
+    fileprivate func liftsArtworkIntoMenu(aspectRatio: CGFloat) -> some View {
+        #if os(macOS)
+        self
+        #else
+        contentShape(.contextMenuPreview, CardArtworkShape(aspectRatio: aspectRatio))
+        #endif
+    }
+}
+
+/// Watched, or for a show the episodes left to watch. White on dark glass, which reads on any
+/// artwork and leaves color to the accent; on Apple TV, white on blue.
 struct WatchBadge: View {
     let item: JellyfinItem
     @Environment(\.colorSchemeContrast) private var contrast
@@ -110,23 +216,48 @@ struct WatchBadge: View {
                 .monospacedDigit()
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(fill, in: .capsule)
+                .background { backing(.capsule) }
                 .foregroundStyle(.white)
                 .accessibilityLabel(Self.spokenState(of: item) ?? "")
         } else if item.isPlayed {
+            #if os(tvOS)
             Image(systemName: "checkmark.circle.fill")
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(.white, fill)
                 .font(.callout)
                 .accessibilityLabel("Watched")
+            #else
+            Image(systemName: "checkmark")
+                .font(.caption2.weight(.heavy))
+                .foregroundStyle(.white)
+                .padding(5)
+                .background { backing(.circle) }
+                .accessibilityLabel("Watched")
+            #endif
         }
     }
 
+    @ViewBuilder private func backing(_ shape: some Shape) -> some View {
+        #if os(tvOS)
+        shape.fill(fill)
+        #else
+        if contrast == .increased {
+            shape.fill(.black.opacity(0.85))
+        } else {
+            shape.fill(.black.opacity(0.35))
+                .background(.ultraThinMaterial, in: shape)
+                .environment(\.colorScheme, .dark)
+        }
+        #endif
+    }
+
+    #if os(tvOS)
     /// Blue, deep enough with Increase Contrast that white reads on it at 4.5 to 1 whatever blue
     /// the system has made it.
     private var fill: Color {
         contrast == .increased ? .blue.mix(with: .black, by: 0.4) : .blue
     }
+    #endif
 
     /// What the badge shows, as VoiceOver says it: "watched", "3 unwatched episodes"; nil for none.
     static func spokenState(of item: JellyfinItem) -> String? {
@@ -137,17 +268,20 @@ struct WatchBadge: View {
     }
 }
 
+/// How far into a title playback is, across the bottom of its artwork: white on a light,
+/// see-through track that shows on dark artwork, with a faint shadow that lifts it off light.
 struct ProgressBar: View {
     let fraction: Double
 
     var body: some View {
         GeometryReader { geometry in
-            Capsule().fill(.black.opacity(0.45))
+            Capsule().fill(.white.opacity(0.35))
                 .overlay(alignment: .leading) {
                     Capsule().fill(.white).frame(width: geometry.size.width * min(1, max(0, fraction)))
                 }
         }
         .frame(height: 4)
+        .shadow(color: .black.opacity(0.35), radius: 2)
         .accessibilityElement()
         .accessibilityLabel(Self.spoken(fraction))
     }
@@ -159,8 +293,11 @@ struct ProgressBar: View {
 }
 
 /// A 16:9 card for Continue Watching and Next Up: the episode's still, its show and number.
+/// Leading with the episode, as a search does that found it by its name, the episode's name
+/// comes first, over its show's and its number: "The Night Ferry" over "Port Ellery · S1, E1".
 struct LandscapeCard: View {
     let item: JellyfinItem
+    var leadsWithEpisode = false
     @State private var artworkHeight: CGFloat = 0
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -171,26 +308,51 @@ struct LandscapeCard: View {
                 .overlay { NotYetAvailableOverlay(item: item) }
                 .overlay(alignment: .bottom) {
                     if let progress = item.progress {
-                        ProgressBar(fraction: progress).padding(8)
+                        ProgressBar(fraction: progress).padding(Metrics.overlayInset)
                     }
                 }
                 .liftsUnderFocus()
                 .measuresCardArtwork($artworkHeight)
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.titleName)
+                Text(title)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(dynamicTypeSize.lineLimit(1))
-                Text(item.cardDetail).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
             }
             .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
         }
-        .contentShape(.rect)
+        .liftsArtworkIntoMenu(aspectRatio: 16.0 / 9.0)
+        .contentShape(.interaction, .rect)
+        #if os(macOS)
+        .help([title, detail].filter { !$0.isEmpty }.joined(separator: ", "))
+        #endif
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(item.titleName)
-        .accessibilityValue([item.spokenCardDetail, NotYetAvailableOverlay.spoken(item), item.progress.map(ProgressBar.spoken)]
+        .accessibilityLabel(title)
+        .accessibilityValue([spokenDetail, NotYetAvailableOverlay.spoken(item), item.progress.map(ProgressBar.spoken)]
             .compactMap { $0?.isEmpty == false ? $0 : nil }
             .joined(separator: ", "))
         .accessibilityIdentifier("card.\(item.name)")
+    }
+
+    private var isEpisodeFirst: Bool { leadsWithEpisode && item.isEpisode }
+
+    private var title: String { isEpisodeFirst ? item.name : item.titleName }
+
+    private var detail: String {
+        guard isEpisodeFirst else { return item.cardDetail }
+        return [item.seriesName, Self.shortCode(of: item)].compactMap(\.self).joined(separator: " · ")
+    }
+
+    private var spokenDetail: String {
+        guard isEpisodeFirst else { return item.spokenCardDetail }
+        return [item.seriesName, item.spokenEpisodeCode].compactMap(\.self).joined(separator: ", ")
+    }
+
+    /// An episode's number, short: "S1, E1", "S1, E2–3".
+    nonisolated static func shortCode(of item: JellyfinItem) -> String? {
+        guard let episode = item.indexNumber else { return nil }
+        let end = item.indexNumberEnd.flatMap { $0 > episode ? "–\($0)" : nil } ?? ""
+        return "S\(item.parentIndexNumber ?? 0), E\(episode)\(end)"
     }
 }
 
@@ -217,7 +379,7 @@ struct NotYetAvailableOverlay: View {
                 .foregroundStyle(.white)
                 .padding(8)
             }
-            .clipShape(.rect(cornerRadius: 10))
+            .clipShape(.rect(cornerRadius: Metrics.cardRadius))
             // The card says it, in `spoken(_:)`.
             .accessibilityHidden(true)
         }
@@ -256,9 +418,12 @@ struct CardPlaceholder: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear
                 .aspectRatio(style == .poster ? 2.0 / 3.0 : 16.0 / 9.0, contentMode: .fit)
-                .background(.quaternary, in: .rect(cornerRadius: 10))
+                .background(.quaternary, in: .rect(cornerRadius: Metrics.cardRadius))
             VStack(alignment: .leading, spacing: 1) {
-                Text("A Title Loading").font(style == .poster ? .caption.weight(.medium) : .subheadline.weight(.medium))
+                // As tall as the card's caption: a poster's title takes two lines.
+                Text("A Title Loading")
+                    .font(style == .poster ? .caption.weight(.medium) : .subheadline.weight(.medium))
+                    .lineLimit(style == .poster ? 2 : 1, reservesSpace: true)
                 Text("2000").font(style == .poster ? .caption2 : .caption)
             }
             .redacted(reason: .placeholder)
@@ -272,18 +437,24 @@ struct CardPlaceholder: View {
 /// there; on Apple TV, where focus moves along the cards, a card at the row's end does. Until its
 /// items are in, the shapes of their cards stand in, as tall as the row will be.
 ///
-/// On Apple TV the row scrolls by whole cards (see `CardRowScrollBehavior`), and coming back
-/// into it from above or below, focus goes to the card it was last on, scrolled as it was.
+/// Off Apple TV the cards fit the row's width (see `CardFit`): a whole number of them, near
+/// `cardWidth`, and a part of the next. On Apple TV, whose screen is always the same, they're
+/// `cardWidth` wide, the row scrolls by whole cards (see `CardRowScrollBehavior`), and coming
+/// back into it from above or below, focus goes to the card it was last on, scrolled as it was,
+/// or the first.
 struct Shelf<Item: Identifiable, Card: View>: View {
     let title: String
     var seeAll: BrowseList?
     /// Nil while they load.
     let items: [Item]?
+    /// About how wide a card is on a phone; larger on a regular-width screen and at the
+    /// accessibility text sizes.
     let cardWidth: CGFloat
     /// The shape of the cards that stand in while the items load.
     var placeholderStyle: BrowseList.Style = .poster
     @ViewBuilder let card: (Item) -> Card
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.cardScale) private var cardScale
     @Environment(\.accessibilityShowButtonShapes) private var showsButtonShapes
     #if os(tvOS)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -307,7 +478,7 @@ struct Shelf<Item: Identifiable, Card: View>: View {
     private static var placeholderCount: Int { 8 }
 
     var body: some View {
-        let cardWidth = dynamicTypeSize.cardWidth(cardWidth)
+        let cardWidth = dynamicTypeSize.cardWidth(cardWidth * cardScale)
         VStack(alignment: .leading, spacing: 10) {
             header
                 .padding(.horizontal, Metrics.edge)
@@ -316,14 +487,14 @@ struct Shelf<Item: Identifiable, Card: View>: View {
                 LazyHStack(alignment: .top, spacing: Metrics.gridSpacing) {
                     ForEach(items ?? []) { item in
                         card(item)
-                            .frame(width: cardWidth)
+                            .modifier(ShelfCardWidth(target: cardWidth))
                             #if os(tvOS)
                             .focused($focus, equals: .item(item.id))
                             #endif
                     }
                     ForEach(placeholderSlots, id: \.self) { slot in
                         CardPlaceholder(style: placeholderStyle)
-                            .frame(width: cardWidth)
+                            .modifier(ShelfCardWidth(target: cardWidth))
                             #if os(tvOS)
                             // Holds focus while the row loads, so focus moving down the page
                             // doesn't pass over the row or leave the page for the sidebar.
@@ -346,11 +517,15 @@ struct Shelf<Item: Identifiable, Card: View>: View {
                     #endif
                 }
                 .scrollTargetLayout()
-                .padding(.horizontal, Metrics.edge)
                 #if os(tvOS)
+                .padding(.horizontal, Metrics.edge)
                 .padding(.vertical, 30)
                 #endif
             }
+            #if !os(tvOS)
+            // Margins rather than padding, so a swipe stops with a card at the page's margin.
+            .contentMargins(.horizontal, Metrics.edge, for: .scrollContent)
+            #endif
             .scrollIndicators(.hidden)
             .scrollClipDisabled()
             #if os(tvOS)
@@ -360,7 +535,7 @@ struct Shelf<Item: Identifiable, Card: View>: View {
             .onAppear { if memory.offset > 0 { position.scrollTo(x: memory.offset) } }
             .focusSection()
             .focusScope(focusScope)
-            .defaultFocus($focus, memory.focus as? Focus, priority: .userInitiated)
+            .defaultFocus($focus, memory.focus as? Focus ?? items?.first.map { .item($0.id) }, priority: .userInitiated)
             .onChange(of: focus) { _, focus in
                 if let focus, !focus.isPlaceholder { memory.focus = focus }
             }
@@ -427,6 +602,24 @@ struct Shelf<Item: Identifiable, Card: View>: View {
     }
 }
 
+/// A card's width in a `Shelf`. Off Apple TV, fitted to the row it's in (see
+/// `CardFit.rowCardWidth`), whose scroll view gives its width less its margins; on Apple TV,
+/// `target`.
+private struct ShelfCardWidth: ViewModifier {
+    let target: CGFloat
+
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+        content.frame(width: target)
+        #else
+        content.containerRelativeFrame(.horizontal, alignment: .leading) { [target] length, _ in
+            // From the first card to the row's trailing edge: the trailing margin's in it.
+            CardFit.rowCardWidth(room: length + Metrics.edge, target: target, spacing: Metrics.gridSpacing)
+        }
+        #endif
+    }
+}
+
 #if os(tvOS)
 /// The end of an Apple TV row: opens the whole list.
 private struct SeeAllCard: View {
@@ -437,7 +630,7 @@ private struct SeeAllCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear
                 .aspectRatio(style == .poster ? 2.0 / 3.0 : 16.0 / 9.0, contentMode: .fit)
-                .background(.quaternary, in: .rect(cornerRadius: 10))
+                .background(.quaternary, in: .rect(cornerRadius: Metrics.cardRadius))
                 .overlay {
                     Image(systemName: "chevron.right.circle.fill")
                         .font(.system(size: 56))

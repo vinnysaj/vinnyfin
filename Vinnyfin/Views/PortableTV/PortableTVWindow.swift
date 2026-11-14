@@ -9,7 +9,7 @@ extension EnvironmentValues {
 
 /// Portable TV's window: full screen on the TV the Mac is plugged into, with the library or
 /// YouTube, and the player over them. Opening it turns Portable TV on, and closing it off, as
-/// Escape does once there's nothing on the TV left for it to back out of.
+/// Escape does once there's nothing on the TV left for it to back out of, and unplugging the TV.
 struct PortableTVWindow: View {
     static let id = "portable-tv"
 
@@ -52,6 +52,7 @@ struct PortableTVWindow: View {
         .focused($hasKeyboardFocus)
         .onKeyPress(phases: [.down, .repeat]) { press in keyPressed(press) }
         .background(TVWindowPlacement())
+        .background(TVScreenWatch { dismissWindow(id: Self.id) })
         .background(EscapeKey(onPress: escapePressed))
         .navigationTitle("Portable TV")
         .preferredColorScheme(.dark)
@@ -247,10 +248,84 @@ private struct TVWindowPlacement: NSViewRepresentable {
     }
 }
 
+/// Says when the screen its window is on has been gone a while, as when the TV is unplugged:
+/// macOS moves the window to a screen that's left, full screen in a Space of its own, where it
+/// would play on unseen and keep the Mac awake. A screen that's back within the while, as when
+/// a TV drops its connection for a moment to change modes, is no matter.
+private struct TVScreenWatch: NSViewRepresentable {
+    let onGone: () -> Void
+
+    func makeNSView(context: Context) -> WatchingView { WatchingView() }
+
+    func updateNSView(_ view: WatchingView, context: Context) {
+        view.onGone = onGone
+    }
+
+    final class WatchingView: NSView {
+        var onGone: (() -> Void)?
+        /// The display the window is on, which stays the one gone as macOS moves the window off it.
+        private var display: CGDirectDisplayID?
+        private var countdown: Task<Void, Never>?
+        private var observers: [any NSObjectProtocol] = []
+
+        private static let grace = Duration.seconds(10)
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            countdown?.cancel()
+            countdown = nil
+            guard let window else { return }
+            display = window.screen?.displayID
+            let center = NotificationCenter.default
+            observers = [
+                center.addObserver(forName: NSWindow.didChangeScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.windowMoved(enteringFullScreen: false) }
+                },
+                center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.windowMoved(enteringFullScreen: true) }
+                },
+                center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.check() }
+                },
+            ]
+        }
+
+        /// Placed on the TV, or going full screen there, the window takes its display. Full screen,
+        /// a move is macOS taking it off a display that's gone, which may yet say it's connected.
+        private func windowMoved(enteringFullScreen: Bool) {
+            guard let window else { return }
+            if enteringFullScreen || !window.styleMask.contains(.fullScreen) { display = window.screen?.displayID }
+            check()
+        }
+
+        private func check() {
+            guard let display, !Self.isConnected(display) else {
+                countdown?.cancel()
+                countdown = nil
+                return
+            }
+            guard countdown == nil else { return }
+            countdown = Task { [weak self] in
+                try? await Task.sleep(for: Self.grace)
+                if !Task.isCancelled { self?.onGone?() }
+            }
+        }
+
+        private static func isConnected(_ display: CGDirectDisplayID) -> Bool {
+            CGDisplayIsOnline(display) != 0
+        }
+    }
+}
+
 private extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
     var isBuiltIn: Bool {
-        guard let number = deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
-        return CGDisplayIsBuiltin(number.uint32Value) != 0
+        displayID.map { CGDisplayIsBuiltin($0) != 0 } ?? false
     }
 }
 #endif

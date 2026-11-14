@@ -166,7 +166,7 @@ struct PlayerView: View {
             // captions move up out of the controls' way.
             if showsPicture {
                 SubtitleOverlay(model: model, videoSize: fillsScreen ? nil : model.videoSize,
-                                controlsTop: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? bottomBarTop : nil)
+                                coveredBelow: controlsVisible && fold == nil && Self.controlsArePictureOverlay ? bottomBarTop : nil)
                     .frame(height: fold?.minY)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .ignoresSafeArea()

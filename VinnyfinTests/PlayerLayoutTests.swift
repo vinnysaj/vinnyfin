@@ -7,6 +7,79 @@ import UIKit
 #endif
 @testable import vinnyfin
 
+struct SubtitleLayoutTests {
+    private func cue(_ id: Int, _ text: String, from start: Double, alignment: Int? = nil, position: CGPoint? = nil) -> SubtitleCue {
+        let placement = alignment == nil && position == nil ? nil : SubtitleTextPlacement(alignment: alignment, position: position)
+        return SubtitleCue(id: id, startTime: start, endTime: start + 4, body: .text(text), placement: placement)
+    }
+
+    private func stacks(_ pieces: [SubtitleLayout.Piece]) -> [(SubtitleLayout.Band, [Int])] {
+        pieces.compactMap { piece in
+            guard case .stack(let band, let cues) = piece.kind else { return nil }
+            return (band, cues.map(\.id))
+        }
+    }
+
+    @Test func twoBottomLinesShowingAtOnceStackInTheOrderTheyStarted() {
+        // Listed later-first, as a file can have them.
+        let pieces = SubtitleLayout.pieces(of: [cue(2, "And so do I.", from: 11), cue(1, "I'm leaving.", from: 10)])
+        let laidOut = stacks(pieces)
+        #expect(laidOut.count == 1)
+        #expect(laidOut.first?.0 == .bottom)
+        #expect(laidOut.first?.1 == [1, 2])
+    }
+
+    @Test func linesStackByBandOfThePicture() {
+        let pieces = SubtitleLayout.pieces(of: [
+            cue(1, "Dialogue", from: 0),
+            cue(2, "A sign", from: 0, alignment: 8),
+            cue(3, "More dialogue", from: 1, alignment: 2),
+            cue(4, "Narration", from: 0, alignment: 5),
+        ])
+        let laidOut = stacks(pieces)
+        #expect(laidOut.map(\.0) == [.top, .middle, .bottom])
+        #expect(laidOut.last?.1 == [1, 3])
+    }
+
+    @Test func aPositionedCueIsAnchoredInsteadOfStacked() {
+        let pieces = SubtitleLayout.pieces(of: [cue(1, "Dialogue", from: 0), cue(2, "Shop sign", from: 0, position: CGPoint(x: 0.25, y: 0.3))])
+        #expect(stacks(pieces).map(\.1) == [[1]])
+        let anchored = pieces.compactMap { piece -> CGPoint? in
+            guard case .anchored(let cue, let anchor) = piece.kind, cue.id == 2 else { return nil }
+            return anchor
+        }
+        #expect(anchored == [CGPoint(x: 0.25, y: 0.3)])
+    }
+
+    @Test func aPositionedCueStaysInsideThePicture() {
+        let picture = CGRect(x: 0, y: 0, width: 1600, height: 900)
+        let box = CGSize(width: 400, height: 60)
+        // Bottom centre at the anchor, as ASS places a cue without an alignment.
+        let placed = SubtitleLayout.origin(of: box, anchoredAt: CGPoint(x: 800, y: 300), alignment: nil, in: picture)
+        #expect(placed == CGPoint(x: 600, y: 240))
+        // Top left at the anchor with \an7.
+        #expect(SubtitleLayout.origin(of: box, anchoredAt: CGPoint(x: 100, y: 50), alignment: 7, in: picture) == CGPoint(x: 100, y: 50))
+        // Anchored off the picture, it's kept on it, whole.
+        let anchor = SubtitleLayout.anchor(CGPoint(x: 1.3, y: -0.2))
+        #expect(anchor == CGPoint(x: 1, y: 0))
+        let corner = SubtitleLayout.origin(of: box, anchoredAt: CGPoint(x: anchor.x * picture.width, y: anchor.y * picture.height),
+                                           alignment: 9, in: picture)
+        #expect(corner == CGPoint(x: 1200, y: 0))
+        #expect(picture.contains(CGRect(origin: corner, size: box)))
+    }
+
+    @Test func aPictureSubtitleMovesUpOutOfTheControlsButStaysOnThePicture() {
+        let picture = CGRect(x: 0, y: 40, width: 1600, height: 900)
+        // Clear of a bar starting at 800: up to 12 points above it.
+        #expect(SubtitleLayout.lift(top: 780, bottom: 860, clearAbove: 800, within: picture) == 72)
+        // Already clear, or nothing covers the picture.
+        #expect(SubtitleLayout.lift(top: 600, bottom: 700, clearAbove: 800, within: picture) == 0)
+        #expect(SubtitleLayout.lift(top: 780, bottom: 860, clearAbove: nil, within: picture) == 0)
+        // No higher than the picture's top.
+        #expect(SubtitleLayout.lift(top: 100, bottom: 900, clearAbove: 300, within: picture) == 60)
+    }
+}
+
 #if os(iOS)
 struct PlayerOrientationRuleTests {
     @Test func theWindowIsHeldOnceItsWide() {

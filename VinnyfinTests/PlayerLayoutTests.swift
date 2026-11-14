@@ -80,6 +80,38 @@ struct SubtitleLayoutTests {
     }
 }
 
+struct PlayerLayoutTests {
+    @Test func theUpNextCardSitsAboveTheBottomBarOrNearTheEdge() {
+        // A bar starting 130 points above the bottom of the view: the card 16 above that.
+        #expect(PlayerLayout.bottomPadding(containerMaxY: 840, bottomBarTop: 710) == 130 + PlayerLayout.gapAboveControls)
+        #expect(PlayerLayout.bottomPadding(containerMaxY: 840, bottomBarTop: nil) == PlayerLayout.gapAboveEdge)
+    }
+
+    @Test func anIPhoneOnItsSideGetsThePillWhileTheControlsShow() {
+        // iPhone 17 Pro on its side: the bars about 206 points apart.
+        let sideways = PlayerLayout.isShort(topBarBottom: 60, bottomBarTop: 266)
+        #expect(sideways)
+        #expect(PlayerLayout.upNextForm(controlsVisible: true, isShort: sideways) == .pill)
+        #expect(PlayerLayout.upNextForm(controlsVisible: false, isShort: sideways) == .card)
+        // Upright, and on a Mac's or an iPad's screen, the card fits under the transport.
+        #expect(!PlayerLayout.isShort(topBarBottom: 122, bottomBarTop: 724))
+        #expect(!PlayerLayout.isShort(topBarBottom: 84, bottomBarTop: 896))
+        #expect(!PlayerLayout.isShort(topBarBottom: nil, bottomBarTop: 266))
+    }
+
+    @Test func theUpNextCardGrowsWithAWideScreen() {
+        #expect(PlayerLayout.upNextCardWidth(containerWidth: 402) == 440)
+        #expect(abs(PlayerLayout.upNextCardWidth(containerWidth: 1500) - 600) < 0.001)
+        #expect(PlayerLayout.upNextCardWidth(containerWidth: 2560) == 640)
+    }
+
+    @Test func subtitlesClearTheHighestOfWhatCoversThePicture() {
+        #expect(PlayerLayout.coveredBelow(700, 640) == 640)
+        #expect(PlayerLayout.coveredBelow(nil, 640) == 640)
+        #expect(PlayerLayout.coveredBelow(nil, nil) == nil)
+    }
+}
+
 #if os(iOS)
 struct PlayerOrientationRuleTests {
     @Test func theWindowIsHeldOnceItsWide() {

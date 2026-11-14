@@ -10,11 +10,12 @@ struct SeriesView: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(\.openTitle) private var openTitle
     @Environment(AppSettings.self) private var settings
+    @Environment(AppMessages.self) private var messages
     #if !os(tvOS)
     @Environment(SmartDownloads.self) private var smartDownloads
     @Environment(DownloadManager.self) private var downloads
-    @Environment(AppMessages.self) private var messages
     #endif
     @State private var detail: JellyfinItem?
     @State private var seasons: [JellyfinItem] = []
@@ -26,8 +27,6 @@ struct SeriesView: View {
     @State private var isSelecting = false
     @State private var selection = Set<String>()
     @State private var batch: Batch?
-    /// An episode whose page its menu opened.
-    @State private var episodePage: JellyfinItem?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var focusedEpisode: String?
     #if os(tvOS)
@@ -115,7 +114,6 @@ struct SeriesView: View {
             if nextUp != nil, focusedEpisode == nil { focusedAction = .play }
         }
         #endif
-        .navigationDestination(item: $episodePage) { ItemDetailView(item: $0) }
         // Siri knows which show the page is about: "continue watching this".
         .appEntityIdentifier(EntityIdentifier.title(series))
         .task(id: series.id) { await load() }
@@ -283,31 +281,12 @@ struct SeriesView: View {
 
     // MARK: Seasons and episodes
 
-    @ViewBuilder private var seasonPicker: some View {
-        if seasons.count > 1 {
-            ScrollView(.horizontal) {
-                HStack(spacing: 10) {
-                    ForEach(seasons) { season in
-                        Button {
-                            seasonId = season.id
-                        } label: {
-                            Text(season.name)
-                                .padding(.horizontal, 6)
-                        }
-                        .buttonStyle(SeasonChipStyle(isSelected: season.id == seasonId))
-                        .accessibilityAddTraits(season.id == seasonId ? .isSelected : [])
-                        .accessibilityIdentifier("season.\(season.name)")
-                    }
-                }
-                .padding(.horizontal, Metrics.edge)
-                #if os(tvOS)
-                .padding(.vertical, 20)
-                #endif
+    private var seasonPicker: some View {
+        SeasonPicker(seasons: seasons, selection: $seasonId) { season in
+            Button(season.isPlayed ? "Mark \(season.name) as Unwatched" : "Mark \(season.name) as Watched",
+                   systemImage: season.isPlayed ? "eye.slash" : "eye") {
+                Task { await setPlayed(!season.isPlayed, season: season) }
             }
-            .scrollIndicators(.hidden)
-            #if os(tvOS)
-            .focusSection()
-            #endif
         }
     }
 
@@ -338,8 +317,9 @@ struct SeriesView: View {
             episode: episode,
             isSelecting: isSelecting,
             isSelected: selection.contains(episode.id),
+            isNext: episode.id == nextUp?.id,
             focus: $focusedEpisode,
-            openPage: { episodePage = episode }
+            openPage: { openTitle?(episode) }
         ) {
             if isSelecting {
                 if selection.contains(episode.id) { selection.remove(episode.id) } else { selection.insert(episode.id) }
@@ -414,43 +394,28 @@ struct SeriesView: View {
         }
     }
 
+    /// Marks a whole season watched or not, then shows what that changed.
+    private func setPlayed(_ played: Bool, season: JellyfinItem) async {
+        guard let session else { return }
+        await WatchActions.setPlayed(played, on: season, session: session, messages: messages) { updated in
+            if let index = seasons.firstIndex(where: { $0.id == updated.id }) { seasons[index] = updated }
+        }
+        await reloadWatchState()
+    }
+
     private func seasonEpisodes(_ seasonId: String, session: ServerSession) async throws -> [JellyfinItem] {
         try await session.client.episodes(seriesId: series.id, seasonId: seasonId, userId: session.userId,
                                           fields: "Overview,PrimaryImageAspectRatio")
     }
 }
 
-private struct SeasonChipStyle: ButtonStyle {
-    let isSelected: Bool
-    #if os(tvOS)
-    @Environment(\.isFocused) private var isFocused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    #endif
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            // Chosen, the page's color on the text's: the background style is light glass on
-            // Vision Pro, as light as the chip.
-            .foregroundStyle(isSelected ? AnyShapeStyle(Color.pageBackground) : AnyShapeStyle(.primary))
-            .background(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.quaternary), in: .capsule)
-            #if os(tvOS)
-            // With Reduce Motion, focus lifts it with its shadow alone.
-            .scaleEffect(isFocused && !reduceMotion ? 1.12 : 1)
-            .shadow(radius: isFocused ? 12 : 0)
-            .animation(.easeOut(duration: 0.15), value: isFocused)
-            #endif
-            .opacity(configuration.isPressed ? 0.7 : 1)
-    }
-}
-
-/// An episode: its still with progress, number and title, length and overview.
+/// An episode: its still with progress, number and title, length and overview, and whether it's
+/// the one to watch next. Off Apple TV, a button beside it opens its page; on Apple TV its menu does.
 private struct EpisodeRow: View {
     let episode: JellyfinItem
     let isSelecting: Bool
     let isSelected: Bool
+    let isNext: Bool
     let focus: FocusState<String?>.Binding
     let openPage: () -> Void
     let action: () -> Void
@@ -463,6 +428,25 @@ private struct EpisodeRow: View {
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        row
+        #else
+        HStack(alignment: .center, spacing: 8) {
+            row
+            if !isSelecting {
+                Button("Details", systemImage: "info.circle", action: openPage)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Details of \(episode.name)")
+                    .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0).details")
+            }
+        }
+        #endif
+    }
+
+    private var row: some View {
         Button(action: action) {
             // At the accessibility text sizes the still goes above the words, which need the width.
             AdaptiveStack(rowAlignment: .top, spacing: stillSpacing) {
@@ -481,6 +465,12 @@ private struct EpisodeRow: View {
                     .overlay(alignment: .topTrailing) { WatchBadge(item: episode).padding(6) }
                     .liftsUnderFocus()
                 VStack(alignment: .leading, spacing: 4) {
+                    if isNext {
+                        Text(episode.resumeSeconds != nil ? "Continue" : "Up Next")
+                            .font(.caption2.weight(.bold))
+                            .textCase(.uppercase)
+                            .foregroundStyle(.tint)
+                    }
                     HStack(spacing: 6) {
                         Text(episode.indexNumber.map { "\($0). \(episode.name)" } ?? episode.name)
                             .font(.headline)

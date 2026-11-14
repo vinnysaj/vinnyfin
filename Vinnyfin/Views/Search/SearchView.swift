@@ -18,11 +18,12 @@ struct SearchView: View {
     @State private var movies: [JellyfinItem] = []
     @State private var shows: [JellyfinItem] = []
     @State private var episodes: [JellyfinItem] = []
+    @State private var path = NavigationPath()
     @State private var isSearching = false
     @State private var searchError: String?
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             EdgeToEdgeScrollView {
                 LazyVStack(alignment: .leading, spacing: 30) {
                     results(list("Movies", types: ["Movie"]), movies)
@@ -68,6 +69,7 @@ struct SearchView: View {
                 episodes = ended.applied(to: episodes)
             }
         }
+        .opensTitles(on: $path)
     }
 
     /// What was found, for VoiceOver, whose cursor stays in the search field as results come in:

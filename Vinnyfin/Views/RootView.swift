@@ -291,6 +291,8 @@ struct MainTabs: View {
     @Binding var linkedItem: JellyfinItem?
     @State private var selection = Destination.home
     @State private var homePath = NavigationPath()
+    @State private var moviesPath = NavigationPath()
+    @State private var showsPath = NavigationPath()
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlayerCoordinator.self) private var player
@@ -322,14 +324,16 @@ struct MainTabs: View {
                 HomeView(path: $homePath) { selection = .downloads }
             }
             Tab("Movies", systemImage: "film", value: .movies) {
-                NavigationStack {
+                NavigationStack(path: $moviesPath) {
                     LibraryGridView(list: .movies).itemDestinations()
                 }
+                .opensTitles(on: $moviesPath)
             }
             Tab("Shows", systemImage: "tv", value: .shows) {
-                NavigationStack {
+                NavigationStack(path: $showsPath) {
                     LibraryGridView(list: .shows).itemDestinations()
                 }
+                .opensTitles(on: $showsPath)
             }
             #if os(tvOS)
             Tab("Sounds", systemImage: "waveform", value: .sounds) {

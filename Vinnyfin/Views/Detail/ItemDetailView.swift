@@ -24,11 +24,33 @@ extension View {
         navigationDestination(for: JellyfinItem.self) { ItemDestination(item: $0) }
             .navigationDestination(for: BrowseList.self) { LibraryGridView(list: $0) }
     }
+
+    /// Lets the stack's pages open a title as its next page where a link can't be, such as from
+    /// a menu's command, by adding it to `path`. Every page is on the path, so a link on any of
+    /// them leads on from it.
+    func opensTitles(on path: Binding<NavigationPath>) -> some View {
+        environment(\.openTitle, OpenTitleAction { path.wrappedValue.append($0) })
+    }
 }
 
-/// A movie or an episode: play it, pick a version, download it, and more like it. Offline it
-/// shows the details and artwork saved with a download.
+/// Opens a title as the next page of the navigation stack it's called in (see `opensTitles(on:)`).
+struct OpenTitleAction {
+    let open: (JellyfinItem) -> Void
+
+    func callAsFunction(_ item: JellyfinItem) {
+        open(item)
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var openTitle: OpenTitleAction?
+}
+
+/// A movie or an episode: play it, pick a version, download it, and more like it. An episode's
+/// page leads to its show and has the show's seasons and episodes, and picking another episode
+/// there shows that one in its place. Offline it shows the details and artwork saved with a download.
 struct ItemDetailView: View {
+    /// The title the page opened on.
     let item: JellyfinItem
 
     @Environment(\.session) private var session
@@ -38,8 +60,12 @@ struct ItemDetailView: View {
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
+    /// Another episode of the show, picked on the page, that it shows in place of `item`.
+    @State private var picked: JellyfinItem?
     @State private var detail: JellyfinItem?
     @State private var similar: [JellyfinItem] = []
+    /// The title `similar` is like: an episode's show.
+    @State private var similarTitleId: String?
     @State private var loadError: String?
     /// A version the user picked, for plays and downloads from this page; nil lets them choose by
     /// quality. It isn't kept: every other playback starts with the version the quality allows.
@@ -49,16 +75,21 @@ struct ItemDetailView: View {
     /// Focus has been put on Play, as the page first appeared.
     @State private var placedFocus = false
     #endif
+    /// Back at the top for another episode picked, to show it.
+    @State private var scrollPosition = ScrollPosition()
+
+    /// The title the page shows.
+    private var page: JellyfinItem { picked ?? item }
 
     /// The server's details, or until they come (offline, never) the ones saved with a download.
     private var loaded: JellyfinItem? {
         #if os(tvOS)
         detail
         #else
-        detail ?? downloads.jobs(forItem: item.id).lazy.compactMap(\.item).first
+        detail ?? downloads.jobs(forItem: page.id).lazy.compactMap(\.item).first
         #endif
     }
-    private var shown: JellyfinItem { loaded ?? item }
+    private var shown: JellyfinItem { loaded ?? page }
     private var sources: [MediaSource] { loaded?.mediaSources ?? [] }
     private var playbackSource: MediaSource? {
         sources.first { $0.id == pickedSourceId } ?? VersionChooser.choose(from: sources, quality: settings.streamingQuality)
@@ -67,7 +98,8 @@ struct ItemDetailView: View {
     var body: some View {
         EdgeToEdgeScrollView(underTopBars: true) {
             VStack(alignment: .leading, spacing: 28) {
-                DetailHero(item: shown, eyebrow: shown.isEpisode ? shown.seriesName : nil, badgesSource: playbackSource) {
+                DetailHero(item: shown, eyebrow: shown.isEpisode ? shown.seriesName : nil, eyebrowLink: series,
+                           badgesSource: playbackSource) {
                     actions
                 }
                 VStack(alignment: .leading, spacing: 28) {
@@ -78,6 +110,9 @@ struct ItemDetailView: View {
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
                     if sources.count > 1 { versions }
+                    if page.isEpisode {
+                        SeasonBrowser(episode: shown) { showEpisode($0) }
+                    }
                     if let people = detail?.people { CastShelf(people: people) }
                     if !similar.isEmpty {
                         Shelf(title: "More Like This", seeAll: .moreLike(shown), items: similar, cardWidth: Metrics.posterWidth) { other in
@@ -89,6 +124,7 @@ struct ItemDetailView: View {
                 .padding(.bottom, Metrics.edge)
             }
         }
+        .scrollPosition($scrollPosition)
         // The page color the hero artwork fades into.
         .background(Color.pageBackground.ignoresSafeArea())
         .screenTitle(shown.name)
@@ -96,8 +132,8 @@ struct ItemDetailView: View {
         .toolbarBackgroundVisibility(.hidden, for: .automatic)
         .handoffPage(shown)
         // Siri knows which title the page is about: "play this", "download this".
-        .appEntityIdentifier(EntityIdentifier.title(item))
-        .task(id: item.id) { await load() }
+        .appEntityIdentifier(EntityIdentifier.title(page))
+        .task(id: page.id) { await load() }
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
             similar = player.endedPlayback.applied(to: similar)
@@ -167,11 +203,35 @@ struct ItemDetailView: View {
         .frame(maxWidth: 900, alignment: .leading)
     }
 
+    /// The episode's show, which the name over its title leads to.
+    private var series: JellyfinItem? {
+        guard page.isEpisode, let seriesId = page.seriesId else { return nil }
+        return JellyfinItem(id: seriesId, name: page.seriesName ?? "", type: "Series")
+    }
+
+    /// Shows another episode of the show in this one's place, from the top of the page, with
+    /// Apple TV's focus on Play.
+    private func showEpisode(_ episode: JellyfinItem) {
+        guard episode.id != page.id else { return }
+        let sameTitle = episode.titleId == page.titleId
+        detail = nil
+        pickedSourceId = nil
+        loadError = nil
+        if !sameTitle { similar = [] }
+        picked = episode
+        withAnimation { scrollPosition.scrollTo(edge: .top) }
+        #if os(tvOS)
+        playFocused = true
+        #endif
+    }
+
     private func load() async {
+        let titleId = page.titleId
         await loadDetail()
-        guard let session else { return }
+        guard let session, similar.isEmpty || titleId != similarTitleId else { return }
         do {
-            similar = try await session.client.similar(to: item.titleId, userId: session.userId)
+            similar = try await session.client.similar(to: titleId, userId: session.userId)
+            similarTitleId = titleId
         } catch {
             guard !error.isCancellation else { return }
             similar = []
@@ -181,8 +241,11 @@ struct ItemDetailView: View {
 
     private func loadDetail() async {
         guard let session else { return }
+        let id = page.id
         do {
-            detail = try await session.client.item(id: item.id, userId: session.userId)
+            let found = try await session.client.item(id: id, userId: session.userId)
+            guard id == page.id else { return }
+            detail = found
             loadError = nil
         } catch {
             guard !error.isCancellation else { return }

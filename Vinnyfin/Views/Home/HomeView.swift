@@ -87,6 +87,7 @@ struct HomeView: View {
             // A playback started here, from the banner or a card's menu, moved Continue Watching.
             .onChange(of: player.endedPlayback) { Task { await load() } }
         }
+        .opensTitles(on: $path)
     }
 
     #if !os(tvOS)

@@ -6,6 +6,8 @@ import SwiftUI
 struct DetailHero<Actions: View>: View {
     let item: JellyfinItem
     var eyebrow: String?
+    /// Where the eyebrow leads, such as an episode's show.
+    var eyebrowLink: JellyfinItem?
     var badgesSource: MediaSource?
     @ViewBuilder let actions: () -> Actions
 
@@ -21,7 +23,22 @@ struct DetailHero<Actions: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 if let eyebrow {
-                    Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    if let eyebrowLink {
+                        NavigationLink(value: eyebrowLink) {
+                            HStack(spacing: 4) {
+                                Text(eyebrow)
+                                Image(systemName: "chevron.right").imageScale(.small)
+                            }
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        // Glass reads on any artwork, and looks like the button it is.
+                        .buttonStyle(.platformGlass)
+                        .controlSize(.small)
+                        .accessibilityHint("Opens \(eyebrow)")
+                        .accessibilityIdentifier("detail.eyebrow")
+                    } else {
+                        Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    }
                 }
                 title
                 if !isStacked { details }

@@ -3,13 +3,26 @@ import Nuke
 import OSLog
 import SwiftUI
 
+#if os(tvOS)
+/// What has the remote's focus in the player.
+enum PlayerFocus: Hashable {
+    /// The picture, while the controls are hidden.
+    case picture
+    case timeline, playPause, next
+    case panel(PlayerPanel)
+    /// The skip button, or the up-next card's Play Now.
+    case action
+    case hideUpNext
+}
+#endif
+
 /// The player's controls over the picture: close and title along the top, transport in the
 /// middle, the timeline and track menus along the bottom. Below the fold of an iPhone Duo
 /// standing half open they sit under the picture instead, with the show's episodes, and on
-/// Vision Pro on a pane of glass below the window, with the transport in the bottom row.
+/// Vision Pro on a pane of glass below the window, with the transport in the bottom row. On Apple
+/// TV the timeline can show by itself, as the remote moves it with the controls hidden.
 struct PlayerControls: View {
     let model: PlayerModel
-    @Binding var scrubPosition: Double?
     @Binding var fillsScreen: Bool
     @Binding var panel: PlayerPanel?
     /// Where the timeline and buttons start, in global coordinates, so subtitles can stay above them.
@@ -24,17 +37,19 @@ struct PlayerControls: View {
     /// Opens Play On and SharePlay; nil when the playback is only this device's, or on Apple TV.
     let playElsewhere: (() -> Void)?
     var isBelowFold = false
+    #if os(tvOS)
+    /// The player's focus, which the remote moves between the controls. Moving counts as using
+    /// them, so they stay up.
+    let focus: FocusState<PlayerFocus?>.Binding
+    /// Just the timeline, without the title and buttons.
+    var isCompact = false
+    /// A click on the timeline.
+    let onTimelineSelect: () -> Void
+    /// A swipe or an arrow up or down from the timeline; sideways is the remote's own (`RemoteInput`).
+    let onTimelineMove: (MoveCommandDirection) -> Void
+    #endif
     @Environment(SharePlay.self) private var sharePlay
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    #if os(tvOS)
-    /// The controls the remote moves between. Moving counts as using them, so they stay up.
-    private enum Control: Hashable {
-        case timeline, playPause, next
-        case panel(PlayerPanel)
-    }
-
-    @FocusState private var focusedControl: Control?
-    #endif
 
     var body: some View {
         Group {
@@ -48,12 +63,22 @@ struct PlayerControls: View {
         }
         .foregroundStyle(.white)
         #if os(tvOS)
-        .defaultFocus($focusedControl, .timeline)
-        .onChange(of: focusedControl) { onInteraction() }
+        .defaultFocus(focus, .timeline)
+        .onChange(of: focus.wrappedValue) { onInteraction() }
         // Back to the button that opened a panel once it closes.
         .onChange(of: panel) { closed, opened in
-            if opened == nil, let closed { focusedControl = .panel(closed) }
+            if opened == nil, let closed { focus.wrappedValue = .panel(closed) }
         }
+        .animation(.easeInOut(duration: 0.25), value: isCompact)
+        #endif
+    }
+
+    /// The title and buttons are hidden, leaving the timeline.
+    private var showsOnlyTimeline: Bool {
+        #if os(tvOS)
+        isCompact
+        #else
+        false
         #endif
     }
 
@@ -61,7 +86,7 @@ struct PlayerControls: View {
         ZStack {
             // Dark enough behind the timeline to read it over a bright picture.
             LinearGradient(stops: [
-                .init(color: .black.opacity(0.7), location: 0),
+                .init(color: .black.opacity(showsOnlyTimeline ? 0 : 0.7), location: 0),
                 .init(color: .clear, location: 0.22),
                 .init(color: .clear, location: 0.5),
                 .init(color: .black.opacity(0.6), location: 0.78),
@@ -71,6 +96,8 @@ struct PlayerControls: View {
                 .allowsHitTesting(false)
             VStack(spacing: 0) {
                 topBar
+                    .opacity(showsOnlyTimeline ? 0 : 1)
+                    .accessibilityHidden(showsOnlyTimeline)
                 Spacer()
                 #if !os(tvOS)
                 transport
@@ -136,7 +163,7 @@ struct PlayerControls: View {
                             playElsewhere()
                             onInteraction()
                         } label: {
-                            Image(systemName: PlayElsewhereSheet.symbol(sharePlay)).font(.headline).frame(width: 22, height: 22)
+                            symbol(PlayElsewhereSheet.symbol(sharePlay))
                         }
                         .buttonStyle(.platformGlass)
                         .buttonBorderShape(.circle)
@@ -149,7 +176,7 @@ struct PlayerControls: View {
                     RoutePicker()
                     if let pictureInPicture {
                         Button(action: pictureInPicture) {
-                            Image(systemName: "pip.enter").font(.headline).frame(width: 22, height: 22)
+                            symbol("pip.enter")
                         }
                         .buttonStyle(.platformGlass)
                         .buttonBorderShape(.circle)
@@ -191,9 +218,7 @@ struct PlayerControls: View {
     #if !os(tvOS)
     private var closeButton: some View {
         Button(action: onClose) {
-            Image(systemName: "xmark")
-                .font(.headline)
-                .frame(width: 22, height: 22)
+            symbol("xmark")
         }
         .buttonStyle(.platformGlass)
         .buttonBorderShape(.circle)
@@ -277,37 +302,39 @@ struct PlayerControls: View {
     private var bottomBar: some View {
         VStack(spacing: 10) {
             #if os(tvOS)
-            Scrubber(model: model, position: $scrubPosition, onInteraction: onInteraction) { focusedControl = .playPause }
-                .focused($focusedControl, equals: .timeline)
+            Scrubber(model: model, onInteraction: onInteraction, isFocused: focus.wrappedValue == .timeline,
+                     onSelect: onTimelineSelect, onMove: onTimelineMove)
+                .focused(focus, equals: .timeline)
             #else
-            Scrubber(model: model, position: $scrubPosition, onInteraction: onInteraction)
+            Scrubber(model: model, onInteraction: onInteraction)
             #endif
-            HStack(spacing: 12) {
+            HStack(spacing: Self.buttonSpacing) {
                 #if os(tvOS)
                 Button {
                     model.togglePlayPause()
                     onInteraction()
                 } label: {
-                    Image(systemName: playPauseSymbol)
+                    symbol(playPauseSymbol)
+                        .contentTransition(.symbolEffect(.replace))
                 }
+                .buttonStyle(.platformGlass)
                 .accessibilityLabel(playPauseLabel)
-                .focused($focusedControl, equals: .playPause)
+                .focused(focus, equals: .playPause)
                 #endif
                 trackMenus
-                    .labelStyle(.iconOnly)
                 Spacer()
                 if let next = model.nextEpisode {
                     Button {
                         Task { await model.play(next) }
                     } label: {
-                        Label("Next Episode", systemImage: "forward.end.fill")
-                            .labelStyle(.iconOnly)
+                        symbol("forward.end.fill")
                     }
                     .buttonStyle(.platformGlass)
+                    .accessibilityLabel("Next Episode")
                     .accessibilityHint(next.name)
                     .accessibilityShowsLargeContentViewer()
                     #if os(tvOS)
-                    .focused($focusedControl, equals: .next)
+                    .focused(focus, equals: .next)
                     #endif
                 }
                 #if os(iOS)
@@ -315,7 +342,7 @@ struct PlayerControls: View {
                     fillsScreen.toggle()
                     onInteraction()
                 } label: {
-                    Image(systemName: fillsScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    symbol(fillsScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                 }
                 .buttonStyle(.platformGlass)
                 .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
@@ -325,8 +352,14 @@ struct PlayerControls: View {
                 CinemaButton(onUse: onInteraction)
                 #endif
             }
+            // Each a circle of glass, like the buttons along the top.
+            .buttonBorderShape(.circle)
             .controlSize(controlSize)
             .dynamicTypeSize(...Self.largestControlSize)
+            // Hidden, they stay focusable: focus leaves the timeline only as `onTimelineMove`
+            // sends it, which shows them first. Disabled, they couldn't take it as they reappear.
+            .opacity(showsOnlyTimeline ? 0 : 1)
+            .accessibilityHidden(showsOnlyTimeline)
             #if os(visionOS)
             // In the middle of the row, whatever is at its ends.
             .overlay { transport.controlSize(controlSize) }
@@ -340,6 +373,29 @@ struct PlayerControls: View {
         .regular
         #else
         .large
+        #endif
+    }
+
+    /// A round glass button's symbol, in a square the same for every symbol, so the circles match.
+    private func symbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.headline)
+            .frame(width: Self.symbolSide, height: Self.symbolSide)
+    }
+
+    private static var symbolSide: CGFloat {
+        #if os(tvOS)
+        38
+        #else
+        22
+        #endif
+    }
+
+    private static var buttonSpacing: CGFloat {
+        #if os(tvOS)
+        24
+        #else
+        12
         #endif
     }
 
@@ -361,13 +417,14 @@ struct PlayerControls: View {
             panel = panel == kind ? nil : kind
             onInteraction()
         } label: {
-            Label(kind.title, systemImage: filled ? kind.symbol + ".fill" : kind.symbol)
+            symbol(filled ? kind.symbol + ".fill" : kind.symbol)
         }
         .buttonStyle(.platformGlass)
+        .accessibilityLabel(kind.title)
         .accessibilityValue(value ?? "")
         .accessibilityShowsLargeContentViewer()
         #if os(tvOS)
-        .focused($focusedControl, equals: .panel(kind))
+        .focused(focus, equals: .panel(kind))
         #endif
         .accessibilityIdentifier(identifier)
     }
@@ -410,42 +467,30 @@ private struct FormatBadge: View {
     }
 }
 
-/// The timeline: how far along, how much is buffered, where chapters start, and a handle to drag
-/// (or, on Apple TV, to move with the remote and click to jump). While it moves, a preview over
-/// it shows the picture there, when the server made scrub previews, and the chapter.
+/// The timeline: how far along, how much is buffered, where chapters start, and a handle to drag.
+/// On Apple TV the remote moves it instead (see `RemoteInput`), and a click jumps there. While it
+/// moves, a preview over it shows the picture there, when the server made scrub previews, and the
+/// chapter; on Apple TV, skips show their sum over the playhead.
 struct Scrubber: View {
     let model: PlayerModel
-    @Binding var position: Double?
     let onInteraction: () -> Void
     #if os(tvOS)
-    /// Swiping down off the timeline. Its move handler takes every direction, so it passes focus
-    /// on itself.
-    let onMoveDown: () -> Void
-    @FocusState private var isFocused: Bool
+    let isFocused: Bool
+    let onSelect: () -> Void
+    /// Its move handler takes every direction, so focus moves on from it only through this.
+    let onMove: (MoveCommandDirection) -> Void
     #endif
 
     var body: some View {
+        @Bindable var scrubbing = model.scrubbing
         let duration = max(model.duration, 1)
+        let position = scrubbing.position
         let time = position ?? model.clock.time
         VStack(spacing: 6) {
             TimelineBar(time: model.clock.time, buffered: model.clock.buffered, duration: duration, color: .white,
-                        height: barHeight, marks: model.chapters.map(\.start), position: $position,
-                        onDrag: onInteraction) { model.seek(to: $0) }
-                .overlay {
-                    if let position {
-                        GeometryReader { geometry in
-                            let width = geometry.size.width
-                            let center = width * min(1, max(0, position / duration))
-                            ScrubPreview(model: model, time: position)
-                                // Centered over the handle, kept within the timeline, clear of the bar.
-                                .offset(x: min(max(0, center - ScrubPreview.width / 2), max(0, width - ScrubPreview.width)),
-                                        y: -(geometry.size.height + barHeight) / 2 - 8)
-                                .frame(width: width, height: geometry.size.height, alignment: .bottomLeading)
-                        }
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                    }
-                }
+                        height: barHeight, marks: model.chapters.map(\.start), showsHead: showsHead,
+                        position: $scrubbing.position, onDrag: onInteraction) { model.seek(to: $0) }
+                .overlay { overBar(position: position, duration: duration) }
             #if os(visionOS)
             // Tall enough to look at and pinch, and lit under the eyes as a slider is.
             .frame(height: 44)
@@ -465,30 +510,10 @@ struct Scrubber: View {
         #if os(tvOS)
         .padding(.vertical, 8)
         .focusable()
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1)
-        .onMoveCommand { direction in
-            let step = max(10, duration / 200)
-            switch direction {
-            case .left: position = max(0, (position ?? model.clock.time) - step)
-            case .right: position = min(duration, (position ?? model.clock.time) + step)
-            case .down:
-                onMoveDown()
-                return
-            default: return
-            }
-            onInteraction()
-        }
-        .onTapGesture {
-            if let position {
-                model.seek(to: position)
-                self.position = nil
-            } else {
-                model.togglePlayPause()
-            }
-            onInteraction()
-        }
-        .onChange(of: isFocused) { _, focused in if !focused { position = nil } }
+        .onMoveCommand(perform: onMove)
+        .onTapGesture(perform: onSelect)
+        .animation(.easeOut(duration: 0.2), value: scrubbing.skipRun?.id)
+        .animation(.easeOut(duration: 0.15), value: position == nil)
         #endif
         .accessibilityElement()
         .accessibilityLabel("Timeline")
@@ -503,6 +528,35 @@ struct Scrubber: View {
         .accessibilityIdentifier("player.timeline")
     }
 
+    /// Over the bar: the preview while the timeline moves, and on Apple TV the run of skips.
+    private func overBar(position: Double?, duration: Double) -> some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            // Its bottom clear of the bar, its own height rather than the bar's.
+            let above = -(geometry.size.height + barHeight) / 2 - 8
+            if let position {
+                let center = width * min(1, max(0, position / duration))
+                ScrubPreview(model: model, time: position)
+                    // Centered over the handle, kept within the timeline.
+                    .offset(x: min(max(0, center - ScrubPreview.width / 2), max(0, width - ScrubPreview.width)), y: above)
+                    .frame(width: width, height: geometry.size.height, alignment: .bottomLeading)
+                    .transition(.opacity)
+            }
+            #if os(tvOS)
+            if position == nil, let run = model.scrubbing.skipRun {
+                let center = width * min(1, max(0, model.clock.time / duration))
+                SkipTally(seconds: run.seconds)
+                    .fixedSize()
+                    .offset(x: min(max(center, SkipTally.halfWidth), max(SkipTally.halfWidth, width - SkipTally.halfWidth)) - width / 2,
+                            y: above)
+                    .frame(width: width, height: geometry.size.height, alignment: .bottom)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
+            }
+            #endif
+        }
+        .allowsHitTesting(false)
+    }
+
     /// Where it is, with the chapter when there are chapters.
     private func spokenPosition(_ time: Double, of duration: Double) -> String {
         let position = SpokenTime.position(time, of: duration)
@@ -512,9 +566,18 @@ struct Scrubber: View {
 
     private var barHeight: CGFloat {
         #if os(tvOS)
-        isFocused ? 12 : 8
+        isFocused || model.scrubbing.isActive ? 12 : 8
         #else
-        position == nil ? 5 : 9
+        model.scrubbing.isActive ? 9 : 5
+        #endif
+    }
+
+    /// Apple TV marks the playhead where the remote moves it from.
+    private var showsHead: Bool {
+        #if os(tvOS)
+        isFocused || model.scrubbing.isActive
+        #else
+        false
         #endif
     }
 
@@ -529,34 +592,48 @@ struct Scrubber: View {
 }
 
 /// Over the timeline while it moves: the picture at that point, when the server made scrub
-/// previews, with the chapter and the time under it.
+/// previews, with the chapter and the time under it. On Apple TV, also how far that is from where
+/// playback is, and the speed of a held side scanning.
 private struct ScrubPreview: View {
     let model: PlayerModel
     let time: Double
 
     var body: some View {
         let chapter = ChapterMark.current(in: model.chapters, at: time)
-        VStack(spacing: 4) {
+        VStack(spacing: Self.spacing) {
             if let tiles = model.trickplay {
                 TrickplayThumbnail(tiles: tiles, time: time)
                     .frame(width: Self.thumbnailWidth,
                            height: Self.thumbnailWidth * CGFloat(tiles.info.height) / CGFloat(max(1, tiles.info.width)))
-                    .clipShape(.rect(cornerRadius: 8))
+                    .clipShape(.rect(cornerRadius: Self.thumbnailRadius))
             }
             if let chapter {
                 Text(chapter.name).font(.caption.weight(.semibold)).lineLimit(1)
             }
+            #if os(tvOS)
+            HStack(spacing: 12) {
+                if let speed = model.scrubbing.scanSpeed {
+                    Label("\(Int(abs(speed)))×", systemImage: speed < 0 ? "backward.fill" : "forward.fill")
+                        .font(.caption.weight(.bold))
+                        .contentTransition(.numericText())
+                }
+                Text(Scrubber.format(time)).font(.caption.weight(.semibold)).monospacedDigit()
+                Text(Self.distance(time - model.clock.time)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            #else
             Text(Scrubber.format(time)).font(.caption).monospacedDigit()
+            #endif
         }
-        .padding(model.trickplay == nil ? 8 : 4)
-        .frame(width: Self.width)
+        .padding(model.trickplay == nil ? Self.spacing * 2 : Self.spacing)
+        .frame(minWidth: Self.width)
         // Its own height, not the timeline's it's laid over.
         .fixedSize()
-        .platformGlass(in: .rect(cornerRadius: 12))
+        .platformGlass(in: .rect(cornerRadius: Self.thumbnailRadius + Self.spacing))
         .accessibilityHidden(true)
     }
 
-    static var width: CGFloat { thumbnailWidth + 8 }
+    static var width: CGFloat { thumbnailWidth + 2 * spacing }
 
     private static var thumbnailWidth: CGFloat {
         #if os(tvOS)
@@ -565,7 +642,55 @@ private struct ScrubPreview: View {
         CGFloat(TrickplayTiles.preferredWidth) / 2
         #endif
     }
+
+    private static var spacing: CGFloat {
+        #if os(tvOS)
+        8
+        #else
+        4
+        #endif
+    }
+
+    private static var thumbnailRadius: CGFloat {
+        #if os(tvOS)
+        12
+        #else
+        8
+        #endif
+    }
+
+    /// "+2:15" ahead of where playback is, "-0:40" behind it.
+    static func distance(_ seconds: Double) -> String {
+        (seconds < 0 ? "-" : "+") + Scrubber.format(abs(seconds))
+    }
 }
+
+#if os(tvOS)
+/// The sum of the skips in a row, over the playhead: "+30", "-1:00".
+private struct SkipTally: View {
+    let seconds: Double
+
+    var body: some View {
+        Label(text, systemImage: seconds < 0 ? "gobackward" : "goforward")
+            .font(.callout.weight(.semibold))
+            .monospacedDigit()
+            .contentTransition(.numericText(value: seconds))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .platformGlass(in: .capsule)
+            .accessibilityHidden(true)
+    }
+
+    /// Kept this far from the timeline's ends, about half its width.
+    static let halfWidth: CGFloat = 80
+
+    private var text: String {
+        let magnitude = abs(seconds)
+        let amount = magnitude < 60 ? String(Int(magnitude.rounded())) : Scrubber.format(magnitude)
+        return (seconds < 0 ? "-" : "+") + amount
+    }
+}
+#endif
 
 /// One thumbnail cut from its sheet of scrub previews, which comes from the image cache, or from
 /// disk for a download.
@@ -627,6 +752,8 @@ struct TimelineBar: View {
     let color: Color
     let height: CGFloat
     var marks: [Double] = []
+    /// A playhead at the position, and while the position is moved, a mark where playback is.
+    var showsHead = false
     @Binding var position: Double?
     var onDrag: () -> Void = {}
     let onSeek: (Double) -> Void
@@ -634,19 +761,34 @@ struct TimelineBar: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
+            let offset = { (seconds: Double) in width * min(1, max(0, seconds / duration)) }
             ZStack(alignment: .leading) {
                 Capsule().fill(color.opacity(0.25))
                 Capsule().fill(color.opacity(0.4))
-                    .frame(width: width * min(1, max(0, buffered / duration)))
+                    .frame(width: offset(buffered))
                 Capsule().fill(color)
-                    .frame(width: width * min(1, max(0, (position ?? time) / duration)))
+                    .frame(width: offset(position ?? time))
                 ForEach(marks.filter { $0 > 0 && $0 < duration }, id: \.self) { mark in
                     Rectangle().fill(.black.opacity(0.55))
                         .frame(width: 2)
-                        .offset(x: width * mark / duration - 1)
+                        .offset(x: offset(mark) - 1)
                 }
             }
             .frame(height: height)
+            // Over the bar rather than in it, which would make the bar as tall as the playhead.
+            .overlay(alignment: .leading) {
+                if showsHead {
+                    if position != nil {
+                        Capsule().fill(color.opacity(0.6))
+                            .frame(width: 3, height: height * 2)
+                            .offset(x: offset(time) - 1.5)
+                    }
+                    Capsule().fill(color)
+                        .frame(width: 4, height: height * 2.6)
+                        .shadow(color: .black.opacity(0.4), radius: 3)
+                        .offset(x: offset(position ?? time) - 2)
+                }
+            }
             .frame(maxHeight: .infinity)
             #if !os(tvOS)
             .contentShape(.rect)

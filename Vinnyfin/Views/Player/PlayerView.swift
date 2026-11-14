@@ -14,7 +14,8 @@ import SwiftUI
 /// the controls the bottom, with the show's episodes. On Vision Pro the window is the picture,
 /// with the controls on glass below it, and the room dims while it plays; in the cinema the
 /// picture moves to the big screen, a pinch there shows the controls, and the window stays,
-/// clear, holding them.
+/// clear, holding them. On Apple TV the remote scrubs: swipe or circle the clickpad to move the
+/// timeline and click to jump there, click a side to skip, hold one to scan.
 struct PlayerView: View {
     let model: PlayerModel
     let onClose: () -> Void
@@ -24,6 +25,7 @@ struct PlayerView: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.playerControlsRequests) private var controlsRequests
     @State private var controlsVisible = true
     /// The controls stay up until they're hidden the way they were shown. VoiceOver, Voice Control
     /// and Switch Control take longer to reach a control than the few seconds they'd stay.
@@ -31,14 +33,21 @@ struct PlayerView: View {
     /// Play On and SharePlay are up. Here rather than with the controls, which come and go under them.
     @State private var showsPlayElsewhere = false
     @State private var hideTask: Task<Void, Never>?
-    @State private var scrubPosition: Double?
     @State private var fillsScreen = false
     @State private var panel: PlayerPanel?
     /// Where the controls' bottom bar starts, in global coordinates.
     @State private var bottomBarTop: CGFloat?
     /// Where the controls' top bar ends, in global coordinates.
     @State private var topBarBottom: CGFloat?
-    #if !os(tvOS)
+    #if os(tvOS)
+    @FocusState private var focus: PlayerFocus?
+    /// The controls show just the timeline, as the remote moves it while they were hidden.
+    @State private var controlsCompact = false
+    @State private var touchSurface = TouchSurface()
+    /// Where the timeline was when the swipe under way started moving it, which a circle that
+    /// began as the swipe goes back to.
+    @State private var swipeStart: Double?
+    #else
     @FocusState private var hasKeyboardFocus: Bool
     #endif
     #if os(iOS) || os(macOS)
@@ -74,15 +83,19 @@ struct PlayerView: View {
             }
             #if os(tvOS)
             if !controlsVisible {
-                // Holds focus while the controls are hidden, so a click or a swipe brings them back.
-                // It sits beside the controls rather than around them: a focused parent would keep
-                // focus from moving between the controls.
+                // Holds focus while the controls are hidden, so a click or a swipe up or down brings
+                // them back; sideways the remote scrubs (`RemoteInput`). It sits beside the controls
+                // rather than around them: a focused parent would keep focus from moving between
+                // the controls.
                 Color.clear
                     .ignoresSafeArea()
                     .focusable()
                     .focusEffectDisabled()
-                    .onTapGesture { showControls() }
-                    .onMoveCommand { _ in showControls() }
+                    .focused($focus, equals: .picture)
+                    .onTapGesture { pictureClicked() }
+                    .onMoveCommand { direction in
+                        if direction == .up || direction == .down { showControls() }
+                    }
                     .accessibilityLabel("Video")
                     .accessibilityHint("Shows the controls")
                     .accessibilityAction { showControls(holding: true) }
@@ -111,20 +124,31 @@ struct PlayerView: View {
             #if os(visionOS)
             // The controls are in an ornament below the window (see `controlsOrnament`).
             #else
+            #if os(tvOS)
+            if controlsVisible {
+                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
+                               bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
+                               onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: nil,
+                               focus: $focus, isCompact: controlsCompact,
+                               onTimelineSelect: timelineClicked, onTimelineMove: timelineMoved)
+                    .transition(.opacity)
+            }
+            #else
             if let fold {
-                PlayerControls(model: model, scrubPosition: $scrubPosition, fillsScreen: $fillsScreen, panel: $panel,
+                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: {}, pictureInPicture: pictureInPictureAction,
                                playElsewhere: playElsewhereAction, isBelowFold: true)
                     .padding(.top, fold.maxY)
                     .ignoresSafeArea(edges: .top)
             } else if controlsVisible {
-                PlayerControls(model: model, scrubPosition: $scrubPosition, fillsScreen: $fillsScreen, panel: $panel,
+                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
                                playElsewhere: playElsewhereAction)
                     .transition(.opacity)
             }
+            #endif
             #endif
             #if os(iOS)
             if orientationLock.isAnnouncing, !showsControls {
@@ -196,18 +220,43 @@ struct PlayerView: View {
         }
         #endif
         #if os(tvOS)
+        .background {
+            RemoteInput(surface: touchSurface, isActive: remoteDrivesTimeline, onGesture: remote)
+        }
         .onPlayPauseCommand {
-            model.togglePlayPause()
+            // Moving the timeline, Play jumps there and plays.
+            if model.scrubbing.isActive {
+                model.commitScrub()
+                model.play()
+            } else {
+                model.togglePlayPause()
+            }
             showControls()
         }
         .onExitCommand {
-            if panel != nil {
+            if model.scrubbing.isActive {
+                // Back to where playback is.
+                model.cancelScrub()
+                scheduleHide()
+            } else if panel != nil {
                 closePanel()
             } else if controlsVisible, model.isPlaying {
                 hideControls()
+            } else if !controlsVisible, model.showsUpNext(at: model.clock.time) {
+                // The up-next card goes first, as its Hide would.
+                model.cancelUpNext()
             } else {
                 onClose()
             }
+        }
+        // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline.
+        .onChange(of: controlsVisible) { _, visible in focus = visible ? .timeline : .picture }
+        // Skips and scans from elsewhere, as Siri's or a TV remote's, show on the timeline too.
+        .onChange(of: model.scrubbing.skipRun?.id) { _, run in
+            if run != nil { revealTimeline() }
+        }
+        .onChange(of: model.scrubbing.isScanning) { _, scanning in
+            if scanning { revealTimeline() }
         }
         #else
         // The player takes focus as it opens, for the Playback menu's keys (`PlayerCommand`) and
@@ -259,6 +308,8 @@ struct PlayerView: View {
         .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
             if assisted { hideTask?.cancel() }
         }
+        // Portable TV's remote skipped, paused or asked for them.
+        .onChange(of: controlsRequests) { showControls() }
         // Another device asked this one to stop.
         .onChange(of: coordinator.stopRequest) { _, request in
             guard request == model.id else { return }
@@ -278,6 +329,143 @@ struct PlayerView: View {
             await model.start()
         }
         .preferredColorScheme(.dark)
+    }
+
+    #if os(tvOS)
+    // MARK: Remote
+
+    /// Whether the remote's swipes, circles and side clicks move the timeline: while the picture or
+    /// the timeline has focus (or focus is between them, as the controls come up) and there's a
+    /// timeline to move. On a button they're focus's, and VoiceOver has swipes of its own.
+    private var remoteDrivesTimeline: Bool {
+        guard panel == nil, !voiceOverEnabled, model.duration > 0 else { return false }
+        switch model.status {
+        case .playing, .paused, .buffering: break
+        default: return false
+        }
+        switch focus {
+        case .picture, .timeline, nil: return true
+        default: return false
+        }
+    }
+
+    private func remote(_ gesture: RemoteGesture) {
+        switch gesture {
+        case .lift:
+            swipeStart = nil
+            return
+        case .holdEnded:
+            // Let go, a scan lands where it got to.
+            guard model.scrubbing.isScanning else { return }
+            model.commitScrub()
+            scheduleHide()
+            return
+        default:
+            break
+        }
+        guard remoteDrivesTimeline else { return }
+        let duration = model.duration
+        switch gesture {
+        case .swipe(let distance, let speed):
+            if swipeStart == nil { swipeStart = model.scrubbing.position ?? model.clock.time }
+            model.scrub(by: ScrubMotion.swipe(distance, speed: speed, duration: duration))
+        case .circle(let turn, let undoesSwipe):
+            if undoesSwipe, let swipeStart { model.scrubbing.position = swipeStart }
+            model.scrub(by: ScrubMotion.circle(turn, duration: duration))
+        case .click(let forward):
+            // Playing, a click skips. Paused, or moving the timeline already, it steps the
+            // timeline, for a click on the timeline or Play to jump there.
+            let seconds = forward ? PlayerModel.skipInterval : -PlayerModel.skipInterval
+            if model.scrubbing.isActive || !model.isPlaying { model.scrub(by: seconds) } else { model.skip(by: seconds) }
+        case .holdBegan(let forward):
+            model.beginScan(forward: forward)
+        case .lift, .holdEnded:
+            break
+        }
+        revealTimeline()
+    }
+
+    /// A click with the controls hidden takes the skip button's or up-next card's action when one
+    /// shows, as it can't take focus from the picture; else it brings the controls up.
+    private func pictureClicked() {
+        if let forward = touchSurface.clickedSide(), remoteDrivesTimeline {
+            remote(.click(forward: forward))
+        } else if !performShownAction() {
+            showControls()
+        }
+    }
+
+    /// A click on the timeline jumps to where it was moved, or else plays or pauses.
+    private func timelineClicked() {
+        if let forward = touchSurface.clickedSide(), remoteDrivesTimeline {
+            remote(.click(forward: forward))
+            return
+        }
+        if model.scrubbing.isActive {
+            model.commitScrub()
+        } else {
+            model.togglePlayPause()
+        }
+        scheduleHide()
+    }
+
+    /// Up from the timeline goes to the skip button or up-next card, down to the buttons; either
+    /// brings the title and buttons back when the timeline showed alone. A swipe moving the
+    /// timeline stays on it.
+    private func timelineMoved(_ direction: MoveCommandDirection) {
+        guard swipeStart == nil else { return }
+        switch direction {
+        case .up:
+            if shownAction(at: model.clock.time) != nil {
+                moveFocus(to: .action)
+            } else {
+                controlsCompact = false
+            }
+        case .down:
+            controlsCompact = false
+            moveFocus(to: .playPause)
+        default:
+            return
+        }
+        scheduleHide()
+    }
+
+    /// Moves focus from the move command under way, once it's done: focus changes during one are
+    /// ignored.
+    private func moveFocus(to target: PlayerFocus) {
+        DispatchQueue.main.async { focus = target }
+    }
+
+    /// Brings the timeline up by itself while the controls are hidden; with them up, keeps them.
+    private func revealTimeline() {
+        if !controlsVisible {
+            controlsCompact = true
+            controlsVisible = true
+        }
+        scheduleHide()
+    }
+    #endif
+
+    private enum ShownAction {
+        case upNext(JellyfinItem)
+        case skip(MediaSegment)
+    }
+
+    /// The up-next card in the credits, when there's a next episode, else the skip button.
+    private func shownAction(at time: Double) -> ShownAction? {
+        if model.showsUpNext(at: time), let next = model.nextEpisode { return .upNext(next) }
+        if let segment = model.skippableSegment(at: time), segment.skipTitle != nil { return .skip(segment) }
+        return nil
+    }
+
+    @discardableResult
+    private func performShownAction() -> Bool {
+        switch shownAction(at: model.clock.time) {
+        case .upNext(let next): Task { await model.play(next) }
+        case .skip(let segment): model.seek(to: segment.end)
+        case nil: return false
+        }
+        return true
     }
 
     /// Below the fold the controls stay, off the picture.
@@ -304,7 +492,7 @@ struct PlayerView: View {
 
     #if os(visionOS)
     private var controlsOrnament: some View {
-        PlayerControls(model: model, scrubPosition: $scrubPosition, fillsScreen: $fillsScreen, panel: $panel,
+        PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                        bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                        onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: playElsewhereAction)
             .padding(.top, 24)
@@ -403,26 +591,30 @@ struct PlayerView: View {
 
     @ViewBuilder private var extras: some View {
         TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-            let time = model.clock.time
             // In the credits the up-next card is the way past them, when there's a next episode.
-            let upNext = model.showsUpNext(at: time) ? model.nextEpisode : nil
-            let skip = upNext == nil ? model.skippableSegment(at: time) : nil
+            let action = shownAction(at: model.clock.time)
+            let upNext: JellyfinItem? = if case .upNext(let next) = action { next } else { nil }
+            let skip: MediaSegment? = if case .skip(let segment) = action { segment } else { nil }
+            #if os(tvOS)
+            // Clear of the controls' bottom bar, however tall the TV's text makes it.
+            GeometryReader { geometry in
+                let clearOfControls = controlsVisible ? bottomBarTop.map { max(0, geometry.frame(in: .global).maxY - $0) + 24 } : nil
+                actionView(upNext: upNext, skip: skip)
+                    .padding(.bottom, clearOfControls ?? 40)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            }
+            .onChange(of: skip?.skipTitle) { _, title in
+                if let title { announce("\(title) available") }
+            }
+            .onChange(of: upNext?.id) {
+                if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
+            }
+            #else
             VStack {
                 Spacer()
                 HStack(alignment: .bottom) {
                     Spacer()
-                    if let upNext {
-                        UpNextCard(model: model, episode: upNext)
-                    } else if let segment = skip, let title = segment.skipTitle {
-                        Button {
-                            model.seek(to: segment.end)
-                        } label: {
-                            Label(title, systemImage: "forward.end.fill")
-                        }
-                        .buttonStyle(.platformGlassProminent)
-                        .controlSize(.large)
-                        .accessibilityIdentifier("player.skip")
-                    }
+                    actionView(upNext: upNext, skip: skip)
                 }
                 .padding(.horizontal, Metrics.playerInset)
                 .padding(.bottom, fold != nil ? 16 : controlsVisible && Self.controlsArePictureOverlay ? 130 : 40)
@@ -434,6 +626,30 @@ struct PlayerView: View {
             .onChange(of: upNext?.id) {
                 if let upNext { announce("Up next: \([upNext.episodeCode, upNext.name].compactMap(\.self).joined(separator: ", "))") }
             }
+            #endif
+        }
+    }
+
+    @ViewBuilder private func actionView(upNext: JellyfinItem?, skip: MediaSegment?) -> some View {
+        if let upNext {
+            #if os(tvOS)
+            UpNextCard(model: model, episode: upNext, focus: $focus, isClickTarget: !controlsVisible)
+            #else
+            UpNextCard(model: model, episode: upNext)
+            #endif
+        } else if let segment = skip, let title = segment.skipTitle {
+            Button {
+                model.seek(to: segment.end)
+            } label: {
+                Label(title, systemImage: "forward.end.fill")
+            }
+            .buttonStyle(.platformGlassProminent)
+            .controlSize(.large)
+            #if os(tvOS)
+            .modifier(ClickTarget(isTarget: !controlsVisible))
+            .focused($focus, equals: .action)
+            #endif
+            .accessibilityIdentifier("player.skip")
         }
     }
 
@@ -485,13 +701,16 @@ struct PlayerView: View {
 
     private func showControls(autoHide: Bool = true, holding: Bool = false) {
         if holding { holdsControls = true }
+        #if os(tvOS)
+        controlsCompact = false
+        #endif
         controlsVisible = true
         if autoHide { scheduleHide() } else { hideTask?.cancel() }
     }
 
     private func hideControls() {
         hideTask?.cancel()
-        guard model.isPlaying, scrubPosition == nil, panel == nil, fold == nil else { return }
+        guard model.isPlaying, !model.scrubbing.isActive, panel == nil, fold == nil else { return }
         controlsVisible = false
         holdsControls = false
     }
@@ -507,6 +726,30 @@ struct PlayerView: View {
         }
     }
 }
+
+extension EnvironmentValues {
+    /// Counts the asks to show the player's controls from outside it, as Portable TV's remote
+    /// makes them; the player shows them on each.
+    @Entry var playerControlsRequests = 0
+}
+
+#if os(tvOS)
+/// The skip button or the up-next card's Play Now while a click on the picture takes it, with the
+/// controls hidden: white, as a button with focus is, though focus stays on the picture.
+private struct ClickTarget: ViewModifier {
+    let isTarget: Bool
+
+    func body(content: Content) -> some View {
+        if isTarget {
+            content
+                .tint(.white)
+                .foregroundStyle(.black)
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 /// A brief word over the picture, such as a move to a lower quality, below the controls' top
 /// bar while they show.
@@ -534,42 +777,88 @@ private struct PlayerNotice: View {
     }
 }
 
-/// The card offering the next episode near the end, counting down when it plays by itself.
+/// The card offering the next episode near the end, counting down when it plays by itself. On
+/// Apple TV a click on the picture plays it, while the controls are hidden.
 private struct UpNextCard: View {
     let model: PlayerModel
     let episode: JellyfinItem
+    #if os(tvOS)
+    let focus: FocusState<PlayerFocus?>.Binding
+    /// A click on the picture plays it.
+    let isClickTarget: Bool
+    #endif
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        AdaptiveStack(spacing: 14) {
+        AdaptiveStack(spacing: Layout.spacing) {
             // At the accessibility text sizes the words take the room.
             if !dynamicTypeSize.isAccessibilitySize {
-                Artwork(url: session?.landscape(episode, width: 480), aspectRatio: 16.0 / 9.0, cornerRadius: 8, placeholder: "play.rectangle")
-                    .frame(width: 150)
+                Artwork(url: session?.landscape(episode, width: Layout.artworkPixels), aspectRatio: 16.0 / 9.0,
+                        cornerRadius: Layout.artworkRadius, placeholder: "play.rectangle")
+                    .frame(width: Layout.artworkWidth)
             }
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: Layout.lineSpacing) {
                 Text(model.upNextCountdown.map { "Next episode in \($0)" } ?? "Up Next")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .contentTransition(.numericText())
                 Text([episode.episodeCode, episode.name].compactMap(\.self).joined(separator: " · "))
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(dynamicTypeSize.lineLimit(2))
                 AdaptiveStack {
                     Button("Play Now") { Task { await model.play(episode) } }
                         .buttonStyle(.platformGlassProminent)
+                        #if os(tvOS)
+                        .modifier(ClickTarget(isTarget: isClickTarget))
+                        .focused(focus, equals: .action)
+                        #endif
                         .accessibilityIdentifier("player.playNext")
                     Button("Hide") { model.cancelUpNext() }
                         .buttonStyle(.platformGlass)
+                        #if os(tvOS)
+                        .focused(focus, equals: .hideUpNext)
+                        #endif
                 }
-                .controlSize(.small)
+                .controlSize(Layout.buttonSize)
+                #if os(tvOS)
+                // Each button's words on one line: squeezed, they'd wrap a word or a letter a line.
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.top, 8)
+                #endif
             }
         }
-        .padding(12)
-        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 640 : 440)
-        .platformGlass(in: .rect(cornerRadius: 20))
+        .padding(Layout.padding)
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 640 : Layout.width, alignment: .leading)
+        .platformGlass(in: .rect(cornerRadius: Layout.radius))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("player.upNext")
+    }
+
+    /// Apple TV's text is about twice the size, seen from across the room, and so is the card.
+    private enum Layout {
+        #if os(tvOS)
+        static let width: CGFloat = 860
+        static let artworkWidth: CGFloat = 320
+        static let artworkPixels = 640
+        static let artworkRadius: CGFloat = 16
+        static let spacing: CGFloat = 28
+        static let lineSpacing: CGFloat = 6
+        static let padding: CGFloat = 24
+        static let radius: CGFloat = 36
+        static let buttonSize = ControlSize.regular
+        #else
+        static let width: CGFloat = 440
+        static let artworkWidth: CGFloat = 150
+        static let artworkPixels = 480
+        static let artworkRadius: CGFloat = 8
+        static let spacing: CGFloat = 14
+        static let lineSpacing: CGFloat = 4
+        static let padding: CGFloat = 12
+        static let radius: CGFloat = 20
+        static let buttonSize = ControlSize.small
+        #endif
     }
 }
 

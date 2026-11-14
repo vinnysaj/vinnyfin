@@ -90,6 +90,8 @@ final class PlayerModel: Identifiable {
     private(set) var notice: String?
     var upNextDismissed = false
     let clock = PlaybackClock()
+    /// The position the viewer is moving the timeline to, before it's committed.
+    let scrubbing = Scrubbing()
     let engine: AetherEngine
 
     @ObservationIgnored private let resolver: PlaybackResolver
@@ -243,6 +245,7 @@ final class PlayerModel: Identifiable {
         upNextDismissed = false
         upNextCountdown = nil
         extrasRequestedFor = nil
+        scrubbing.finish()
         do {
             let resolved = try await resolver.resolve(request)
             // A download's own copy, until the server's arrive.
@@ -646,7 +649,32 @@ final class PlayerModel: Identifiable {
     }
 
     func skip(by seconds: Double) {
+        scrubbing.noteSkip(seconds)
         seek(to: clock.time + seconds)
+    }
+
+    // The timeline moved without seeking yet, as the Apple TV remote scrubs: a position is chosen,
+    // then committed, which seeks there, or dropped.
+
+    /// Moves the position being chosen by `seconds`, starting from the playhead.
+    func scrub(by seconds: Double) {
+        scrubbing.move(by: seconds, from: clock.time, duration: duration)
+    }
+
+    /// Scans forward or back from the position being chosen, or the playhead, until committed.
+    func beginScan(forward: Bool) {
+        scrubbing.beginScan(forward: forward, from: clock.time, duration: duration)
+    }
+
+    /// Seeks to the position chosen, if there is one.
+    func commitScrub() {
+        guard let target = scrubbing.finish() else { return }
+        seek(to: target)
+    }
+
+    /// Drops the position chosen, leaving playback where it is.
+    func cancelScrub() {
+        scrubbing.finish()
     }
 
     /// Paused, the speed waits for the next play, here and in a group.
@@ -951,6 +979,7 @@ final class PlayerModel: Identifiable {
         guard !isClosed else { return }
         countdownTask?.cancel()
         noticeTask?.cancel()
+        scrubbing.finish()
         finishSession(reachedEnd: status == .ended)
         isClosed = true
         subscriptions.removeAll()
@@ -1164,14 +1193,39 @@ final class PlayerModel: Identifiable {
         add(center.pauseCommand) { [weak self] _ in self?.pause(); return .success }
         center.skipForwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
         center.skipBackwardCommand.preferredIntervals = [NSNumber(value: Self.skipInterval)]
-        add(center.skipForwardCommand) { [weak self] _ in self?.skip(by: Self.skipInterval); return .success }
-        add(center.skipBackwardCommand) { [weak self] _ in self?.skip(by: -Self.skipInterval); return .success }
+        // Siri asks for its own interval ("skip ahead two minutes"); the buttons for the preferred one.
+        add(center.skipForwardCommand) { [weak self] event in
+            self?.skip(by: (event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval)
+            return .success
+        }
+        add(center.skipBackwardCommand) { [weak self] event in
+            self?.skip(by: -((event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval))
+            return .success
+        }
+        #if os(tvOS)
+        // A TV remote's held fast-forward and rewind, through HDMI-CEC, scan as the Siri Remote's
+        // held clickpad does, and land where they're let go.
+        add(center.seekForwardCommand) { [weak self] event in self?.seekCommand(event, forward: true) ?? .commandFailed }
+        add(center.seekBackwardCommand) { [weak self] event in self?.seekCommand(event, forward: false) ?? .commandFailed }
+        #endif
         add(center.changePlaybackPositionCommand) { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             self?.seek(to: event.positionTime)
             return .success
         }
     }
+
+    #if os(tvOS)
+    private func seekCommand(_ event: MPRemoteCommandEvent, forward: Bool) -> MPRemoteCommandHandlerStatus {
+        guard let event = event as? MPSeekCommandEvent else { return .commandFailed }
+        switch event.type {
+        case .beginSeeking: beginScan(forward: forward)
+        case .endSeeking: if scrubbing.isScanning { commitScrub() }
+        @unknown default: return .commandFailed
+        }
+        return .success
+    }
+    #endif
 
     private func unregisterRemoteCommands() {
         for (command, target) in commandTargets { command.removeTarget(target) }

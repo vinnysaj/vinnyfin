@@ -44,6 +44,29 @@ nonisolated struct StreamingLimit: Equatable, Sendable {
         return isKnown ? true : nil
     }
 
+    /// What in the limit holds a version back.
+    enum Hold: Equatable, Sendable {
+        /// The streaming quality.
+        case setting(VideoQuality)
+        /// The display, which makes use of no more lines than these.
+        case display(Int)
+        /// Adaptive Quality, which learned that the connection carries this many bits per second.
+        case learnedBitrate(Int)
+    }
+
+    /// What holds a version back from playing as it is: the tighter of the display and the
+    /// streaming quality where its picture is too large, else the learned bitrate. Nil when the
+    /// limit admits it, or as far as what's known of it goes.
+    func hold(on traits: VersionTraits) -> Hold? {
+        if let resolution = traits.resolutionClass {
+            let setting = quality.maxHeight ?? .max
+            if let displayHeight, resolution > displayHeight, displayHeight < setting { return .display(displayHeight) }
+            if resolution > setting { return .setting(quality) }
+        }
+        if let bitrate, let measured = traits.bitrate, measured > bitrate { return .learnedBitrate(bitrate) }
+        return nil
+    }
+
     /// How far a version is over the limit, for taking the least over when none is within it: a
     /// picture that fits ranks first, then the smaller picture, then, with a bitrate to keep to,
     /// the lower bitrate.

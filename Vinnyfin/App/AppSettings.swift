@@ -1,9 +1,9 @@
 import Foundation
 import Observation
 
-/// The choices in Settings, kept in UserDefaults, and in iCloud so they follow the person to all
-/// their devices, apart from those in `deviceOnlyKeys`. A new setting follows them too, unless
-/// it's added there.
+/// The choices in Settings, and what the device learned about its connection, kept in
+/// UserDefaults, and in iCloud so they follow the person to all their devices, apart from those in
+/// `deviceOnlyKeys`. A new setting follows them too, unless it's added there.
 @Observable
 final class AppSettings {
     nonisolated enum SubtitleMode: String, CaseIterable, Identifiable, Sendable {
@@ -53,6 +53,11 @@ final class AppSettings {
     /// Moves a stream the connection can't keep up with to a smaller version, or to a transcode
     /// when `allowTranscoding` lets it, as it plays.
     var adaptiveQuality = true { didSet { store(adaptiveQuality, Keys.adaptiveQuality) } }
+    /// The bitrate this device learned to stay under from the streams that kept rebuffering on it,
+    /// which `streamingLimit` holds streams to while `adaptiveQuality` is on.
+    var learnedQuality = QualityLearning() {
+        didSet { store((try? JSONEncoder().encode(learnedQuality)) ?? Data(), Keys.learnedQuality) }
+    }
     var downloadQuality = VideoQuality.fullHD { didSet { store(downloadQuality.rawValue, Keys.downloadQuality) } }
     /// Has the server make a download at `downloadQuality` when every version of a title is
     /// bigger, rather than downloading the smallest as it is.
@@ -95,6 +100,7 @@ final class AppSettings {
         static let streamingQuality = "settings.streamingQuality"
         static let allowTranscoding = "settings.allowTranscoding"
         static let adaptiveQuality = "settings.adaptiveQuality"
+        static let learnedQuality = "settings.learnedQuality"
         static let downloadQuality = "settings.downloadQuality"
         static let transcodeDownloads = "settings.transcodeDownloads"
         static let deleteWatchedEpisodes = "settings.deleteWatchedEpisodes"
@@ -128,6 +134,8 @@ final class AppSettings {
         streamingQuality = defaults.string(forKey: Keys.streamingQuality).flatMap(VideoQuality.init) ?? streamingQuality
         allowTranscoding = defaults.object(forKey: Keys.allowTranscoding) as? Bool ?? allowTranscoding
         adaptiveQuality = defaults.object(forKey: Keys.adaptiveQuality) as? Bool ?? adaptiveQuality
+        learnedQuality = defaults.data(forKey: Keys.learnedQuality).flatMap { try? JSONDecoder().decode(QualityLearning.self, from: $0) }
+            ?? learnedQuality
         downloadQuality = defaults.string(forKey: Keys.downloadQuality).flatMap(VideoQuality.init) ?? downloadQuality
         transcodeDownloads = defaults.object(forKey: Keys.transcodeDownloads) as? Bool ?? transcodeDownloads
         deleteWatchedEpisodes = defaults.object(forKey: Keys.deleteWatchedEpisodes) as? Bool ?? deleteWatchedEpisodes
@@ -155,15 +163,15 @@ final class AppSettings {
     // MARK: iCloud
 
     /// The settings that stay on the device they're chosen on, as what suits one device doesn't
-    /// suit another: the streaming quality suits its screen and its connection; the episodes smart
-    /// downloads keep and the space downloads may take suit its storage, as a Mac's isn't an
-    /// iPhone's; cellular data and charging suit how it's carried and powered; and matching the
-    /// frame rate and dynamic range suits the TV it's plugged into. The download quality, whether
-    /// downloads may be transcoded to it, their notifications and the sound Sounds plays are the
-    /// person's taste, and follow them.
+    /// suit another: the streaming quality suits its screen and its connection, as does the bitrate
+    /// it learned its connection carries; the episodes smart downloads keep and the space downloads
+    /// may take suit its storage, as a Mac's isn't an iPhone's; cellular data and charging suit how
+    /// it's carried and powered; and matching the frame rate and dynamic range suits the TV it's
+    /// plugged into. The download quality, whether downloads may be transcoded to it, their
+    /// notifications and the sound Sounds plays are the person's taste, and follow them.
     nonisolated static let deviceOnlyKeys: Set<String> = [
-        Keys.streamingQuality, Keys.smartDownloadCount, Keys.downloadStorageLimit, Keys.downloadOverCellular,
-        Keys.downloadOnlyWhileCharging, Keys.matchContent,
+        Keys.streamingQuality, Keys.learnedQuality, Keys.smartDownloadCount, Keys.downloadStorageLimit,
+        Keys.downloadOverCellular, Keys.downloadOnlyWhileCharging, Keys.matchContent,
     ]
 
     /// Whether the setting under `key` follows the person to their other devices.

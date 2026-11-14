@@ -32,6 +32,7 @@ struct SettingsView: View {
                         ForEach(VideoQuality.allCases) { Text($0.label).tag($0) }
                     }
                     .accessibilityIdentifier("settings.streamingQuality")
+                    learnedLimit
                     Toggle("Transcode When No Version Fits", isOn: $settings.allowTranscoding)
                     Toggle("Adaptive Quality", isOn: $settings.adaptiveQuality)
                         .accessibilityIdentifier("settings.adaptiveQuality")
@@ -43,7 +44,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Playback")
                 } footer: {
-                    Text("Plays the best version up to this quality, untouched.\(displayNote) When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
+                    Text("Plays the best version up to this quality, untouched.\(displayNote) When every version is bigger, the server scales one down, unless transcoding is off. Adaptive Quality switches to a smaller version, or a transcode, when the connection can't keep up, and once streams above a bitrate keep buffering on several days, keeps this \(Device.name) below it until you reset it. Skip buttons appear for the intros, recaps, previews and credits your server has marked, downloads included.")
                 }
                 Section {
                     SettingPicker("Audio Language", selection: $settings.audioLanguage) {
@@ -121,6 +122,20 @@ struct SettingsView: View {
                 }
             }
             #endif
+        }
+    }
+
+    /// The bitrate Adaptive Quality learned this device's connection carries, while it holds
+    /// streams to it.
+    @ViewBuilder private var learnedLimit: some View {
+        if settings.adaptiveQuality, let limit = settings.learnedQuality.limit {
+            LabeledContent {
+                Button("Reset") { settings.learnedQuality.reset() }
+                    .accessibilityIdentifier("settings.resetLearnedQuality")
+            } label: {
+                Text("Limited to \(QualityLearning.label(forBitrate: limit)) after buffering on this \(Device.name)")
+            }
+            .accessibilityIdentifier("settings.learnedQuality")
         }
     }
 

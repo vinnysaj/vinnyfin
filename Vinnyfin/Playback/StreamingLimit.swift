@@ -4,12 +4,12 @@ import UIKit
 #endif
 
 /// The most a stream on this device may be: the streaming quality, held lower by what the display
-/// makes use of and by the bitrate the connection carries.
+/// makes use of and by the bitrate the connection was learned to carry.
 nonisolated struct StreamingLimit: Equatable, Sendable {
     var quality: VideoQuality
     /// The tallest picture the display makes use of, in lines; nil when it makes use of any.
     var displayHeight: Int?
-    /// Bits per second the connection carries; nil when nothing says.
+    /// Bits per second, from `QualityLearning`; nil when nothing was learned.
     var bitrate: Int?
 
     init(quality: VideoQuality, displayHeight: Int? = nil, bitrate: Int? = nil) {
@@ -96,9 +96,10 @@ enum DisplayOutput {
 }
 
 extension AppSettings {
-    /// What streams on this device are held to: the streaming quality, and what an Apple TV's
-    /// output makes use of.
+    /// What streams on this device are held to: the streaming quality, what an Apple TV's output
+    /// makes use of, and with Adaptive Quality, the bitrate the connection was learned to carry.
     var streamingLimit: StreamingLimit {
-        StreamingLimit(quality: streamingQuality, displayHeight: DisplayOutput.streamingHeight)
+        StreamingLimit(quality: streamingQuality, displayHeight: DisplayOutput.streamingHeight,
+                       bitrate: adaptiveQuality ? learnedQuality.limit : nil)
     }
 }

@@ -149,7 +149,8 @@ final class VinnyfinUITests: XCTestCase {
         tap(app.buttons["Next 3 Episodes"])
 
         tap(app.buttons["Downloads"].firstMatch)
-        XCTAssertTrue(app.staticTexts["Next 3 episodes"].waitForExistence(timeout: timeout), "The smart download isn't listed")
+        XCTAssertTrue(app.staticTexts["Keeping the next 3 downloaded"].waitForExistence(timeout: timeout),
+                      "The smart download isn't listed")
         let downloaded = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'downloaded.'"))
         let three = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count >= 3"), object: downloaded)
         XCTAssertEqual(XCTWaiter.wait(for: [three], timeout: 60), .completed, "Smart downloads didn't fetch three episodes")

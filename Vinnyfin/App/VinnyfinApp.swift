@@ -83,7 +83,6 @@ struct VinnyfinApp: App {
         Settings {
             SettingsView()
                 .withAppEnvironment(appDelegate)
-                .frame(minWidth: 520, minHeight: 560)
         }
         #endif
     }
@@ -183,6 +182,7 @@ final class AppDelegate: NSObject {
 
     private func launched() {
         ImageCache.configure()
+        StreamingNetwork.follow()
         if let problem = accounts.savedSignInProblem { messages.show(problem) }
         #if os(iOS) || os(macOS)
         if let problem = accounts.sharingProblem { messages.show(problem) }

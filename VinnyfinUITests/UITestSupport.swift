@@ -168,8 +168,9 @@ extension XCTestCase {
     }
     #endif
 
-    /// Signs out in Settings: a sheet from Home on iPhone, iPad and Vision Pro, a window of its
-    /// own on the Mac, and a tab of the sidebar on Apple TV.
+    /// Signs out in Settings: on its Account page, in a sheet from Home on iPhone, iPad and Vision
+    /// Pro and in a tab of the sidebar on Apple TV, and in the General pane of the Mac's Settings
+    /// window.
     @MainActor
     func signOut(_ app: XCUIApplication) {
         let confirm = app.buttons.matching(NSPredicate(format: "label == 'Sign Out' AND identifier != 'settings.signOut'")).firstMatch
@@ -181,7 +182,9 @@ extension XCTestCase {
         for _ in 0..<12 where !focusedRow.waitForExistence(timeout: 1) { XCUIRemote.shared.press(.left) }
         focus(sidebar.buttons["Settings"], in: app)
         XCUIRemote.shared.press(.select)
-        focus(app.buttons["settings.signOut"], in: app, moving: [.right, .down])
+        focus(app.buttons["settings.account"], in: app, moving: [.right, .up])
+        XCUIRemote.shared.press(.select)
+        focus(app.buttons["settings.signOut"], in: app, moving: [.down])
         XCUIRemote.shared.press(.select)
         // The dialog's buttons are side by side, Cancel first.
         focus(confirm, in: app, moving: [.right, .left])
@@ -193,7 +196,8 @@ extension XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         #else
         tap(app.buttons["home.settings"])
-        // Down the list to it, past the screen's bottom at the largest text sizes.
+        tap(app.buttons["settings.account"])
+        // Down the page to it, past the screen's bottom at the largest text sizes.
         let signOut = app.buttons["settings.signOut"]
         for _ in 0..<8 where !signOut.waitForExistence(timeout: 2) { app.swipeUp() }
         tap(signOut)

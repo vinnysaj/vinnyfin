@@ -160,6 +160,39 @@ struct ScrubbingTests {
     }
 }
 
+@MainActor
+struct TimeLabelTests {
+    @Test func theFastestScanReadsWholeBesideHourLongTimes() {
+        // A film scanned at full speed an hour in, its preview's caption: speed, time, distance.
+        #expect(TimeLabel.scanSpeed(128) == "128×")
+        #expect(TimeLabel.scanSpeed(-128) == "128×")
+        #expect(Scrubber.format(3725) == "1:02:05")
+        #expect(TimeLabel.distance(3900) == "+1:05:00")
+        #expect(TimeLabel.distance(-285) == "\u{2212}4:45")
+    }
+
+    @Test func everyScanSpeedFitsTheWidthKeptForTheFastest() {
+        #expect(TimeLabel.widestScanSpeed == "128×")
+        let film = 2 * 3600.0
+        for held in stride(from: 0.0, through: 10, by: 0.5) {
+            let speed = TimeLabel.scanSpeed(ScrubMotion.scanSpeed(heldFor: held, duration: film))
+            #expect(speed.count <= TimeLabel.widestScanSpeed.count)
+        }
+    }
+
+    @Test func timeLeftTakesAMinusSignNotAHyphen() {
+        #expect(TimeLabel.remaining(4742) == "\u{2212}1:19:02")
+        #expect(TimeLabel.remaining(-3) == "\u{2212}0:00")
+    }
+
+    @Test func theEndTimeAllowsForTheSpeed() {
+        let now = Date(timeIntervalSinceReferenceDate: 0)
+        #expect(TimeLabel.end(after: 3600, rate: 1, from: now) == now.addingTimeInterval(3600))
+        #expect(TimeLabel.end(after: 3600, rate: 1.5, from: now) == now.addingTimeInterval(2400))
+        #expect(TimeLabel.end(after: 3600, rate: 0.5, from: now) == now.addingTimeInterval(7200))
+    }
+}
+
 struct TrickplayWidthTests {
     @Test func appleTVPrefersPreviewsSharpOnA4KTV() {
         let tv = TrickplayTiles.preferredWidth(onTV: true)

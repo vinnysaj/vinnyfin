@@ -146,7 +146,7 @@ struct RootView: View {
         }
         .alert(handoffMismatch.map(Handoff.title) ?? "", isPresented: $showingHandoffMismatch, presenting: handoff) { handoff in
             if let mismatch = handoffMismatch {
-                Button(handoff.signInTitle(for: mismatch)) { Task { await signIn(for: handoff) } }
+                Button(handoff.signInTitle(for: mismatch)) { signIn(for: handoff) }
             }
             Button("Cancel", role: .cancel) { self.handoff = nil }
         } message: { handoff in
@@ -275,8 +275,8 @@ struct RootView: View {
 
     /// Signs out of where this device is signed in, as Settings does, and opens the sign-in for
     /// where the title is from.
-    private func signIn(for handoff: Handoff) async {
-        if accounts.account != nil { await accounts.signOut(cancelling: downloads) }
+    private func signIn(for handoff: Handoff) {
+        if accounts.account != nil { accounts.signOut(cancelling: downloads) }
         handoffSignIn = handoff.signIn
     }
     #endif

@@ -341,3 +341,42 @@ struct SignInFlowTests {
         #expect(flow.accountError == nil)
     }
 }
+
+struct SignOutTests {
+    private func signedIn(endingSessionWith endSession: @escaping @Sendable (JellyfinClient) async throws -> Void) throws
+        -> (AccountStore, UserDefaults) {
+        let defaults = try #require(UserDefaults(suiteName: "SignOutTests-\(UUID().uuidString)"))
+        let account = AccountStore.Account(serverURL: URL(string: "http://nas.local:8096")!, serverId: "server-\(UUID().uuidString)",
+                                           serverName: "Home", userId: "u", userName: "alex")
+        defaults.set(try JSONEncoder().encode(account), forKey: "account")
+        let accounts = AccountStore(defaults: defaults, token: { _ in "token" }, endSession: endSession)
+        #expect(accounts.account == account)
+        return (accounts, defaults)
+    }
+
+    @Test func signsOutHereBeforeTheServerIsTold() async throws {
+        let (told, telling) = AsyncStream.makeStream(of: String?.self)
+        let (accounts, defaults) = try signedIn { client in
+            telling.yield(client.token)
+            // A server out of reach: the request never comes back.
+            try await Task.sleep(for: .seconds(3600))
+        }
+        accounts.signOut()
+        #expect(accounts.account == nil)
+        #expect(accounts.client == nil)
+        #expect(defaults.data(forKey: "account") == nil)
+        // The server is told afterwards, with the sign-in that ended.
+        var tokens = told.makeAsyncIterator()
+        #expect(await tokens.next() == "token")
+    }
+
+    @Test func tellsTheServerOnceWhatNeedsTheSignInThereIsDone() async throws {
+        let (steps, step) = AsyncStream.makeStream(of: String.self)
+        let (accounts, _) = try signedIn { _ in step.yield("signed out on the server") }
+        accounts.signOut { step.yield("transcodes deleted") }
+        #expect(accounts.account == nil)
+        var order = steps.makeAsyncIterator()
+        #expect(await order.next() == "transcodes deleted")
+        #expect(await order.next() == "signed out on the server")
+    }
+}

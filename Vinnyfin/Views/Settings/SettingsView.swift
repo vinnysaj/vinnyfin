@@ -157,9 +157,9 @@ struct SettingsView: View {
                     .confirmationDialog("Sign out of \(account.serverName ?? "the server")?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
                         Button("Sign Out", role: .destructive) {
                             #if os(tvOS)
-                            Task { await accounts.signOut() }
+                            accounts.signOut()
                             #else
-                            Task { await accounts.signOut(cancelling: downloads) }
+                            accounts.signOut(cancelling: downloads)
                             #endif
                             dismiss()
                         }
@@ -276,11 +276,12 @@ struct SettingsView: View {
 #if !os(tvOS)
 extension AccountStore {
     /// Signs out, cancelling the downloads that haven't finished: only this sign-in can fetch
-    /// them. The server's copies of their transcodes are deleted while it still can be.
-    func signOut(cancelling downloads: DownloadManager) async {
+    /// them. The server's copies of their transcodes are deleted before it's told, while the
+    /// sign-in still works there.
+    func signOut(cancelling downloads: DownloadManager) {
         downloads.removeUnfinished()
-        await downloads.transcodes.finishCleanups()
-        await signOut()
+        let transcodes = downloads.transcodes
+        signOut { await transcodes.finishCleanups() }
     }
 }
 #endif

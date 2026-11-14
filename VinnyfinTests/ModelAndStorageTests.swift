@@ -107,6 +107,71 @@ struct ItemEqualityTests {
     }
 }
 
+/// Where a title resumes, and how its cards and buttons say so.
+struct WatchStateTextTests {
+    /// 50 minutes long, 14 minutes in.
+    static func episode(played: Bool, ticks: Int64, index: Int = 2) -> JellyfinItem {
+        Samples.item("""
+        {"Id":"e\(index)","Name":"Low Tide","Type":"Episode","SeriesName":"Port Ellery","ParentIndexNumber":1,
+         "IndexNumber":\(index),"RunTimeTicks":30000000000,"UserData":{"Played":\(played),"PlaybackPositionTicks":\(ticks)}}
+        """)
+    }
+
+    @Test func aWatchedTitleWatchedAgainResumes() {
+        let rewatching = Self.episode(played: true, ticks: 8_400_000_000)
+        #expect(rewatching.resumeSeconds == 840)
+        #expect(rewatching.progress == 0.28)
+        #expect(rewatching.timeLeftText == "36 min left")
+        #expect(Self.episode(played: true, ticks: 0).resumeSeconds == nil)
+        #expect(Self.episode(played: true, ticks: 0).progress == nil)
+    }
+
+    @Test func aWatchedShowHasNoProgressBar() {
+        let finished = Samples.item(#"{"Id":"s1","Name":"Port Ellery","Type":"Series","UserData":{"Played":true,"PlayedPercentage":100}}"#)
+        #expect(finished.progress == nil)
+        let partway = Samples.item(#"{"Id":"s1","Name":"Port Ellery","Type":"Series","UserData":{"Played":false,"PlayedPercentage":25}}"#)
+        #expect(partway.progress == 0.25)
+    }
+
+    @Test func anEpisodeCardSaysTheTimeLeftOrThatItsNext() {
+        let partway = Self.episode(played: false, ticks: 8_400_000_000)
+        #expect(partway.cardDetail == "S1, E2 · 36 min left")
+        #expect(partway.spokenCardDetail == "Season 1, Episode 2, Low Tide, 36 minutes left")
+        let next = Self.episode(played: false, ticks: 0, index: 3)
+        #expect(next.cardDetail == "Next · S1, E3")
+        #expect(next.spokenCardDetail == "Next, Season 1, Episode 3, Low Tide")
+        let watched = Self.episode(played: true, ticks: 0)
+        #expect(watched.cardDetail == "S1, E2 · Low Tide")
+        #expect(Self.episode(played: true, ticks: 8_400_000_000).cardDetail == "S1, E2 · 36 min left")
+    }
+
+    @Test func aFilmCardSaysTheTimeLeftOrItsYear() {
+        let partway = Samples.item("""
+        {"Id":"m1","Name":"Copperline","Type":"Movie","ProductionYear":2019,"RunTimeTicks":64200000000,
+         "UserData":{"Played":false,"PlaybackPositionTicks":18000000000}}
+        """)
+        #expect(partway.cardDetail == "1 hr, 17 min left")
+        #expect(partway.spokenCardDetail == "1 hour, 17 minutes left")
+        #expect(Samples.movie.cardDetail == "2024")
+    }
+
+    @Test func runtimesReadShort() {
+        let movie = Samples.item(#"{"Id":"m1","Name":"Copperline","Type":"Movie","RunTimeTicks":64200000000}"#)
+        #expect(movie.runtimeText == "1h 47m")
+        #expect(movie.spokenRuntime == "1 hour, 47 minutes")
+        let clip = Samples.item(#"{"Id":"c1","Name":"Clip","Type":"Movie","RunTimeTicks":420000000}"#)
+        #expect(clip.runtimeText == "42s")
+    }
+
+    @Test func episodeCodesReadShort() {
+        #expect(Samples.episode.shortEpisodeCode == "S1, E2")
+        let double = Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":3,"IndexNumberEnd":4}"#)
+        #expect(double.shortEpisodeCode == "S2, E3–4")
+        let special = Samples.item(#"{"Id":"e","Name":"Special","Type":"Episode","ParentIndexNumber":0,"IndexNumber":1}"#)
+        #expect(special.shortEpisodeCode == "Specials, E1")
+    }
+}
+
 #if !os(tvOS)
 struct NamingTests {
     @Test func namesMoviesWithTheirYear() {

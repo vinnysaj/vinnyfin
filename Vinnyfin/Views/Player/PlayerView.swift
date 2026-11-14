@@ -333,6 +333,8 @@ struct PlayerView: View {
         #if !os(tvOS)
         .sheet(isPresented: $showsPlayElsewhere) {
             PlayElsewhereSheet(subject: .playback(model), onHandedOver: onClose)
+                // Half the screen, the picture still playing above it.
+                .presentationDetents([.medium, .large])
         }
         #endif
 

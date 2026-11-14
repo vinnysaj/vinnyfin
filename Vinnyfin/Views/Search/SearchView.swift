@@ -20,7 +20,8 @@ struct SearchView: View {
     @State private var movies: [JellyfinItem] = []
     @State private var shows: [JellyfinItem] = []
     @State private var episodes: [JellyfinItem] = []
-    @State private var path = NavigationPath()
+    /// The pages open on top of the search: titles, and lists in full.
+    @Binding var path: NavigationPath
     @State private var isSearching = false
     @State private var searchError: String?
     /// Try Again's presses, each of which searches again for the same text.

@@ -63,6 +63,28 @@ nonisolated struct SignInFlow: Sendable {
         case other
     }
 
+    /// What the server answering an attempt leads to.
+    enum Answered: Equatable, Sendable {
+        /// Signing in to it as the attempt's goal says, the attempt going on at the address the
+        /// server answered at.
+        case signIn(Attempt)
+        /// The attempt wanted only the server, which is picked now: the account step, with the
+        /// cursor in the field.
+        case picked(Field)
+        /// The server step's fields have moved on from the attempt's address, so it ends there,
+        /// without its answer.
+        case stale
+    }
+
+    /// Why nothing answered at an address, as what to do about it.
+    struct Trouble: Equatable, Sendable {
+        var message: String
+        /// HTTPS failed at an address that gives it, so HTTP may do.
+        var offersHTTP = false
+    }
+
+    /// What advice calls this device: "is this iPhone on the same network?"
+    let deviceName: String
     private(set) var step = Step.account
     /// Whether the server step's button gets a Quick Connect code, rather than signing in with
     /// the password.
@@ -74,15 +96,25 @@ nonisolated struct SignInFlow: Sendable {
     private(set) var pickedServer: PickedServer?
     private(set) var accountError: String?
     /// The server step's error, with the address it's about.
-    private var serverProblem: (message: String, address: ServerAddress)?
+    private var serverProblem: (trouble: Trouble, address: ServerAddress)?
     /// Quick Connect is off on the server, so the server step offers the password in its place.
     private(set) var offersPassword = false
     private var hasStarted = false
 
+    init(deviceName: String) {
+        self.deviceName = deviceName
+    }
+
     /// The server step's error, while the address is the one it's about.
     var serverError: String? {
         guard let serverProblem, serverProblem.address == address else { return nil }
-        return serverProblem.message
+        return serverProblem.trouble.message
+    }
+
+    /// The server step's error is that the address's HTTPS failed, so the step offers HTTP.
+    var offersHTTP: Bool {
+        guard let serverProblem, serverProblem.address == address else { return false }
+        return serverProblem.trouble.offersHTTP
     }
 
     /// The username as it's sent, without the spaces around it.
@@ -97,18 +129,25 @@ nonisolated struct SignInFlow: Sendable {
     // MARK: Starting
 
     /// Starts from a server offered to sign in to, such as the one a handed-off title is from,
-    /// with its password if there's one saved, else from the last sign-in on this device. Only
-    /// the first call does, so the screen appearing again leaves what's been entered.
-    mutating func start(offer: ServerSignIn?, password: String?, lastServerURL: URL?, lastUserName: String?) -> Next? {
+    /// with its password if there's one saved, else from the last sign-in on this device, called
+    /// by the server's name when it had one. Only the first call does, so the screen appearing
+    /// again leaves what's been entered.
+    mutating func start(offer: ServerSignIn?, password: String?, lastServerURL: URL?, lastServerName: String?,
+                        lastUserName: String?) -> Next? {
         guard !hasStarted else { return nil }
         hasStarted = true
         if let offer { return choose(offer, password: password) }
         if let lastServerURL, let address = ServerAddress(savedURL: lastServerURL) {
-            pickedServer = PickedServer(address: address, url: lastServerURL,
-                                        title: lastServerURL.host() ?? lastServerURL.absoluteString)
+            pickedServer = PickedServer(address: address, url: lastServerURL, title: lastServerName ?? Self.title(of: lastServerURL))
         }
         username = lastUserName ?? ""
         return nil
+    }
+
+    /// What to call a server without a name: its host, and its port when the address gives one.
+    static func title(of url: URL) -> String {
+        guard let host = url.host() else { return url.absoluteString }
+        return url.port.map { "\(host):\($0)" } ?? host
     }
 
     /// Picks a server someone signed in to, with their username. With the password they saved in
@@ -164,7 +203,7 @@ nonisolated struct SignInFlow: Sendable {
         address.splitHost()
         if case .failure(let problem) = address.url {
             show(.server, quickConnect: isQuickConnect)
-            serverProblem = (problem.localizedDescription, address)
+            serverProblem = (Trouble(message: problem.localizedDescription), address)
             return .focus(Self.field(for: problem))
         }
         let goal = isQuickConnect ? .quickConnect : trimmedUsername.isEmpty ? .server : credentials
@@ -185,16 +224,24 @@ nonisolated struct SignInFlow: Sendable {
 
     // MARK: Outcomes
 
+    /// Whether an attempt no longer goes with the screen: the server step's fields give another
+    /// address than the attempt's. What comes of it then is no one's to see, and its sign-in no
+    /// one's to make.
+    func isStale(_ attempt: Attempt) -> Bool {
+        step == .server && address != attempt.address
+    }
+
     /// The server answered at `address`: it's the one the account step signs in to, and the
     /// server step keeps the address it answered at. An attempt for the server alone ends on the
     /// account step, for the username.
-    mutating func found(_ server: AccountStore.Server, at address: ServerAddress, for attempt: Attempt) -> Field? {
-        guard !attempt.isDemo else { return nil }
+    mutating func found(_ server: AccountStore.Server, at address: ServerAddress, for attempt: Attempt) -> Answered {
+        guard !attempt.isDemo else { return .signIn(attempt) }
+        guard !isStale(attempt) else { return .stale }
         pickedServer = PickedServer(address: address, url: server.url, title: server.title)
         if step == .server { self.address = address }
-        guard attempt.goal == .server else { return nil }
+        guard attempt.goal == .server else { return .signIn(Attempt(address: address, goal: attempt.goal)) }
         show(.account)
-        return .username
+        return .picked(.username)
     }
 
     /// Shows why an attempt failed on the step whose fields can put it right, and names the field
@@ -202,36 +249,65 @@ nonisolated struct SignInFlow: Sendable {
     /// step, with the address in its fields; a wrong username or password goes to the account
     /// step, the server staying picked; Quick Connect turned off goes to the server step, which
     /// offers the password in its place. Anything else stays where it is, as do all of the demo
-    /// account's errors.
+    /// account's errors. A stale attempt's failure shows nowhere.
     mutating func fail(_ attempt: Attempt, while stage: Stage, with error: any Error) -> Field? {
-        let message = error.localizedDescription
+        guard !isStale(attempt) else { return nil }
+        let trouble = Self.trouble(error, at: attempt.address, on: deviceName)
         let problem = Self.problem(in: error, while: stage)
         if attempt.isDemo {
-            accountError = message
+            accountError = trouble.message
             return problem == .credentials ? .password : nil
         }
         switch problem {
         case .address(let field):
-            if step == .account { address = attempt.address }
+            address = attempt.address
             show(.server, quickConnect: attempt.goal == .quickConnect)
-            serverProblem = (message, address)
+            serverProblem = (trouble, attempt.address)
             return field
         case .credentials:
             show(.account)
-            accountError = message
+            accountError = trouble.message
             return .password
         case .quickConnectOff:
-            if step == .account { address = attempt.address }
+            address = attempt.address
             show(.server, quickConnect: true)
-            serverProblem = (message, address)
+            serverProblem = (trouble, attempt.address)
             offersPassword = true
             return nil
         case .other:
             switch step {
-            case .account: accountError = message
-            case .server: serverProblem = (message, address)
+            case .account: accountError = trouble.message
+            case .server: serverProblem = (trouble, attempt.address)
             }
             return nil
+        }
+    }
+
+    /// The server step's address on HTTP, for a server whose HTTPS failed.
+    mutating func useHTTP() {
+        address.choose(.http)
+    }
+
+    /// What went wrong reaching the server at `address`, said as what to do about it: the system's
+    /// own words say what failed ("A server with the specified hostname could not be found."),
+    /// not what might put it right. Any other error says what it says.
+    static func trouble(_ error: any Error, at address: ServerAddress, on deviceName: String) -> Trouble {
+        guard let error = error as? URLError else { return Trouble(message: error.localizedDescription) }
+        let host = address.host.trimmingCharacters(in: .whitespaces)
+        // An address without a scheme has been asked on HTTP already.
+        let offersHTTP = address.scheme == .https && address.fallback == nil
+        switch error.code {
+        case .cannotFindHost, .dnsLookupFailed:
+            return Trouble(message: "Couldn't find “\(host)”. Check the spelling.")
+        case .timedOut, .cannotConnectToHost, .networkConnectionLost:
+            return Trouble(message: "Nothing answered. Is the server on, and is this \(deviceName) on the same network?")
+        case .secureConnectionFailed:
+            return Trouble(message: "This server doesn't answer on HTTPS.", offersHTTP: offersHTTP)
+        case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
+             .serverCertificateNotYetValid:
+            return Trouble(message: "This server's certificate for HTTPS isn't one this \(deviceName) trusts.", offersHTTP: offersHTTP)
+        default:
+            return Trouble(message: error.localizedDescription)
         }
     }
 

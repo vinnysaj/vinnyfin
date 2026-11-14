@@ -45,6 +45,7 @@ final class AccountStore {
     nonisolated private static let accountKey = "account"
     nonisolated private static let deviceIdKey = "deviceId"
     nonisolated private static let lastServerKey = "lastServer"
+    nonisolated private static let lastServerNameKey = "lastServerName"
     nonisolated private static let lastUserNameKey = "lastUserName"
     /// How long telling the server about a sign-out may take, in the background, before it's
     /// given up on: a server out of reach keeps a token no one uses.
@@ -130,8 +131,10 @@ final class AccountStore {
         return id
     }
 
-    /// The server and user of the last sign-in, which the sign-in screen starts from after signing out.
+    /// The server and user of the last sign-in, which the sign-in screen starts from after signing
+    /// out, and what the server's called when it has a name.
     var lastServerURL: URL? { defaults.url(forKey: Self.lastServerKey) }
+    var lastServerName: String? { defaults.string(forKey: Self.lastServerNameKey) }
     var lastUserName: String? { defaults.string(forKey: Self.lastUserNameKey) }
 
     /// The Jellyfin server at the address, found without signing in.
@@ -152,13 +155,17 @@ final class AccountStore {
         return try await client.initiateQuickConnect()
     }
 
-    /// Waits for the code to be approved, then signs in. Ends when the calling task is cancelled.
-    func finishQuickConnect(on server: Server, secret: String) async throws {
+    /// Waits for the code to be approved, then signs in with it, once `signedIn` has had its say:
+    /// the server has given the sign-in by then, which only takes the app over after. Ends when
+    /// the calling task is cancelled.
+    func finishQuickConnect(on server: Server, secret: String, signedIn: @MainActor () async throws -> Void) async throws {
         let client = publicClient(for: server.url)
         while try await !client.quickConnectState(secret: secret).authenticated {
             try await Task.sleep(for: .seconds(2))
         }
         let result = try await client.authenticate(quickConnectSecret: secret)
+        try await signedIn()
+        try Task.checkCancellation()
         try adopt(result, on: server, client: client)
     }
 
@@ -184,6 +191,7 @@ final class AccountStore {
         #endif
         defaults.set(try JSONEncoder().encode(account), forKey: Self.accountKey)
         defaults.set(server.url, forKey: Self.lastServerKey)
+        defaults.set(account.serverName, forKey: Self.lastServerNameKey)
         defaults.set(account.userName, forKey: Self.lastUserNameKey)
         self.account = account
         self.client = client
@@ -241,7 +249,7 @@ nonisolated func withTimeLimit<T: Sendable>(_ limit: Duration, _ operation: @esc
 
 extension AccountStore {
     /// What the sign-in keeps in defaults, all of it moved to the app group.
-    nonisolated static let sharedKeys = [accountKey, deviceIdKey, lastServerKey, lastUserNameKey]
+    nonisolated static let sharedKeys = [accountKey, deviceIdKey, lastServerKey, lastServerNameKey, lastUserNameKey]
 
     /// Moves a sign-in kept where only the app reads it, its own defaults and Keychain item, to
     /// the app group. It runs at each launch and does nothing once everything has moved.

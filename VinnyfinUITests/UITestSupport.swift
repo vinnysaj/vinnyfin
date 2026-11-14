@@ -144,8 +144,10 @@ extension XCTestCase {
             }
         }
         // A full address in the host field is split into protocol, host, port and path, and Return
-        // walks the fields: host, port, path, then signs in.
-        host.tap()
+        // walks the fields: host, port, path, then signs in. The tap is past the end of the text,
+        // so the deletes before the cursor take all of it: one in the middle of a long address,
+        // such as the demo server's, leaves the rest after what's typed.
+        host.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
         host.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 40) + server + "\n")
         type("\n", into: app.textFields["login.port"])
         type("\n", into: app.textFields["login.path"])

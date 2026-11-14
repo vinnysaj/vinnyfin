@@ -11,28 +11,55 @@ struct LoginView: View {
     @Environment(AccountStore.self) private var accounts
     @Environment(KnownServers.self) private var knownServers
     @Environment(\.dismiss) private var dismiss
-    @State private var flow = SignInFlow()
-    @State private var check = ServerCheck.idle
-    /// The sign-in under way. There's one at a time, and going Back or to another server takes it
-    /// back.
+    #if os(iOS)
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    #endif
+    @State private var flow = SignInFlow(deviceName: Device.name)
+    @State private var check: ServerCheck?
+    /// The sign-in under way. There's one at a time, and going Back or to another server, or
+    /// editing the address it's for, takes it back.
     @State private var running: Running?
-    @State private var quickConnect: QuickConnectState?
+    @State private var quickConnect: QuickConnectPrompt?
     @FocusState private var focus: SignInFlow.Field?
     /// The field the cursor moves to next, which comes into view first: a form draws only the
     /// rows on screen, and a field it hasn't drawn can't take the cursor.
     @State private var nextFocus: SignInFlow.Field?
 
     private struct Running {
-        var goal: SignInFlow.Goal
+        /// The attempt, at the address the server answered at once it has.
+        var attempt: SignInFlow.Attempt
         var task: Task<Void, Never>
     }
 
-    /// Whether a Jellyfin server answers at the server step's address, as it's typed.
-    enum ServerCheck {
-        case idle
-        case checking
-        case found(AccountStore.Server)
-        case failed(String)
+    /// Whether a Jellyfin server answers at an address of the server step's, as it's typed or as
+    /// a sign-in looks for the server there.
+    struct ServerCheck {
+        enum State {
+            case checking
+            /// It answered at the address, or else at its fallback.
+            case found(AccountStore.Server, at: ServerAddress)
+            case failed(SignInFlow.Trouble)
+        }
+
+        /// The address as the fields gave it.
+        var address: ServerAddress
+        var state: State
+
+        /// The server found at `address`, with where it answered.
+        func answer(at address: ServerAddress) -> (address: ServerAddress, answer: AccountStore.Server)? {
+            guard address == self.address, case .found(let server, let answeredAt) = state else { return nil }
+            return (answeredAt, server)
+        }
+    }
+
+    /// A Quick Connect code waiting to be approved, on the server it's from.
+    private struct QuickConnectPrompt: Identifiable {
+        var code: String
+        var server: String
+        /// Approved and signed in, for a moment before the screen goes.
+        var isSignedIn = false
+
+        var id: String { code }
     }
 
     private static let quickConnectExplanation: LocalizedStringKey =
@@ -49,6 +76,11 @@ struct LoginView: View {
                 }
                 .formStyle(.grouped)
                 .navigationTitle("Connect to Jellyfin")
+                #if os(iOS)
+                .safeAreaBar(edge: .top) {
+                    if pinsServerStatus { pinnedServerStatus }
+                }
+                #endif
                 #if os(tvOS)
                 .onExitCommand(perform: exitCommand)
                 #else
@@ -61,12 +93,13 @@ struct LoginView: View {
                 // Closing the sheet takes back the sign-in under way.
                 .onDisappear(perform: cancelSignIn)
                 #endif
-                .sheet(item: $quickConnect, onDismiss: cancelSignIn) { state in
-                    QuickConnectSheet(code: state.code, onCancel: cancelSignIn)
+                .sheet(item: $quickConnect, onDismiss: cancelSignIn) { prompt in
+                    QuickConnectSheet(code: prompt.code, server: prompt.server, isSignedIn: prompt.isSignedIn, onCancel: cancelSignIn)
                 }
                 .onAppear {
                     if let next = flow.start(offer: offer, password: offer.flatMap { knownServers.password(for: $0) },
-                                             lastServerURL: accounts.lastServerURL, lastUserName: accounts.lastUserName) {
+                                             lastServerURL: accounts.lastServerURL, lastServerName: accounts.lastServerName,
+                                             lastUserName: accounts.lastUserName) {
                         follow(next)
                     }
                 }
@@ -74,6 +107,10 @@ struct LoginView: View {
                     // A full address in the host field fills in the other fields once the host is
                     // done, so "nas:8096" isn't cut apart at "nas:" while it's being typed.
                     if previous == .host { flow.address.splitHost() }
+                }
+                // Editing the address takes back the sign-in to the address as it was.
+                .onChange(of: flow.address) {
+                    if let running, flow.isStale(running.attempt) { cancelSignIn() }
                 }
                 .task(id: flow.step == .server ? flow.address : nil) { await checkServer() }
                 // Said where they show, in the form's footers, away from VoiceOver's cursor.
@@ -104,7 +141,7 @@ struct LoginView: View {
         case .account:
             Button(action: submitAccount) {
                 title(flow.accountStepSignsIn ? "Sign In" : "Next",
-                      isRunning: running.map { $0.goal != .quickConnect } ?? false)
+                      isRunning: running.map { $0.attempt.goal != .quickConnect } ?? false)
             }
             .disabled(flow.trimmedUsername.isEmpty || running != nil)
             .accessibilityIdentifier("login.submit")
@@ -162,7 +199,7 @@ struct LoginView: View {
         #endif
         Section {
             Button(action: useQuickConnect) {
-                title("Use Quick Connect", systemImage: "number.square", isRunning: running?.goal == .quickConnect)
+                title("Use Quick Connect", systemImage: "number.square", isRunning: running?.attempt.goal == .quickConnect)
             }
             .disabled(running != nil)
             .accessibilityIdentifier("login.quickConnect")
@@ -235,6 +272,7 @@ struct LoginView: View {
                     // Has a return key, unlike the number pad.
                     .keyboardType(.numbersAndPunctuation)
                     #endif
+                    .autocorrectionDisabled()
                     .focused($focus, equals: .port)
                     .submitLabel(.next)
                     .onSubmit { nextFocus = .path }
@@ -256,13 +294,31 @@ struct LoginView: View {
             }
             .id(SignInFlow.Field.path)
         } header: {
-            Text("Server")
+            // Above the fields, where the keyboard doesn't cover it, or on a short screen, under
+            // the bar.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Server")
+                if !pinsServerStatus {
+                    serverStatus
+                        .textCase(nil)
+                }
+            }
         } footer: {
-            serverStatus
+            if flow.isQuickConnect {
+                Text(Self.quickConnectExplanation)
+            } else if !flow.trimmedUsername.isEmpty {
+                Text("Signs in as \(flow.trimmedUsername).")
+            }
         }
         #if os(tvOS)
         Section { stepButton }
         #endif
+        if offersHTTP {
+            Section {
+                Button("Use HTTP", systemImage: "lock.open", action: useHTTP)
+                    .accessibilityIdentifier("login.useHTTP")
+            }
+        }
         if flow.offersPassword {
             Section {
                 Button("Sign In with a Password", systemImage: "key", action: usePassword)
@@ -275,40 +331,77 @@ struct LoginView: View {
         }
     }
 
-    /// The address as a URL, then why it didn't do, or else whether a server answers at it, and
-    /// what the step's button does there.
+    /// Whether the server's status goes under the bar rather than over the fields: on a screen
+    /// as short as an iPhone's on its side, the form scrolls the fields' header away to keep the
+    /// one being typed in above the keyboard.
+    private var pinsServerStatus: Bool {
+        #if os(iOS)
+        flow.step == .server && verticalSizeClass == .compact
+        #else
+        false
+        #endif
+    }
+
+    /// The address as a URL, then why it didn't do, or else whether a server answers at it.
     private var serverStatus: some View {
         VStack(alignment: .leading, spacing: 4) {
             if case .success(let url) = flow.address.url {
                 Text(url.absoluteString).monospaced()
             }
-            if let error = flow.serverError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("login.error")
-            } else {
-                switch check {
-                case .idle:
-                    EmptyView()
-                case .checking:
-                    Text("Looking for the server…")
-                case .found(let server):
-                    Label(description(of: server), systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                case .failed(let message):
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                }
-            }
-            if flow.isQuickConnect {
-                Text(Self.quickConnectExplanation)
-            } else if !flow.trimmedUsername.isEmpty {
-                Text("Signs in as \(flow.trimmedUsername).")
-            }
+            serverAnswer
         }
         #if !os(tvOS)
         .textSelection(.enabled)
         #endif
+    }
+
+    #if os(iOS)
+    /// The status under the bar, a line high even with nothing to say: were it to grow when the
+    /// answer comes, the field being typed in would slide down behind the keyboard.
+    private var pinnedServerStatus: some View {
+        ZStack(alignment: .leading) {
+            Label("Server", systemImage: "checkmark.circle.fill").hidden()
+            serverAnswer
+        }
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 6)
+    }
+    #endif
+
+    /// Why the address didn't do, or else whether a server answers at it.
+    @ViewBuilder private var serverAnswer: some View {
+        if let error = flow.serverError {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .accessibilityIdentifier("login.error")
+        } else if let check, check.address == flow.address {
+            switch check.state {
+            case .checking:
+                Label {
+                    Text("Looking for the server…")
+                } icon: {
+                    ProgressView().controlSize(.small)
+                }
+                .accessibilityIdentifier("login.checking")
+            case .found(let server, _):
+                Label(description(of: server), systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityIdentifier("login.found")
+            case .failed(let trouble):
+                Label(trouble.message, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// The server step's address failed on HTTPS, which it gives, so HTTP is offered: the
+    /// sign-in's error says so, or else the check of the address as it's typed.
+    private var offersHTTP: Bool {
+        if flow.serverError != nil { return flow.offersHTTP }
+        guard let check, check.address == flow.address, case .failed(let trouble) = check.state else { return false }
+        return trouble.offersHTTP
     }
 
     /// "Found Home (Jellyfin 10.11.0)", and where, when it's not at the address as the fields
@@ -376,6 +469,10 @@ struct LoginView: View {
         nextFocus = flow.usePassword()
     }
 
+    private func useHTTP() {
+        flow.useHTTP()
+    }
+
     private func follow(_ next: SignInFlow.Next) {
         switch next {
         case .focus(let field):
@@ -386,7 +483,7 @@ struct LoginView: View {
                 // A sign-in taken back has made way for the next already.
                 if !Task.isCancelled { running = nil }
             }
-            running = Running(goal: attempt.goal, task: task)
+            running = Running(attempt: attempt, task: task)
         }
     }
 
@@ -396,21 +493,41 @@ struct LoginView: View {
         quickConnect = nil
     }
 
-    /// Finds the server, then signs in to it with the password, or shows a Quick Connect code
-    /// and waits for its approval.
+    /// Finds the server, unless the check of the address as it was typed just has, then signs in
+    /// to it with the password, or shows a Quick Connect code and waits for its approval.
     private func run(_ attempt: SignInFlow.Attempt) async {
         let found: (address: ServerAddress, answer: AccountStore.Server)
-        do {
-            found = try await attempt.address.firstAnswer { try await accounts.findServer(at: $0) }
-        } catch {
-            fail(attempt, while: .findingServer, with: error)
-            return
+        if let checked = check?.answer(at: attempt.address) {
+            found = checked
+        } else {
+            if flow.step == .server, flow.address == attempt.address {
+                check = ServerCheck(address: attempt.address, state: .checking)
+            }
+            do {
+                found = try await attempt.address.firstAnswer { try await accounts.findServer(at: $0) }
+            } catch {
+                fail(attempt, while: .findingServer, with: error)
+                return
+            }
+            guard !Task.isCancelled else { return }
         }
-        guard !Task.isCancelled else { return }
         let server = found.answer
-        if let field = flow.found(server, at: found.address, for: attempt) { nextFocus = field }
+        let going: SignInFlow.Attempt
+        switch flow.found(server, at: found.address, for: attempt) {
+        case .stale:
+            return
+        case .picked(let field):
+            check = ServerCheck(address: found.address, state: .found(server, at: found.address))
+            nextFocus = field
+            return
+        case .signIn(let answered):
+            going = answered
+        }
+        // The fields hold the address that answered now, where the sign-in goes on.
+        running?.attempt = going
+        if !going.isDemo { check = ServerCheck(address: going.address, state: .found(server, at: going.address)) }
         do {
-            switch attempt.goal {
+            switch going.goal {
             case .server:
                 return
             case .password(let username, let password):
@@ -419,17 +536,23 @@ struct LoginView: View {
             case .quickConnect:
                 let state = try await accounts.startQuickConnect(on: server)
                 guard !Task.isCancelled else { return }
-                quickConnect = state
-                try await accounts.finishQuickConnect(on: server, secret: state.secret)
+                quickConnect = QuickConnectPrompt(code: state.code, server: server.title)
+                try await accounts.finishQuickConnect(on: server, secret: state.secret) {
+                    quickConnect?.isSignedIn = true
+                    try await Task.sleep(for: Self.signedInMoment)
+                }
             }
         } catch {
-            fail(attempt, while: .signingIn, with: error)
+            fail(going, while: .signingIn, with: error)
             return
         }
         guard !Task.isCancelled else { return }
         quickConnect = nil
         dismiss()
     }
+
+    /// How long the Quick Connect code says it's signed in before the screen goes.
+    private static let signedInMoment = Duration.seconds(1)
 
     private func fail(_ attempt: SignInFlow.Attempt, while stage: SignInFlow.Stage, with error: any Error) {
         guard !Task.isCancelled, !error.isCancellation else { return }
@@ -439,42 +562,57 @@ struct LoginView: View {
 
     private func checkServer() async {
         guard flow.step == .server, case .success = flow.address.url else {
-            check = .idle
+            check = nil
             return
         }
+        // Found there already, by the sign-in that put the address in the fields.
+        if check?.answer(at: flow.address) != nil { return }
         // Wait for typing to settle; a newer address cancels this check.
         do {
             try await Task.sleep(for: .milliseconds(600))
         } catch {
             return
         }
-        check = .checking
+        let address = flow.address
+        check = ServerCheck(address: address, state: .checking)
         do {
-            let server = try await flow.address.firstAnswer { try await accounts.findServer(at: $0) }.answer
-            check = .found(server)
-            announce(description(of: server))
+            let found = try await address.firstAnswer { try await accounts.findServer(at: $0) }
+            check = ServerCheck(address: address, state: .found(found.answer, at: found.address))
+            announce(description(of: found.answer))
         } catch {
             if !Task.isCancelled, !error.isCancellation {
-                check = .failed(error.localizedDescription)
-                announce(error.localizedDescription)
+                let trouble = SignInFlow.trouble(error, at: address, on: Device.name)
+                check = ServerCheck(address: address, state: .failed(trouble))
+                announce(trouble.message)
             }
         }
     }
 }
 
-/// The Quick Connect code, shown large while waiting for it to be approved.
+/// The Quick Connect code, shown large while waiting for it to be approved, and then for a moment
+/// that it's signed in.
 private struct QuickConnectSheet: View {
     let code: String
+    /// What the server is called.
+    let server: String
+    let isSignedIn: Bool
     let onCancel: () -> Void
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("Quick Connect").font(.title2.weight(.semibold))
-                .accessibilityAddTraits(.isHeader)
+        VStack(spacing: 20) {
+            VStack(spacing: 4) {
+                Text("Quick Connect").font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("On \(server)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("login.quickConnectServer")
+            }
             Text("In Jellyfin on a signed-in device, open your profile, choose Quick Connect and enter this code.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 460)
             Text(code)
                 .font(.system(size: 64, weight: .bold, design: .monospaced))
@@ -482,11 +620,24 @@ private struct QuickConnectSheet: View {
                 // A digit at a time, as it's typed in, rather than as one number.
                 .speechSpellsOutCharacters()
                 .accessibilityIdentifier("login.quickConnectCode")
-            ProgressView("Waiting for approval…")
+            if isSignedIn {
+                Label("Signed In", systemImage: "checkmark.circle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+                    .transition(.scale.combined(with: .opacity))
+                    .accessibilityIdentifier("login.quickConnectSignedIn")
+            } else {
+                ProgressView("Waiting for approval…")
+            }
             Button("Cancel", role: .cancel, action: onCancel)
                 .buttonStyle(.platformGlass)
+                .disabled(isSignedIn)
         }
-        .padding(40)
+        .padding(.horizontal, 40)
+        .padding(.vertical, 32)
+        .animation(.default, value: isSignedIn)
+        .sensoryFeedback(.success, trigger: isSignedIn)
+        .onChange(of: isSignedIn) { _, signedIn in if signedIn { announce("Signed in to \(server)") } }
         // The whole screen for text too large for half of it.
         .presentationDetents(dynamicTypeSize.isAccessibilitySize ? [.large] : [.medium])
     }

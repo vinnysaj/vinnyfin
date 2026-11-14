@@ -158,13 +158,7 @@ struct ItemDetailView: View {
                             #endif
                     }
                     if !similar.isEmpty {
-                        Shelf(title: "More Like This", seeAll: .moreLike(shown), items: similar, cardWidth: Metrics.posterWidth) { other in
-                            NavigationLink(value: other) { PosterCard(item: other) }
-                                .buttonStyle(.artwork)
-                                .titleMenu(other) { updated in
-                                    if let index = similar.firstIndex(where: { $0.id == updated.id }) { similar[index] = updated }
-                                }
-                        }
+                        MoreLikeThisShelf(title: shown, titles: $similar)
                         #if os(tvOS)
                         .pageRow("similar", in: rowLayout)
                         #endif
@@ -356,7 +350,7 @@ struct ItemDetailView: View {
         await loadDetail()
         guard let session, !isGone, refreshing || similar.isEmpty || titleId != similarTitleId else { return }
         do {
-            similar = try await session.client.similar(to: titleId, userId: session.userId)
+            similar = try await session.client.similar(to: titleId, userId: session.userId, limit: MoreLikeThisShelf.length)
             similarTitleId = titleId
         } catch {
             guard !error.isCancellation else { return }
@@ -384,6 +378,29 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation, id == page.id else { return }
             loadError = LoadFailure("Couldn't Load the Details", error: error)
+        }
+    }
+}
+
+/// A title page's More Like This: the titles the server ranks as like it, as posters with the
+/// title's menu. See All, which lists more of them, is there only when the row may not have them
+/// all: the server doesn't say how many there are, so a row with as many as it asked for may not.
+struct MoreLikeThisShelf: View {
+    /// How many titles the row asks the server for.
+    static let length = 16
+
+    /// The title they're like.
+    let title: JellyfinItem
+    @Binding var titles: [JellyfinItem]
+
+    var body: some View {
+        Shelf(title: "More Like This", seeAll: titles.count >= Self.length ? .moreLike(title) : nil, items: titles,
+              cardWidth: Metrics.posterWidth) { other in
+            NavigationLink(value: other) { PosterCard(item: other) }
+                .buttonStyle(.artwork)
+                .titleMenu(other) { updated in
+                    if let index = titles.firstIndex(where: { $0.id == updated.id }) { titles[index] = updated }
+                }
         }
     }
 }

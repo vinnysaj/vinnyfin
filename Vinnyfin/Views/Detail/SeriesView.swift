@@ -98,15 +98,7 @@ struct SeriesView: View {
                         }
                     }
                     if let people = detail?.people { CastShelf(people: people) }
-                    if !similar.isEmpty {
-                        Shelf(title: "More Like This", seeAll: .moreLike(shown), items: similar, cardWidth: Metrics.posterWidth) { other in
-                            NavigationLink(value: other) { PosterCard(item: other) }
-                                .buttonStyle(.artwork)
-                                .titleMenu(other) { updated in
-                                    if let index = similar.firstIndex(where: { $0.id == updated.id }) { similar[index] = updated }
-                                }
-                        }
-                    }
+                    if !similar.isEmpty { MoreLikeThisShelf(title: shown, titles: $similar) }
                 }
                 .padding(.bottom, Metrics.edge)
             }
@@ -407,7 +399,7 @@ struct SeriesView: View {
             loadError = LoadFailure("Couldn't Load the Show", error: error)
         }
         do {
-            similar = try await session.client.similar(to: series.id, userId: session.userId)
+            similar = try await session.client.similar(to: series.id, userId: session.userId, limit: MoreLikeThisShelf.length)
         } catch {
             guard !error.isCancellation else { return }
             similar = []

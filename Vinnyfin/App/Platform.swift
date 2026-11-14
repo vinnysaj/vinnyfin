@@ -240,12 +240,15 @@ struct EdgeToEdgeScrollView<Content: View>: View {
     @State private var topBarsHeight: CGFloat = 0
     #endif
 
+    // The content is as wide as the view even with nothing in it yet: the scroll view takes its
+    // content's width, and a status laid over the view, as a list's load failure, would be
+    // squeezed into a column a few letters wide.
     var body: some View {
         #if os(tvOS)
-        ScrollView { content }
+        ScrollView { content.frame(maxWidth: .infinity) }
             .ignoresSafeArea(edges: edges)
         #else
-        ScrollView { content.environment(\.topBarsHeight, underTopBars ? topBarsHeight : 0) }
+        ScrollView { content.frame(maxWidth: .infinity).environment(\.topBarsHeight, underTopBars ? topBarsHeight : 0) }
             .ignoresSafeArea(edges: edges)
             // Measured outside the edge given up: inside, the bars would read as none at all.
             .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { topBarsHeight = $0 }

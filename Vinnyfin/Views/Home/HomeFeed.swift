@@ -11,7 +11,8 @@ import SwiftUI
 /// away, picks the rows again.
 ///
 /// What it loads is saved for the sign-in (`HomeCache`), and drawn at once the next time Home
-/// opens, until the server's answer takes its place.
+/// opens, until the server's answer takes its place. While the server is out of reach it shows
+/// only that, loading nothing.
 @MainActor @Observable
 final class HomeFeed {
     /// Requests at once for rows coming on screen.
@@ -47,16 +48,20 @@ final class HomeFeed {
     private(set) var hasNoTitles = false
     /// The first round of requests has come back, at least once.
     private(set) var hasLoaded = false
+    /// The server is out of reach: Home shows what was saved of it, and loads nothing.
+    private(set) var isOffline = false
 
     /// The first round of requests is out for the first time, and nothing has gone wrong yet:
     /// what Home will show is still to come.
     var isLoadingFirstTime: Bool {
-        !hasLoaded && loadError == nil && !sessionEnded && !hasNoTitles
+        !hasLoaded && loadError == nil && !sessionEnded && !hasNoTitles && !isOffline
     }
 
-    /// Whether a row shows: not once it has loaded with nothing in it, or given way.
+    /// Whether a row shows: not once it has loaded with nothing in it, or given way. Offline,
+    /// only one with titles saved shows.
     func isShown(_ id: HomeRow.ID) -> Bool {
-        problems[id] != nil || (!givenWay.contains(id) && items[id]?.isEmpty != true)
+        guard !isOffline else { return !givenWay.contains(id) && items[id]?.isEmpty == false }
+        return problems[id] != nil || (!givenWay.contains(id) && items[id]?.isEmpty != true)
     }
 
     @ObservationIgnored private var session: ServerSession?
@@ -107,8 +112,9 @@ final class HomeFeed {
     /// Loads Home as it comes on screen. The first time, for another sign-in, after a problem,
     /// after `freshness` away, or when `reshuffling`, with new rows picked at random, it picks
     /// the rows; otherwise it refreshes Continue Watching and keeps the rows as they are. The
-    /// first time for a sign-in, what was saved of its Home shows meanwhile.
-    func load(session: ServerSession, reshuffling: Bool = false) async {
+    /// first time for a sign-in, what was saved of its Home shows meanwhile. While the server is
+    /// out of reach, that's all it shows.
+    func load(session: ServerSession, isServerOutOfReach: Bool = false, reshuffling: Bool = false) async {
         let away = awaySince.map { Date.now.timeIntervalSince($0) }
         awaySince = nil
         if let current = self.session, current.account != session.account { reset() }
@@ -116,6 +122,14 @@ final class HomeFeed {
             self.session = session
             cache = HomeCache(session, directory: cacheDirectory)
             await restore()
+        }
+        isOffline = isServerOutOfReach
+        guard !isServerOutOfReach else {
+            queue.cancelAll()
+            // The banner over every screen says why; the rows saved stand in meanwhile.
+            loadError = nil
+            dropPlaceholders()
+            return
         }
         let isSettled = hasLoaded && loadError == nil && !sessionEnded && !hasNoTitles
         if Self.picksRows(reshuffling: reshuffling, awayFor: away, isSettled: isSettled) {
@@ -520,7 +534,7 @@ final class HomeFeed {
 
     /// Loads the rows on screen and the next few below them, and stops loading those gone.
     private func schedule() {
-        guard !isSeeding else { return }
+        guard !isSeeding, !isOffline else { return }
         let positions = rows.indices.filter { onScreen[rows[$0].id] != nil }
         guard let first = positions.min(), let last = positions.max() else {
             queue.retain { _ in false }

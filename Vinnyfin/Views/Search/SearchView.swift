@@ -15,12 +15,19 @@ struct SearchView: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(ServerReachability.self) private var reachability
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    @Environment(WatchHistory.self) private var history
+    #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var text = ""
     /// What the last search to finish, or to fail, was for: what the results on screen were
     /// found for, or what `searchError` is about.
     @State private var searched = ""
     @State private var results = SearchResults()
+    /// The results on screen are of what's downloaded, found while the server was out of reach.
+    @State private var searchedDownloads = false
     /// What a search that found nothing was likely meant to be.
     @State private var suggestion: String?
     /// The pages open on top of the search: titles, people, genres, and lists in full.
@@ -45,7 +52,10 @@ struct SearchView: View {
             EdgeToEdgeScrollView {
                 LazyVStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
                     if phase == .prompt {
+                        if reachability.isOutOfReach { offlineNote }
                         landing
+                    } else if searchedDownloads {
+                        downloadedResults
                     } else {
                         if let top = results.topResult(for: searched) {
                             topResult(top)
@@ -78,8 +88,12 @@ struct SearchView: View {
             #endif
             .onSubmit(of: .search) { remember(SearchPhase.term(text)) }
             .itemDestinations()
-            .task(id: Run(text: text, retries: retries)) { await search() }
-            .task { await loadLanding() }
+            .task(id: Run(text: text, retries: retries, isServerOutOfReach: reachability.isOutOfReach)) { await search() }
+            .task { recentSearches = recents?.load() ?? [] }
+            .task(id: reachability.isOutOfReach) {
+                guard !reachability.isOutOfReach else { return }
+                await loadLanding()
+            }
             // Opening something a search found keeps the search.
             .onChange(of: path.count) { before, after in
                 if after > before, phase != .prompt { remember(searched) }
@@ -91,10 +105,12 @@ struct SearchView: View {
         .opensTitles(on: $path)
     }
 
-    /// A search for the text as it is; Try Again runs it again.
+    /// A search for the text as it is; Try Again runs it again, as does the server going out of
+    /// reach or answering again.
     private struct Run: Hashable {
         let text: String
         let retries: Int
+        let isServerOutOfReach: Bool
     }
 
     private var phase: SearchPhase {
@@ -108,7 +124,9 @@ struct SearchView: View {
         case .searching:
             ProgressView()
         case .noResults:
-            if let suggestion {
+            if searchedDownloads {
+                noDownloadsFound
+            } else if let suggestion {
                 ContentUnavailableView {
                     Label("No Results for \u{201C}\(searched)\u{201D}", systemImage: "magnifyingglass")
                 } description: {
@@ -131,11 +149,84 @@ struct SearchView: View {
     @ViewBuilder private var landing: some View {
         #if os(tvOS)
         SearchLanding(recentSearches: recentSearches, libraries: libraries, genres: genres, search: { text = $0 },
-                      forget: forget, forgetAll: forgetAll, rowLayout: rowLayout)
+                      forget: forget, forgetAll: forgetAll, rowLayout: rowLayout, browsesServer: !reachability.isOutOfReach)
         #else
         SearchLanding(recentSearches: recentSearches, libraries: libraries, genres: genres, search: { text = $0 },
-                      forget: forget, forgetAll: forgetAll)
+                      forget: forget, forgetAll: forgetAll, browsesServer: !reachability.isOutOfReach)
         #endif
+    }
+
+    // MARK: Offline
+
+    private var serverTitle: String { session?.account.serverTitle ?? "the server" }
+
+    /// Over the landing page while the server is out of reach: what Search looks through then.
+    private var offlineNote: some View {
+        #if os(tvOS)
+        Label("Can't reach \(serverTitle), so there's nothing to search until it answers.", systemImage: "wifi.slash")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, Metrics.edge)
+        #else
+        Label("Can't reach \(serverTitle), so Search looks through your downloads.", systemImage: "wifi.slash")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, Metrics.edge)
+            .accessibilityIdentifier("search.offlineNote")
+        #endif
+    }
+
+    /// What's downloaded that matches, under a heading that says so, each a card that plays it.
+    @ViewBuilder private var downloadedResults: some View {
+        #if !os(tvOS)
+        if !results.isEmpty {
+            Label("Showing your downloads", systemImage: "arrow.down.circle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Metrics.edge)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("search.downloadsHeading")
+            ForEach(results.sections(for: searched), id: \.self) { section in
+                switch section {
+                case .movies: downloaded("Movies", results.movies)
+                case .videos: downloaded("Videos", results.videos)
+                case .episodes: downloaded("Episodes", results.episodes)
+                case .shows, .collections, .people, .genres: EmptyView()
+                }
+            }
+        }
+        #endif
+    }
+
+    #if !os(tvOS)
+    private func downloaded(_ kind: String, _ items: [JellyfinItem]) -> some View {
+        Shelf(title: kind, items: items, cardWidth: Metrics.landscapeWidth, placeholderStyle: .landscape) { item in
+            DownloadedCard(item: item)
+        }
+    }
+    #endif
+
+    /// Nothing downloaded matches while the server is out of reach; on Apple TV, which keeps
+    /// no downloads, there's nothing to search.
+    private var noDownloadsFound: some View {
+        ContentUnavailableView {
+            #if os(tvOS)
+            Label("Can't Reach \(serverTitle)", systemImage: "wifi.slash")
+            #else
+            Label("No Downloads Match \u{201C}\(searched)\u{201D}", systemImage: "arrow.down.circle")
+            #endif
+        } description: {
+            #if os(tvOS)
+            Text("Search finds titles again once it answers.")
+            #else
+            Text("Can't reach \(serverTitle), so Search looks through your downloads.")
+            #endif
+        } actions: {
+            Button("Try Again") { Task { await reachability.check() } }
+                .buttonStyle(.platformGlass)
+                .disabled(reachability.isChecking)
+                .accessibilityIdentifier("search.offlineRetry")
+        }
     }
 
     private func topResult(_ item: JellyfinItem) -> some View {
@@ -244,6 +335,10 @@ struct SearchView: View {
         } catch {
             return
         }
+        guard !reachability.isOutOfReach else {
+            searchDownloads(for: term)
+            return
+        }
         isSearching = true
         defer { isSearching = false }
         func page(_ types: [String]) async throws -> [JellyfinItem] {
@@ -266,6 +361,7 @@ struct SearchView: View {
                 suggestion = meant
                 searched = term
                 searchError = nil
+                searchedDownloads = false
             }
             announce(meant.map { "No results. Did you mean \($0)?" } ?? found.summary)
         } catch {
@@ -274,8 +370,30 @@ struct SearchView: View {
             suggestion = nil
             searched = term
             searchError = error.localizedDescription
+            searchedDownloads = false
             announce("Search failed. \(error.localizedDescription)")
+            // Asks whether the server's there at all: out of reach, the search runs again over
+            // the downloads.
+            await reachability.check()
         }
+    }
+
+    /// Finds what's typed among the sign-in's downloads, at once, while the server is out of reach.
+    private func searchDownloads(for term: String) {
+        #if os(tvOS)
+        let found = SearchResults()
+        #else
+        let titles = OfflineDownloads.titles(downloads.jobs, of: session?.account) { history.entry(for: $0) }
+        let found = OfflineDownloads.search(term, in: titles, fileNames: OfflineDownloads.fileNames(of: downloads.jobs))
+        #endif
+        withAnimation(reduceMotion ? nil : .default) {
+            results = found
+            suggestion = nil
+            searched = term
+            searchError = nil
+            searchedDownloads = true
+        }
+        announce(found.isEmpty ? "No downloads match." : "In your downloads, \(found.summary)")
     }
 
     /// The title or genre `term` was likely meant to be, from the names of every title, which the
@@ -298,7 +416,6 @@ struct SearchView: View {
 
     private func loadLanding() async {
         guard let session else { return }
-        recentSearches = recents?.load() ?? []
         async let genresLoaded: Void = genres.load(session: session)
         // Libraries the tabs reach anyway are all there are when they can't be listed.
         libraries = LibraryShortcuts.shown((try? await session.client.libraries(userId: session.userId)) ?? [])

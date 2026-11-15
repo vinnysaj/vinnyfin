@@ -12,9 +12,14 @@ struct HomeView: View {
 
     @Environment(\.session) private var session
     @Environment(AccountStore.self) private var accounts
+    @Environment(ServerReachability.self) private var reachability
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    @Environment(WatchHistory.self) private var history
+    #endif
     @State private var feed = HomeFeed()
     /// The featured title the banner shows, kept here so it stays as the banner scrolls out of
     /// the page and back, and as the titles load again.
@@ -58,15 +63,20 @@ struct HomeView: View {
                     Group {
                         if feed.sessionEnded {
                             sessionEndedNotice
-                        } else if let loadError = feed.loadError {
+                        } else if let loadError = feed.loadError, !feed.isOffline {
                             failureNotice(loadError)
                         }
                     }
                     #if os(tvOS)
                     .pageRow("notice", in: rowLayout, holding: .whole)
                     #endif
+                    #if !os(tvOS)
+                    if feed.isOffline, !downloadedTitles.isEmpty {
+                        downloadsRow
+                    }
+                    #endif
                     ForEach(feed.rows) { row in
-                        HomeRowView(row: row, titles: feed.items[row.id], problem: feed.problems[row.id],
+                        HomeRowView(row: row, titles: feed.items[row.id], problem: feed.isOffline ? nil : feed.problems[row.id],
                                     isShown: feed.isShown(row.id), isTruncated: feed.truncated.contains(row.id), feed: feed) {
                             feed.removeFromContinueWatching($0) { messages.show($0) }
                         }
@@ -88,7 +98,13 @@ struct HomeView: View {
             .onScrollPhaseChange { _, phase in isScrolling = phase != .idle }
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
-            .overlay { if feed.hasNoTitles { noTitles } }
+            .overlay {
+                if feed.hasNoTitles {
+                    noTitles
+                } else if showsNothingOffline {
+                    nothingOffline
+                }
+            }
             .overlay(alignment: .bottom) {
                 if let removal = feed.removal {
                     RemovalToast(removal: removal) { undo(removal) } expire: { feed.settleRemoval(removal) }
@@ -148,8 +164,17 @@ struct HomeView: View {
             .sheet(isPresented: $showingSounds) { SoundsView() }
             #endif
             .itemDestinations()
-            .refreshable { await load(reshuffling: true) }
-            .task { await load() }
+            // Out of reach, a pull asks the server again, and Home loads once it answers.
+            .refreshable {
+                if reachability.isOutOfReach {
+                    await reachability.check()
+                } else {
+                    await load(reshuffling: true)
+                }
+            }
+            // Again when the server goes out of reach, to stop asking it and show what's saved,
+            // and when it answers again.
+            .task(id: reachability.isOutOfReach) { await load() }
             // Back from the background, Home refreshes as on coming back to it.
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
@@ -288,7 +313,9 @@ struct HomeView: View {
 
     private func load(reshuffling: Bool = false) async {
         guard let session else { return }
-        await feed.load(session: session, reshuffling: reshuffling)
+        await feed.load(session: session, isServerOutOfReach: reachability.isOutOfReach, reshuffling: reshuffling)
+        // Asks whether the server's there at all, rather than say only that Home didn't load.
+        if feed.loadError != nil { await reachability.check() }
     }
 
     /// Saves Home for the next time it opens, while still signed in where it's from: one going
@@ -297,6 +324,45 @@ struct HomeView: View {
         guard let session, accounts.account?.isSame(as: session.account) == true else { return }
         feed.saveForNextTime()
     }
+
+    /// Offline with nothing saved of Home, and nothing downloaded to show in its place.
+    private var showsNothingOffline: Bool {
+        #if os(tvOS)
+        feed.isOffline && feed.featured.isEmpty && !feed.rows.contains { feed.isShown($0.id) }
+        #else
+        feed.isOffline && feed.featured.isEmpty && !feed.rows.contains { feed.isShown($0.id) } && downloadedTitles.isEmpty
+        #endif
+    }
+
+    /// Why Home is empty: the server out of reach before Home was ever saved.
+    private var nothingOffline: some View {
+        ContentUnavailableView {
+            Label("Can't Reach \(session?.account.serverTitle ?? "the Server")", systemImage: "wifi.slash")
+        } description: {
+            if case .outOfReach(let absence) = reachability.state {
+                Text(absence.explanation(server: session?.account.serverTitle ?? "The server"))
+            }
+        } actions: {
+            Button("Try Again") { Task { await reachability.check() } }
+                .buttonStyle(.platformGlassProminent)
+                .disabled(reachability.isChecking)
+                .accessibilityIdentifier("home.offlineRetry")
+        }
+    }
+
+    #if !os(tvOS)
+    /// What's downloaded for the sign-in, for the row that leads Home offline.
+    private var downloadedTitles: [JellyfinItem] {
+        OfflineDownloads.titles(downloads.jobs, of: session?.account) { history.entry(for: $0) }
+    }
+
+    /// The sign-in's downloads, which play on a tap, first on Home while the server is out of reach.
+    private var downloadsRow: some View {
+        Shelf(title: "Downloads", items: downloadedTitles, cardWidth: Metrics.landscapeWidth, placeholderStyle: .landscape) { item in
+            DownloadedCard(item: item)
+        }
+    }
+    #endif
 }
 
 extension FocusedValues {

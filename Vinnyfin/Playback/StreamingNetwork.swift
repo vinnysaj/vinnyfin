@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Synchronization
 
 /// The network a stream would go over, as far as what it costs: whether streams keep to the
 /// cellular streaming quality on it (`AppSettings.streamingQuality(on:)`).
@@ -42,16 +43,39 @@ nonisolated enum StreamingNetwork: Equatable, Sendable {
     /// Starts following the network, so it's known by the first stream: until the monitor's
     /// first update its path says nothing.
     static func follow() {
-        #if !os(tvOS)
         _ = monitor
-        #endif
     }
 
-    #if !os(tvOS)
+    /// Each time the device moves to another network, or loses or regains one, from now until
+    /// the stream is let go: a server out of reach on one network may answer on the next.
+    static func changes() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        watchers.withLock { $0.waiting[id] = continuation }
+        continuation.onTermination = { _ in watchers.withLock { _ = $0.waiting.removeValue(forKey: id) } }
+        _ = monitor
+        return stream
+    }
+
+    /// The streams of `changes()`, and the path last seen, which a change is told against.
+    private struct Watchers {
+        var waiting: [UUID: AsyncStream<Void>.Continuation] = [:]
+        var path: NWPath?
+    }
+
+    private static let watchers = Mutex(Watchers())
+
     private static let monitor: NWPathMonitor = {
         let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { path in
+            watchers.withLock { watchers in
+                // The first path is where the device already was, not a change.
+                defer { watchers.path = path }
+                guard let last = watchers.path, last != path else { return }
+                for continuation in watchers.waiting.values { continuation.yield() }
+            }
+        }
         monitor.start(queue: DispatchQueue(label: "net.vinnysaj.vinnyfin.streaming.path"))
         return monitor
     }()
-    #endif
 }

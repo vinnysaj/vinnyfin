@@ -58,6 +58,8 @@ private struct LibraryGrid: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(ServerReachability.self) private var reachability
+    @Environment(\.openDownloads) private var openDownloads
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.cardScale) private var cardScale
     /// How the menu and chips have refined the list; nil for a list that isn't a query.
@@ -124,7 +126,7 @@ private struct LibraryGrid: View {
                 if let columnCount {
                     if let items, let count = items.count {
                         grid(items, count: count, columns: columnCount)
-                    } else if items?.problem == nil {
+                    } else if items?.problem == nil, !reachability.isOutOfReach {
                         // The shapes of the first titles while the list starts loading.
                         placeholders(columns: columnCount)
                     }
@@ -180,8 +182,10 @@ private struct LibraryGrid: View {
         #endif
         // Run again each time the grid comes back on screen. Only a new sort or filter starts
         // over; the same list is loaded again behind the one showing and swapped in where it
-        // is, with what changed on a title's page meanwhile, as its watch state.
-        .task(id: source) {
+        // is, with what changed on a title's page meanwhile, as its watch state. While the
+        // server is out of reach the list stays as it is, and loads once it answers again.
+        .task(id: Loading(source: source, isServerOutOfReach: reachability.isOutOfReach)) {
+            guard !reachability.isOutOfReach else { return }
             if let items, items.source == source {
                 await load(startingOver: false, keepingIndex: true)
             } else {
@@ -192,12 +196,30 @@ private struct LibraryGrid: View {
         .onChange(of: refinements) { _, refinements in
             if let refinements { memory?.save(refinements) }
         }
-        .task { await loadFilters() }
-        .refreshable { await load(startingOver: false) }
+        .task(id: reachability.isOutOfReach) {
+            guard !reachability.isOutOfReach else { return }
+            await loadFilters()
+        }
+        // Out of reach, a pull asks the server again, and the list loads once it answers.
+        .refreshable {
+            if reachability.isOutOfReach {
+                await reachability.check()
+            } else {
+                await load(startingOver: false)
+            }
+        }
+    }
+
+    /// What loading the list depends on: its sort and filter, and whether the server answers.
+    private struct Loading: Equatable {
+        let source: JellyfinClient.ItemSource
+        let isServerOutOfReach: Bool
     }
 
     @ViewBuilder private var status: some View {
-        if let items, items.count == nil, let problem = items.problem {
+        if reachability.isOutOfReach, items?.count == nil {
+            offline
+        } else if let items, items.count == nil, let problem = items.problem {
             LoadFailureView(LoadFailure("Couldn't Load \(title)", message: problem)) {
                 Task { await load(startingOver: true) }
             }
@@ -216,6 +238,32 @@ private struct LibraryGrid: View {
                 ContentUnavailableView("No \(title)", systemImage: list.symbol, description: Text("Nothing here yet."))
             }
         }
+    }
+
+    /// In place of a list that hasn't loaded while the server is out of reach: why, Try Again,
+    /// and where there are downloads, the way to them.
+    private var offline: some View {
+        LoadFailureView(failure: LoadFailure("Can't Reach \(serverTitle)", message: offlineMessage), systemImage: "wifi.slash") {
+            Task { await reachability.check() }
+        } more: {
+            if let openDownloads {
+                Button("Go to Downloads") { openDownloads() }
+                    .accessibilityIdentifier("library.openDownloads")
+            }
+        }
+    }
+
+    private var serverTitle: String { session?.account.serverTitle ?? "the Server" }
+
+    /// "Showcase doesn't answer. It may be off, or on another network. What you've downloaded
+    /// still plays."
+    private var offlineMessage: String {
+        var sentences: [String] = []
+        if case .outOfReach(let absence) = reachability.state { sentences.append(absence.explanation(server: serverTitle)) }
+        #if !os(tvOS)
+        sentences.append("What you've downloaded still plays.")
+        #endif
+        return sentences.joined(separator: " ")
     }
 
     /// A page, or a refresh, that failed while the list is showing.
@@ -557,6 +605,8 @@ private struct LibraryGrid: View {
                 refreshProblem = nil
             }
         }
+        // Asks whether the server's there at all, rather than say only that the list didn't load.
+        if next.problem != nil { await reachability.check() }
     }
 
     /// The genres and libraries the menu narrows the list to, where the list doesn't fix them.

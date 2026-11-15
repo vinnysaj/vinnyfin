@@ -14,12 +14,21 @@ struct SearchLanding: View {
     #if os(tvOS)
     let rowLayout: RowPageLayout
     #endif
+    /// The server answers, so its libraries and genres are there to browse.
+    var browsesServer = true
     @Environment(\.session) private var session
 
     var body: some View {
         if !recentSearches.isEmpty {
             recents
         }
+        if browsesServer {
+            server
+        }
+    }
+
+    /// The libraries the tabs don't reach, and the genres.
+    @ViewBuilder private var server: some View {
         if !libraries.isEmpty {
             Shelf(title: "Libraries", items: libraries, cardWidth: Metrics.landscapeWidth) { library in
                 NavigationLink(value: BrowseList.library(library)) { LandscapeCard(item: library) }

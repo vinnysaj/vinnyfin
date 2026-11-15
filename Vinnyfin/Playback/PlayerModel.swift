@@ -247,6 +247,9 @@ final class PlayerModel: Identifiable {
     /// Try Again was pressed a moment ago. The failure stays up meanwhile, saying so, rather than
     /// flashing away and back when the new try fails at once.
     private(set) var isRetrying = false
+    /// Back from the background, the picture the system took away there is being rebuilt, until
+    /// its first frame (`restoreAfterBackground`).
+    private(set) var isRestoringPicture = false
     /// The viewer hid the up-next card, or stopped its countdown, for the episode on screen.
     private(set) var upNextDismissed = false
     let clock = PlaybackClock()
@@ -331,6 +334,11 @@ final class PlayerModel: Identifiable {
     /// The stream playing has shown its picture.
     @ObservationIgnored private var showedPicture = false
     @ObservationIgnored private var watchTask: Task<Void, Never>?
+    /// The app is in the background, where the engine plays the sound alone, unless Picture in
+    /// Picture or AirPlay shows the picture (`pictureOutside`). As the engine has it: from entering
+    /// the background until active again.
+    @ObservationIgnored private var isInBackground = false
+    @ObservationIgnored private var appSubscriptions = Set<AnyCancellable>()
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
     @ObservationIgnored private var hasStarted = false
@@ -379,6 +387,21 @@ final class PlayerModel: Identifiable {
         title = request.title
         startedItemId = if case .item(let id, _) = request.source { id } else { nil }
         volume = PlayerVolume(level: engine.volume)
+        followApp()
+    }
+
+    /// Follows the app in and out of the background, for the watches (`watchConnection`).
+    private func followApp() {
+        #if os(iOS) || os(tvOS)
+        isInBackground = UIApplication.shared.applicationState == .background
+        let center = NotificationCenter.default
+        center.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { [weak self] _ in self?.isInBackground = true }
+            .store(in: &appSubscriptions)
+        center.publisher(for: UIApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.isInBackground = false }
+            .store(in: &appSubscriptions)
+        #endif
     }
 
     var isTranscoding: Bool { current?.isTranscode ?? false }
@@ -486,14 +509,21 @@ final class PlayerModel: Identifiable {
         }
     }
 
-    /// Rebuilds the picture after the system took the video pipeline away in the background.
+    /// Rebuilds the picture after the system took the video pipeline away in the background. Until
+    /// its first frame the title's picture stands in (`isRestoringPicture`), as when it started.
     func restoreAfterBackground() async {
         guard session != nil, engine.needsForegroundVideoRestore else { return }
+        isRestoringPicture = true
+        // The rebuild starts the stream over: its wait for a picture says nothing of the connection.
+        connectionWatch.restart()
+        pictureWatch = PictureWatch()
         do {
             try await engine.reloadAtCurrentPosition()
         } catch is CancellationError {
+            isRestoringPicture = false
             return
         } catch {
+            isRestoringPicture = false
             fail(error, engine: engine.errorInfo)
         }
     }
@@ -627,6 +657,7 @@ final class PlayerModel: Identifiable {
         isLoaded = false
         isPresenting = false
         showedPicture = false
+        isRestoringPicture = false
         pictureOffer = nil
         startedReporting = false
         lastReportedPaused = nil
@@ -1603,7 +1634,9 @@ final class PlayerModel: Identifiable {
     /// Hotspot. It also offers a lighter stream while sound plays with no picture (`PictureWatch`),
     /// and counts what a reconnected transcode has played (`TranscodeReconnect`). The watches start
     /// over with each stream; the next playback starts at the streaming limit again, which is lower
-    /// once enough step downs teach this device a bitrate to stay under.
+    /// once enough step downs teach this device a bitrate to stay under. In the background with the
+    /// picture nowhere, and while the picture is rebuilt after it, the watches start over each
+    /// second rather than sample (`ConnectionWatch.samples`).
     private func watchConnection() {
         connectionWatch = ConnectionWatch(isTranscode: current?.isTranscode ?? false)
         recoveryWatch = RecoveryWatch(failedStepUps: failedStepUps)
@@ -1614,8 +1647,10 @@ final class PlayerModel: Identifiable {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 if self.status == .playing { self.transcodeReconnect.played(1) }
-                self.watchPicture()
-                guard self.settings.adaptiveQuality, self.qualityPick == nil else {
+                let samples = ConnectionWatch.samples(inBackground: self.isInBackground, pictureShownOutside: !self.pictureOutside.isEmpty,
+                                                      restoringPicture: self.isRestoringPicture)
+                if samples { self.watchPicture() } else { self.pictureWatch = PictureWatch() }
+                guard samples, self.settings.adaptiveQuality, self.qualityPick == nil else {
                     self.connectionWatch.restart()
                     self.recoveryWatch = RecoveryWatch(failedStepUps: self.failedStepUps)
                     lastPosition = nil
@@ -1878,6 +1913,7 @@ final class PlayerModel: Identifiable {
     /// The stream's first frame is up: what was said while there was none is done with.
     private func pictureCameUp() {
         showedPicture = true
+        isRestoringPicture = false
         pictureOffer = nil
         guard isReconnecting else { return }
         isReconnecting = false

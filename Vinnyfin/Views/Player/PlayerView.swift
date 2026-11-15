@@ -494,9 +494,9 @@ struct PlayerView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await model.restoreAfterBackground() }
-            // Back from the background the picture can take a while to return; the controls show
-            // meanwhile that playback carries on.
-            if model.isPlaying { showControls() }
+            // Back from the background the picture can take a while to return, and the playback
+            // can be waiting on its buffer: the controls show meanwhile that it's still there.
+            if model.current != nil { showControls() }
         }
         .onChange(of: model.notice) { _, notice in
             if let notice { announce(notice.text) }
@@ -928,12 +928,13 @@ struct PlayerView: View {
     }
 
     /// Why the title's picture stands in for the video, when it does: the title is starting, or
-    /// AirPlay has the video on another screen.
+    /// its picture is being rebuilt after the background, which looks the same; or AirPlay has the
+    /// video on another screen.
     private var pictureCover: PictureCover? {
         #if os(iOS) || os(macOS)
         if externalPlayback.isActive { return .airPlay(receiver: externalPlayback.receiverName) }
         #endif
-        return isStartingTitle ? .starting : nil
+        return isStartingTitle || model.isRestoringPicture ? .starting : nil
     }
 
     @ViewBuilder private func coverCaption(_ cover: PictureCover) -> some View {

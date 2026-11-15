@@ -11,18 +11,24 @@ extension View {
 
 private struct UndoToasts: ViewModifier {
     @Environment(AppMessages.self) private var messages
+    /// The tab is the one on screen. The others keep their views, and would each show the toast,
+    /// and say it to VoiceOver, too.
+    @State private var isOnScreen = false
 
     func body(content: Content) -> some View {
+        let offer = isOnScreen ? messages.undoOffer : nil
         content
+            .onAppear { isOnScreen = true }
+            .onDisappear { isOnScreen = false }
             .overlay(alignment: .bottom) {
-                if let offer = messages.undoOffer {
+                if let offer {
                     UndoToast(offer: offer) { messages.undo(offer.id) } expire: { messages.expireUndo(offer.id) }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(.snappy, value: messages.undoOffer?.id)
+            .animation(.snappy, value: offer?.id)
             #if os(tvOS)
-            .onPlayPauseCommand(perform: messages.undoOffer.map { offer in { messages.undo(offer.id) } })
+            .onPlayPauseCommand(perform: offer.map { offer in { messages.undo(offer.id) } })
             #endif
     }
 }

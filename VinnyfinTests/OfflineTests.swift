@@ -516,6 +516,16 @@ struct PlayableOfflineTests {
     @Test func playsWhatsDownloadedWhileTheServerIsOutOfReach() async {
         #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: false, downloaded: true) == true)
     }
+
+    /// A show's Shuffle and its menu's Play ask the server for the episodes; its page's Play plays
+    /// the episode next, which may be downloaded.
+    @Test func aShowsControlsWaitForTheServerButForADownloadedEpisode() async {
+        let show = Offline.item("s1", "Starfall Station", type: "Series")
+        let next = Offline.item("e2", "Episode 2", type: "Episode", series: "Starfall Station")
+        #expect(await isOn(show, serverAnswers: false, downloaded: true) == false)
+        #expect(await isOn(next, serverAnswers: false, downloaded: true) == true)
+        #expect(await isOn(next, serverAnswers: false, downloaded: false) == false)
+    }
 }
 
 /// The offline banner's words: "Offline" on its own line, so the rest never cuts it short.

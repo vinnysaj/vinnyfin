@@ -52,7 +52,7 @@ struct DownloadedCard: View {
     /// "S1, E2 · Dead Reckoning" for an episode, the year for a movie.
     private var detail: String {
         guard item.isEpisode else { return item.premiereYearText ?? "" }
-        return [LandscapeCard.shortCode(of: item), item.name].compactMap(\.self).joined(separator: " · ")
+        return [item.shortEpisodeCode, item.name].compactMap(\.self).joined(separator: " · ")
     }
 
     private var spokenEpisode: String {

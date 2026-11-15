@@ -87,6 +87,15 @@ struct RootView: View {
         } message: {
             Text(messages.current ?? "")
         }
+        .alert(messages.confirmation?.title ?? "", isPresented: Binding(get: { messages.confirmation != nil },
+                                                                        set: { if !$0 { messages.confirmation = nil } }),
+               presenting: messages.confirmation) { confirmation in
+            Button(confirmation.action, action: confirmation.perform)
+                .accessibilityIdentifier("confirmation.confirm")
+            Button("Cancel", role: .cancel) {}
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
         .alert("Save Password to iCloud?", isPresented: Binding(get: { knownServers.passwordOffer != nil },
                                                                  set: { if !$0 { knownServers.passwordOffer = nil } }),
                presenting: knownServers.passwordOffer) { offer in
@@ -381,18 +390,21 @@ struct MainTabs: View {
         TabView(selection: $navigation.selection) {
             Tab("Home", systemImage: "house", value: .home) {
                 HomeView(path: $navigation.home) { navigation.selection = .downloads }
+                    .undoToasts()
             }
             Tab("Movies", systemImage: "film", value: .movies) {
                 NavigationStack(path: $navigation.movies) {
                     LibraryGridView(list: .movies).itemDestinations()
                 }
                 .opensTitles(on: $navigation.movies)
+                .undoToasts()
             }
             Tab("Shows", systemImage: "tv", value: .shows) {
                 NavigationStack(path: $navigation.shows) {
                     LibraryGridView(list: .shows).itemDestinations()
                 }
                 .opensTitles(on: $navigation.shows)
+                .undoToasts()
             }
             #if os(tvOS)
             Tab("Sounds", systemImage: "waveform", value: .sounds) {
@@ -404,6 +416,7 @@ struct MainTabs: View {
             #else
             Tab("Downloads", systemImage: "arrow.down.circle", value: .downloads) {
                 DownloadsView(path: $navigation.downloads)
+                    .undoToasts()
             }
             .badge(downloads.jobs.count { $0.status == .active })
             #endif
@@ -415,11 +428,14 @@ struct MainTabs: View {
             }
             #endif
             Tab(value: .search, role: .search) {
-                #if os(tvOS)
-                SearchView(path: $navigation.search)
-                #else
-                SearchView(fieldRequests: searchFieldRequests, path: $navigation.search)
-                #endif
+                Group {
+                    #if os(tvOS)
+                    SearchView(path: $navigation.search)
+                    #else
+                    SearchView(fieldRequests: searchFieldRequests, path: $navigation.search)
+                    #endif
+                }
+                .undoToasts()
             }
         }
         .tabViewStyle(.sidebarAdaptable)

@@ -29,9 +29,8 @@ struct PlayElsewhereButton: View {
             } label: {
                 Label(PlayElsewhereSheet.title, systemImage: PlayElsewhereSheet.symbol(sharePlay))
             }
-            .buttonStyle(.platformGlass)
-            .controlSize(.large)
-            .labelStyle(.iconOnly)
+            .titleActionStyle()
+            .actionCaption(PlayElsewhereSheet.caption)
             .help(PlayElsewhereSheet.title)
             .accessibilityIdentifier("playElsewhere")
             .sheet(isPresented: $isShowing) {
@@ -64,8 +63,11 @@ struct PlayElsewhereSheet: View {
 
     #if os(iOS) || os(macOS)
     static let title = "Play On or SharePlay"
+    /// Under its button on a title's page.
+    static let caption = "Play On"
     #else
     static let title = "SharePlay"
+    static let caption = "SharePlay"
     #endif
 
     static func isOffered(_ sharePlay: SharePlay) -> Bool {

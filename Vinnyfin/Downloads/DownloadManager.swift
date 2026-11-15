@@ -1061,7 +1061,12 @@ final class DownloadManager {
     }
 
     /// The downloaded episode that comes after `episode` in its show, for playing on offline.
-    func downloadedEpisode(after episode: JellyfinItem) -> JellyfinItem? {
+    func downloadedEpisode(after episode: JellyfinItem, in order: PlayOrder? = nil) -> JellyfinItem? {
+        if let order, order.contains(episode.id) {
+            let downloaded = Dictionary(jobs.compactMap { $0.status == .completed ? $0.item : nil }.map { ($0.id, $0) },
+                                        uniquingKeysWith: { first, _ in first })
+            return order.ids(after: episode.id).lazy.compactMap { downloaded[$0] }.first
+        }
         guard let seriesId = episode.seriesId else { return nil }
         let current = Self.watchingOrder(episode)
         return downloadedEpisodes(seriesId: seriesId).first { Self.watchingOrder($0) > current }

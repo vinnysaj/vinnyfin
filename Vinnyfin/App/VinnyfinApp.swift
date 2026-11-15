@@ -186,6 +186,7 @@ final class AppDelegate: NSObject {
 
     private func launched() {
         ImageCache.configure()
+        reachability.outOfReachChanged = { ImageCache.serverOutOfReach($0) }
         StreamingNetwork.follow()
         accounts.forgetting = { HomeCache.drop(for: $0) }
         HomeCache.keepOnly(accounts.saved)

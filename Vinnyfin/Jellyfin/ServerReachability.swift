@@ -33,11 +33,19 @@ final class ServerReachability {
     }
 
     /// What the server last said, for the sign-in `signIn`.
-    private(set) var state = State.unknown
+    private(set) var state = State.unknown {
+        didSet {
+            if state != oldValue { outOfReachChanged(isOutOfReach ? session?.client.serverURL : nil) }
+        }
+    }
     /// The sign-in `state` is about, its `AccountStore.Account.tokenKey`.
     private(set) var signIn: String?
     /// A question is out to the server.
     private(set) var isChecking = false
+
+    /// Told the address of the server as it goes out of reach, and nil as it answers again, or
+    /// as it's asked anew for another sign-in.
+    @ObservationIgnored var outOfReachChanged: (URL?) -> Void = { _ in }
 
     /// Whether the server is known not to answer. Until it has been asked, it's taken to answer.
     var isOutOfReach: Bool {

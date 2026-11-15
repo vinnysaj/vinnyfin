@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import Nuke
 import SwiftUI
 import Synchronization
 import Testing
@@ -157,6 +159,20 @@ struct ServerReachabilityTests {
         // Answering, it isn't asked again until something happens.
         try? await Task.sleep(for: .milliseconds(200))
         #expect(server.asked == 3)
+    }
+
+    @Test func tellsTheImagesWhichServerIsOutOfReachAndWhenItAnswers() async {
+        final class Told {
+            var servers: [URL?] = []
+        }
+        let server = FakeServer(.fails(URLError(.timedOut)), .answers)
+        let reachability = reachability(server, retryInterval: .milliseconds(50))
+        let told = Told()
+        reachability.outOfReachChanged = { told.servers.append($0) }
+        let following = Task { await reachability.follow(Offline.session(Offline.alex, token: "a")) }
+        defer { following.cancel() }
+        #expect(await Offline.until { reachability.state == .reachable })
+        #expect(told.servers == [Offline.alex.serverURL, nil])
     }
 
     @Test func asksAgainWhenTheNetworkChanges() async {
@@ -526,5 +542,169 @@ struct OfflineBannerWordsTests {
         #expect(words.detail.hasSuffix(" isn't connected to the internet."))
         #expect(OfflineBanner.Words(showsDownloads: false, absence: .deviceOffline, server: "Showcase").shortDetail
                 == "No internet connection.")
+    }
+}
+
+/// Images from a server out of reach: what the caches have shows, and the rest fail at once
+/// rather than wait out the network's timeout, so a title's name stands in for its logo.
+nonisolated struct OfflineImagesTests {
+    private static let server = URL(string: "http://nas.local:8096")!
+    private static let logo = URL(string: "http://nas.local:8096/Items/m1/Images/Logo?maxWidth=900&quality=90&tag=a")!
+    private static let poster = URL(string: "http://nas.local:8096/Items/m1/Images/Primary?maxWidth=400&quality=90&tag=b")!
+    private static let elsewhere = URL(string: "https://images.example.com/m1.png")!
+
+    /// A red square, as PNG.
+    private static let picture: Data = {
+        let context = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 0,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        CGImageDestinationFinalize(destination)
+        return data as Data
+    }()
+
+    /// A network that sends the picture for each load, or one that never answers, as a server
+    /// out of reach doesn't, until the load is cancelled.
+    private nonisolated final class FakeNetwork: DataLoading {
+        private struct Cancel: Cancellable {
+            let action: @Sendable () -> Void
+            func cancel() { action() }
+        }
+
+        private let answers: Bool
+        private let state = Mutex<(asked: [URL], waiting: [UUID: @Sendable ((any Error)?) -> Void])>(([], [:]))
+
+        init(answers: Bool) {
+            self.answers = answers
+        }
+
+        var asked: [URL] { state.withLock { $0.asked } }
+
+        func loadData(with request: URLRequest, didReceiveData: @escaping @Sendable (Data, URLResponse) -> Void,
+                      completion: @escaping @Sendable ((any Error)?) -> Void) -> any Cancellable {
+            let url = request.url!
+            state.withLock { $0.asked.append(url) }
+            if answers {
+                didReceiveData(OfflineImagesTests.picture, HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                completion(nil)
+                return Cancel {}
+            }
+            let id = UUID()
+            state.withLock { $0.waiting[id] = completion }
+            // As URLSession does, a cancelled load ends with an error.
+            return Cancel { [self] in
+                state.withLock { $0.waiting.removeValue(forKey: id) }?(URLError(.cancelled))
+            }
+        }
+    }
+
+    /// The pictures on disk, by key.
+    private nonisolated final class FakeDisk: DataCaching {
+        private let stored = Mutex<[String: Data]>([:])
+        func cachedData(for key: String) -> Data? { stored.withLock { $0[key] } }
+        func containsData(for key: String) -> Bool { cachedData(for: key) != nil }
+        func storeData(_ data: Data, for key: String) { stored.withLock { $0[key] = data } }
+        func removeData(for key: String) { stored.withLock { _ = $0.removeValue(forKey: key) } }
+        func removeAll() { stored.withLock { $0.removeAll() } }
+    }
+
+    /// The errors loads ended with, by address.
+    private nonisolated final class Endings: Sendable {
+        private let errors = Mutex<[URL: any Error]>([:])
+        func end(_ url: URL, _ error: (any Error)?) { errors.withLock { $0[url] = error } }
+        subscript(url: URL) -> (any Error)? { errors.withLock { $0[url] } }
+    }
+
+    /// The error a load from `loader` ended with; nil when it loaded.
+    private static func ending(of url: URL, from loader: ServerImageLoader) async -> (any Error)? {
+        await withCheckedContinuation { continuation in
+            _ = loader.loadData(with: URLRequest(url: url), didReceiveData: { _, _ in }) { error in
+                continuation.resume(returning: error)
+            }
+        }
+    }
+
+    @Test func asksNothingOfAServerOutOfReach() async {
+        let network = FakeNetwork(answers: true)
+        let loader = ServerImageLoader(base: network)
+        loader.serverOutOfReach(Self.server)
+        #expect(await Self.ending(of: Self.logo, from: loader) is ImageServerOutOfReach)
+        #expect(network.asked.isEmpty)
+        // Pictures from elsewhere still load.
+        #expect(await Self.ending(of: Self.elsewhere, from: loader) == nil)
+        #expect(network.asked == [Self.elsewhere])
+    }
+
+    @Test func asksTheServerAgainOnceItAnswers() async {
+        let network = FakeNetwork(answers: true)
+        let loader = ServerImageLoader(base: network)
+        loader.serverOutOfReach(Self.server)
+        loader.serverOutOfReach(nil)
+        #expect(await Self.ending(of: Self.logo, from: loader) == nil)
+        #expect(network.asked == [Self.logo])
+    }
+
+    @Test func cutsShortWhatsLoadingFromTheServerAsItGoesOutOfReach() {
+        let network = FakeNetwork(answers: false)
+        let loader = ServerImageLoader(base: network)
+        let endings = Endings()
+        for url in [Self.logo, Self.elsewhere] {
+            _ = loader.loadData(with: URLRequest(url: url), didReceiveData: { _, _ in }) { endings.end(url, $0) }
+        }
+        #expect(network.asked.count == 2)
+        loader.serverOutOfReach(Self.server)
+        #expect(endings[Self.logo] is ImageServerOutOfReach)
+        // What's loading from elsewhere is left to finish.
+        #expect(endings[Self.elsewhere] == nil)
+    }
+
+    @Test func knowsWhatsOnTheServer() {
+        #expect(ServerImageLoader.isOn(Self.server, Self.logo))
+        #expect(!ServerImageLoader.isOn(Self.server, URL(string: "http://nas.local:8920/Items/m1/Images/Logo")!))
+        #expect(!ServerImageLoader.isOn(Self.server, URL(string: "https://nas.local:8096/Items/m1/Images/Logo")!))
+        #expect(!ServerImageLoader.isOn(Self.server, URL(string: "http://other.local:8096/Items/m1/Images/Logo")!))
+        // A server behind a proxy, under a path of its own.
+        let proxied = URL(string: "https://example.com/jellyfin")!
+        #expect(ServerImageLoader.isOn(proxied, URL(string: "https://example.com/jellyfin/Items/m1/Images/Logo")!))
+        #expect(ServerImageLoader.isOn(URL(string: "https://example.com/jellyfin/")!, URL(string: "https://example.com/jellyfin/Items/m1")!))
+        #expect(!ServerImageLoader.isOn(proxied, URL(string: "https://example.com/jellyfinx/Items/m1")!))
+        #expect(!ServerImageLoader.isOn(proxied, URL(string: "https://example.com/Items/m1")!))
+    }
+
+    @Test func showsWhatsCachedAndFailsTheRestAtOnceWhileTheServerIsOutOfReach() async throws {
+        let network = FakeNetwork(answers: false)
+        let loader = ServerImageLoader(base: network)
+        var configuration = ImagePipeline.Configuration()
+        configuration.dataLoader = loader
+        configuration.dataCache = FakeDisk()
+        configuration.imageCache = nil
+        let pipeline = ImagePipeline(configuration: configuration)
+        pipeline.cache.storeCachedData(Self.picture, for: ImageRequest(url: Self.logo))
+        loader.serverOutOfReach(Self.server)
+
+        let cached = try await pipeline.image(for: Self.logo)
+        #expect(cached.size.width > 0)
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await pipeline.image(for: Self.poster)
+            Issue.record("Loaded a poster that isn't cached from a server out of reach")
+        } catch {
+            #expect(clock.now - started < .seconds(1))
+            // Loaded again as the server answers, not on a timer meanwhile.
+            #expect(Artwork.waitsForServer(error))
+            #expect(!Artwork.isWorthRetrying(error))
+        }
+        #expect(network.asked.isEmpty)
+    }
+
+    @Test func onlyAFailureForTheServerBeingOutOfReachWaitsForIt() {
+        #expect(Artwork.waitsForServer(ImagePipeline.Error.dataLoadingFailed(error: ImageServerOutOfReach())))
+        #expect(!Artwork.waitsForServer(ImagePipeline.Error.dataLoadingFailed(error: URLError(.timedOut))))
+        #expect(!Artwork.waitsForServer(ImagePipeline.Error.dataLoadingFailed(error: DataLoader.Error.statusCodeUnacceptable(404))))
+        #expect(!Artwork.waitsForServer(ImagePipeline.Error.cancelled))
     }
 }

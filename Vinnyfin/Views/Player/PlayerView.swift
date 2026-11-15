@@ -98,6 +98,7 @@ struct PlayerView: View {
     @FocusState private var hasKeyboardFocus: Bool
     #endif
     #if os(iOS)
+    @Environment(AppSettings.self) private var settings
     @State private var orientationLock = PlayerOrientationLock()
     /// The fold across the screen of an iPhone Duo standing half open, in window coordinates.
     @State private var fold: CGRect?
@@ -347,8 +348,14 @@ struct PlayerView: View {
         .animation(.smooth, value: fold)
         .environment(orientationLock)
         .onHingeChange { _, context in orientationLock.hingeChanged(isHalfOpen: context.hinge?.status == .partiallyOpen) }
-        .onAppear { orientationLock.start() }
+        .onAppear {
+            orientationLock.start(landscapeTitles: settings.playsVideosInLandscape)
+            if let pictureShape { orientationLock.pictureShaped(pictureShape) }
+        }
         .onDisappear { orientationLock.stop() }
+        .onChange(of: pictureShape) { _, shape in
+            if let shape { orientationLock.pictureShaped(shape) }
+        }
         #endif
         #if os(macOS)
         .onContinuousHover { phase in
@@ -1024,6 +1031,14 @@ struct PlayerView: View {
         proxy.reservedRegions(kind: .division)
             .first { $0.isActive && $0.frame.width > $0.frame.height }?
             .frame
+    }
+
+    /// The picture's shape as soon as it's known, for the player to turn to it: the version's, as
+    /// the server lists it, until the stream's own.
+    private var pictureShape: CGSize? {
+        if let size = model.videoSize { return size }
+        guard let video = model.current?.mediaSource?.videoStream, let width = video.width, let height = video.height else { return nil }
+        return CGSize(width: width, height: height)
     }
 
     /// Spreading two fingers fills the screen, cutting the picture's edges; pinching fits it.

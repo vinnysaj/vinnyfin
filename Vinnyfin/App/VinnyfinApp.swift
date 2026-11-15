@@ -197,6 +197,7 @@ final class AppDelegate: NSObject {
         Task { await cloudSync.run() }
         let knownServers = knownServers
         Task { await knownServers.followSignIns() }
+        Task { await SignInSurfaces.follow(accounts) }
         let player = player
         player.sharePlay = sharePlay
         #if os(macOS)
@@ -232,6 +233,8 @@ final class AppDelegate: NSObject {
         #if os(iOS) || os(macOS)
         let widgetDownloads = widgetDownloads
         AppDependencyManager.shared.add(dependency: widgetDownloads as any DownloadsRunning)
+        let resumer = ContinueWatchingResumer(accounts: accounts, links: links)
+        AppDependencyManager.shared.add(dependency: resumer as any WatchingResumer)
         Task { await widgetDownloads.run() }
         #endif
         #if os(iOS) || os(visionOS)

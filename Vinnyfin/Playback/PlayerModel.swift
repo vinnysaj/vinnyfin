@@ -950,6 +950,7 @@ final class PlayerModel: Identifiable {
     }
 
     private func audioTracksChanged(_ tracks: [TrackInfo], active: Int?) {
+        defer { publishNowPlayingCard() }
         if let transcode = current?.transcode, let source = current?.mediaSource {
             audioOptions = source.audioStreams.compactMap { stream in
                 stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.displayTitle) }
@@ -965,6 +966,7 @@ final class PlayerModel: Identifiable {
     }
 
     private func subtitleTracksChanged(_ tracks: [TrackInfo], active: Int?) {
+        defer { publishNowPlayingCard() }
         if let transcode = current?.transcode, let source = current?.mediaSource {
             subtitleOptions = source.subtitleStreams.compactMap { stream in
                 stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.codec?.uppercased()) }
@@ -2325,7 +2327,9 @@ final class PlayerModel: Identifiable {
     /// AirPlay receivers: the title, an episode's show and number, its description, and its
     /// picture once that's loaded.
     private func setNowPlaying(_ playback: ResolvedPlayback) {
-        var info: [String: Any] = [MPMediaItemPropertyTitle: playback.title]
+        // A video, rather than the song the system takes Now Playing to be without it.
+        var info: [String: Any] = [MPMediaItemPropertyTitle: playback.title,
+                                   MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue]
         if let item = playback.item, item.isEpisode {
             if let show = item.seriesName { info[MPMediaItemPropertyArtist] = show }
             if let number = Self.nowPlayingEpisodeNumber(item) { info[MPMediaItemPropertyAlbumTitle] = number }
@@ -2334,12 +2338,8 @@ final class PlayerModel: Identifiable {
         }
         let artwork = playback.item.flatMap { item in nowPlayingArtwork?.itemId == item.id ? nowPlayingArtwork : nil }
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork.artwork }
-        #if os(iOS) || os(tvOS)
-        engine.setVideoNowPlayingInfo(info)
-        #else
         nowPlayingIdentity = info
-        publishNowPlaying()
-        #endif
+        publishNowPlayingCard()
         var metadata = [Self.metadataItem(.commonIdentifierTitle, playback.title as NSString)]
         if let overview = playback.item?.overview, !overview.isEmpty {
             metadata.append(Self.metadataItem(.commonIdentifierDescription, overview as NSString))
@@ -2393,9 +2393,55 @@ final class PlayerModel: Identifiable {
         return item
     }
 
-    #if !(os(iOS) || os(tvOS))
+    /// What plays, for Now Playing's card: its title, show, number and picture (`setNowPlaying`).
     @ObservationIgnored private var nowPlayingIdentity: [String: Any] = [:]
 
+    /// The card: what plays, with the audio tracks and subtitles there are to choose among and
+    /// those chosen (`NowPlayingLanguages`).
+    private var nowPlayingCard: [String: Any] {
+        var info = nowPlayingIdentity
+        let audio = languageOptions(.audio)
+        let subtitles = languageOptions(.subtitles)
+        var groups: [MPNowPlayingInfoLanguageOptionGroup] = []
+        if !audio.isEmpty {
+            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: audio.map(NowPlayingLanguages.mediaPlayerOption),
+                                                              defaultLanguageOption: nil, allowEmptySelection: false))
+        }
+        if !subtitles.isEmpty {
+            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: subtitles.map(NowPlayingLanguages.mediaPlayerOption),
+                                                              defaultLanguageOption: nil, allowEmptySelection: true))
+        }
+        let chosen = audio.filter { $0.trackId == selectedAudio } + subtitles.filter { $0.trackId == selectedSubtitle }
+        info[MPNowPlayingInfoPropertyAvailableLanguageOptions] = groups
+        info[MPNowPlayingInfoPropertyCurrentLanguageOptions] = chosen.map(NowPlayingLanguages.mediaPlayerOption)
+        return info
+    }
+
+    /// The audio tracks or the subtitles to choose among, as Now Playing lists them: the engine's
+    /// tracks, or a transcode's, the server's streams.
+    private func languageOptions(_ kind: NowPlayingLanguages.Kind) -> [NowPlayingLanguages.Option] {
+        let options = kind == .audio ? audioOptions : subtitleOptions
+        let candidates: [TrackChooser.Candidate]
+        if isTranscoding, let source = current?.mediaSource {
+            candidates = (kind == .audio ? source.audioStreams : source.subtitleStreams).compactMap(TrackChooser.Candidate.init)
+        } else {
+            candidates = (kind == .audio ? engine.audioTracks : engine.subtitleTracks).map(TrackChooser.Candidate.init)
+        }
+        return options.compactMap { option in
+            candidates.first { $0.id == option.id }.map { NowPlayingLanguages.option(kind, $0, title: option.title) }
+        }
+    }
+
+    /// Publishes the card, as what plays or its tracks change.
+    private func publishNowPlayingCard() {
+        #if os(iOS) || os(tvOS)
+        engine.setVideoNowPlayingInfo(nowPlayingCard)
+        #else
+        publishNowPlaying()
+        #endif
+    }
+
+    #if !(os(iOS) || os(tvOS))
     /// The system keeps the clock running from the elapsed time and rate given here, so it is
     /// republished whenever either changes.
     private func publishNowPlaying() {
@@ -2405,7 +2451,7 @@ final class PlayerModel: Identifiable {
             center.playbackState = .stopped
             return
         }
-        var info = nowPlayingIdentity
+        var info = nowPlayingCard
         info[MPMediaItemPropertyPlaybackDuration] = duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = clock.time
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(rate) : 0
@@ -2434,7 +2480,11 @@ final class PlayerModel: Identifiable {
         unregisterRemoteCommands()
         func add(_ command: MPRemoteCommand, _ handler: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
             command.isEnabled = true
-            commandTargets.append((command, command.addTarget(handler: handler)))
+            commandTargets.append((command, command.addTarget { event in
+                // What Siri and the remotes send, for a test on a device to read.
+                Self.log.notice("Remote command: \(Self.describe(event), privacy: .public)")
+                return handler(event)
+            }))
         }
         if let center = commandCenter {
             add(center.togglePlayPauseCommand) { [weak self] _ in self?.togglePlayPause(); return .success }
@@ -2471,7 +2521,11 @@ final class PlayerModel: Identifiable {
             self?.setRate(PlaybackSpeed.nearest(to: event.playbackRate))
             return .success
         }
-        ownedCommands = [center.changePlaybackRateCommand]
+        // The audio and subtitles Now Playing lists (`nowPlayingCard`), for Siri's "Turn on French
+        // subtitles" and "Turn off captions", and the remotes that list them.
+        add(center.enableLanguageOptionCommand) { [weak self] event in self?.changeLanguageOption(event, on: true) ?? .commandFailed }
+        add(center.disableLanguageOptionCommand) { [weak self] event in self?.changeLanguageOption(event, on: false) ?? .commandFailed }
+        ownedCommands = [center.changePlaybackRateCommand, center.enableLanguageOptionCommand, center.disableLanguageOptionCommand]
         // An episode's neighbours, for a headphone's double and triple press, Siri's "next
         // episode" and Control Center. The episode after it is found once it plays, so the
         // command asks for it when it comes.
@@ -2487,6 +2541,59 @@ final class PlayerModel: Identifiable {
             return .success
         }
         ownedCommands += [center.nextTrackCommand, center.previousTrackCommand]
+    }
+
+    /// Turns on the audio or subtitles a command's option asks for, or with `on` false the
+    /// subtitles off. The automatic subtitles option, as Siri's "Turn on subtitles" may send, turns
+    /// on the ones the subtitle key would.
+    private func changeLanguageOption(_ event: MPRemoteCommandEvent, on: Bool) -> MPRemoteCommandHandlerStatus {
+        guard let asked = (event as? MPChangeLanguageOptionCommandEvent)?.languageOption else { return .commandFailed }
+        let kind: NowPlayingLanguages.Kind = asked.languageOptionType == .audible ? .audio : .subtitles
+        switch (kind, on) {
+        case (.audio, false):
+            // There's no playing without a sound track.
+            return .commandFailed
+        case (.subtitles, false):
+            chooseSubtitle(nil)
+            return .success
+        case (.subtitles, true) where asked.isAutomaticLegibleLanguageOption():
+            if selectedSubtitle == nil { toggleSubtitles() }
+            return selectedSubtitle == nil && subtitleOptions.isEmpty ? .noSuchContent : .success
+        case (.audio, true) where asked.isAutomaticAudibleLanguageOption():
+            return .success
+        default:
+            guard let id = NowPlayingLanguages.trackId(askedFor: asked.identifier, kind: kind, languageTag: asked.languageTag ?? "und",
+                                                       characteristics: asked.languageOptionCharacteristics ?? [],
+                                                       among: languageOptions(kind)) else { return .noSuchContent }
+            if kind == .audio { chooseAudio(id) } else { chooseSubtitle(id) }
+            return .success
+        }
+    }
+
+    /// A remote command for the log: what it is, and what it asks.
+    private nonisolated static func describe(_ event: MPRemoteCommandEvent) -> String {
+        let command = String(describing: event.command)
+        switch event {
+        case let skip as MPSkipIntervalCommandEvent:
+            return "\(command), \(skip.interval) s"
+        case let position as MPChangePlaybackPositionCommandEvent:
+            return "\(command), to \(position.positionTime) s"
+        case let rate as MPChangePlaybackRateCommandEvent:
+            return "\(command), \(rate.playbackRate)×"
+        case let seek as MPSeekCommandEvent:
+            return "\(command), \(seek.type == .beginSeeking ? "begin" : "end")"
+        case let language as MPChangeLanguageOptionCommandEvent:
+            let option = language.languageOption
+            return """
+                \(command), \(option.languageOptionType == .audible ? "audio" : "subtitles") \
+                "\(option.displayName ?? "")" \(option.languageTag ?? "?") \(option.identifier ?? "-") \
+                \(option.languageOptionCharacteristics ?? []) automatic: \
+                \(option.isAutomaticLegibleLanguageOption() || option.isAutomaticAudibleLanguageOption()), \
+                setting \(language.setting.rawValue)
+                """
+        default:
+            return command
+        }
     }
 
     #if os(tvOS)

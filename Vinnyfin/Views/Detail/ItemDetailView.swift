@@ -31,6 +31,7 @@ extension View {
     func itemDestinations() -> some View {
         navigationDestination(for: JellyfinItem.self) { ItemDestination(item: $0) }
             .navigationDestination(for: BrowseList.self) { LibraryGridView(list: $0) }
+            .navigationDestination(for: Person.self) { PersonView(person: $0).id($0.id) }
     }
 
     /// Lets the stack's pages open a title as its next page where a link can't be, such as from
@@ -155,8 +156,8 @@ struct ItemDetailView: View {
                         #if os(tvOS)
                         .pageRow("scenes", in: rowLayout)
                         #endif
-                    if let people = detail?.people {
-                        CastShelf(people: people)
+                    if let detail {
+                        CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
                             #if os(tvOS)
                             .pageRow("cast", in: rowLayout)
                             #endif

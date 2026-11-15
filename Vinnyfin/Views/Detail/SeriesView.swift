@@ -97,7 +97,9 @@ struct SeriesView: View {
                             episodeList
                         }
                     }
-                    if let people = detail?.people { CastShelf(people: people) }
+                    if let detail {
+                        CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
+                    }
                     if !similar.isEmpty { MoreLikeThisShelf(title: shown, titles: $similar) }
                 }
                 .padding(.bottom, Metrics.edge)

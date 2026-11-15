@@ -67,44 +67,6 @@ struct TopResultCard: View {
     }
 }
 
-/// Someone a search found: their picture in a circle and their name, leading to what they're in.
-struct PersonCard: View {
-    let person: Person
-    @State private var artworkHeight: CGFloat = 0
-    @Environment(\.session) private var session
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    static var width: CGFloat {
-        #if os(tvOS)
-        160
-        #else
-        88
-        #endif
-    }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Artwork(url: session?.person(person), aspectRatio: 1, cornerRadius: 0, placeholder: "person.fill")
-                .clipShape(.circle)
-                #if os(tvOS)
-                .contentShape(.hoverEffect, .circle)
-                #endif
-                .liftsUnderFocus()
-                .measuresCardArtwork($artworkHeight)
-            Text(person.name)
-                .font(.caption.weight(.medium))
-                .lineLimit(dynamicTypeSize.lineLimit(2))
-                .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
-        }
-        .multilineTextAlignment(.center)
-        .contentShape(.rect)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(person.name)
-        .accessibilityHint("Shows the movies and shows they're in")
-        .accessibilityIdentifier("person.\(person.name)")
-    }
-}
-
 /// A genre to browse: a backdrop of one of its best titles, darkened under its name, or until
 /// that's in, or without one, a color of its own.
 struct GenreTile: View {

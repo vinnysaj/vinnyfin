@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import Synchronization
 import Testing
 @testable import vinnyfin
@@ -390,3 +391,78 @@ struct OfflineDownloadsTests {
     }
 }
 #endif
+
+struct PlayAvailabilityTests {
+    private static let movie = Offline.item("m1", "Amber Cartographers")
+    private static let show = Offline.item("s1", "Starfall Station", type: "Series")
+
+    @Test func everythingPlaysWhileTheServerAnswers() {
+        #expect(PlayAvailability.canPlay(Self.movie, isServerOutOfReach: false) { _, _ in false })
+        #expect(PlayAvailability.canPlay(Self.show, isServerOutOfReach: false) { _, _ in false })
+    }
+
+    @Test func offlineOnlyWhatsDownloadedPlays() {
+        #expect(PlayAvailability.canPlay(Self.movie, isServerOutOfReach: true) { id, _ in id == "m1" })
+        #expect(!PlayAvailability.canPlay(Self.movie, isServerOutOfReach: true) { _, _ in false })
+    }
+
+    @Test func offlineTheVersionPickedHasToBeTheOneDownloaded() {
+        let downloaded = { (id: String, source: String?) in id == "m1" && (source == nil || source == "4k") }
+        #expect(PlayAvailability.canPlay(Self.movie, mediaSourceId: "4k", isServerOutOfReach: true, isDownloaded: downloaded))
+        #expect(!PlayAvailability.canPlay(Self.movie, mediaSourceId: "1080p", isServerOutOfReach: true, isDownloaded: downloaded))
+        // Without one picked, any version downloaded plays.
+        #expect(PlayAvailability.canPlay(Self.movie, isServerOutOfReach: true, isDownloaded: downloaded))
+    }
+
+    @Test func offlineAShowDoesntPlayAsTheServerPicksItsEpisode() {
+        #expect(!PlayAvailability.canPlay(Self.show, isServerOutOfReach: true) { _, _ in true })
+    }
+}
+
+/// `playableOffline(_:)` on a control, as it's drawn.
+@MainActor
+struct PlayableOfflineTests {
+    /// Whether the control was on as it was last drawn.
+    private final class Seen {
+        var isEnabled: Bool?
+    }
+
+    private struct Control: View {
+        let seen: Seen
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            seen.isEnabled = isEnabled
+            return Color.clear.frame(width: 10, height: 10)
+        }
+    }
+
+    /// Whether a control that plays `item` is on, with the server answering or not, and the item
+    /// downloaded or not.
+    private func isOn(_ item: JellyfinItem, serverAnswers: Bool, downloaded: Bool) async -> Bool? {
+        let reachability = ServerReachability(networkChanges: { AsyncStream { _ in } }) { _, _ in
+            if !serverAnswers { throw URLError(.cannotConnectToHost) }
+        }
+        let following = Task { await reachability.follow(Offline.session(Offline.alex, token: "a")) }
+        defer { following.cancel() }
+        _ = await Offline.until { reachability.state != .unknown }
+        let seen = Seen()
+        let control = Control(seen: seen)
+            .modifier(OfflinePlayability(item: item, mediaSourceId: nil, dims: true) { _, _ in downloaded })
+            .environment(reachability)
+        _ = ImageRenderer(content: control).cgImage
+        return seen.isEnabled
+    }
+
+    @Test func playsWhileTheServerAnswers() async {
+        #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: true, downloaded: false) == true)
+    }
+
+    @Test func isOffForWhatIsntDownloadedWhileTheServerIsOutOfReach() async {
+        #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: false, downloaded: false) == false)
+    }
+
+    @Test func playsWhatsDownloadedWhileTheServerIsOutOfReach() async {
+        #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: false, downloaded: true) == true)
+    }
+}

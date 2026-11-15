@@ -411,6 +411,7 @@ private struct HomeRowView: View {
                     Button("Remove from Continue Watching", systemImage: "minus.circle") { removeFromContinueWatching(item) }
                 }
                 .accessibilityHint(item.resumeSeconds != nil ? "Resumes it" : "Plays it")
+                .playableOffline(item, dimming: true)
         } else {
             switch row.list.style {
             case .poster:
@@ -552,6 +553,7 @@ private struct HeroBanner: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.topBarsHeight) private var topBarsHeight
     @Environment(\.colorScheme) private var colorScheme
@@ -677,7 +679,7 @@ private struct HeroBanner: View {
         .focusScope(focusScope)
         // Up from the rows, focus goes to the title's main button, not whichever is above the
         // card it leaves.
-        .defaultFocus($focusedButton, showsPlay(for: item) ? .play : .details, priority: .userInitiated)
+        .defaultFocus($focusedButton, focusesPlay(item) ? .play : .details, priority: .userInitiated)
         #else
         .onChange(of: shownId) { showPage(of: shownId) }
         .onChange(of: items.map(\.id)) { showPage(of: shownId) }
@@ -908,7 +910,7 @@ private struct HeroBanner: View {
         .onChange(of: isGoingBack) { _, going in
             guard going else { return }
             let previous = items[FeaturedRotation.position(of: FeaturedRotation.id(after: shownId, by: -1, in: items), in: items)]
-            focusedButton = showsPlay(for: previous) ? .play : .details
+            focusedButton = focusesPlay(previous) ? .play : .details
             turn(by: -1)
         }
         .onMoveCommand { direction in
@@ -924,6 +926,19 @@ private struct HeroBanner: View {
         item.isSeries || (item.isPlayable && !item.isNotYetAvailable())
     }
 
+    /// What Play plays: the title, or for a show its next episode, once that's known.
+    private func playing(_ item: JellyfinItem) -> JellyfinItem {
+        item.isSeries ? feed.featuredEpisodes[item.id] ?? item : item
+    }
+
+    #if os(tvOS)
+    /// Whether focus goes to Play: shown, and not off with the server out of reach, as Apple TV
+    /// has no downloads.
+    private func focusesPlay(_ item: JellyfinItem) -> Bool {
+        showsPlay(for: item) && !reachability.isOutOfReach
+    }
+    #endif
+
     @ViewBuilder private func playButton(_ item: JellyfinItem, oneLine: Bool) -> some View {
         if showsPlay(for: item) {
             Button {
@@ -935,6 +950,7 @@ private struct HeroBanner: View {
             .buttonStyle(.platformGlassProminent)
             .fixedSize(horizontal: oneLine, vertical: false)
             .accessibilityLabel(spokenPlayLabel(for: item))
+            .playableOffline(playing(item))
             .focused($focusedButton, equals: .play)
         }
     }

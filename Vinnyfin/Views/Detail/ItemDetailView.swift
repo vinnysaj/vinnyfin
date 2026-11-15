@@ -526,6 +526,7 @@ struct PlayButton: View {
         .accessibilityLabel(spokenLabel)
         .accessibilityInputLabels([item.resumeSeconds != nil ? "Resume" : "Play", label])
         .accessibilityIdentifier("detail.play")
+        .playableOffline(item, mediaSourceId: mediaSourceId)
         #if os(tvOS)
         .focused(focus)
         #endif
@@ -537,6 +538,7 @@ struct PlayButton: View {
             }
             .buttonStyle(.platformGlass)
             .controlSize(.large)
+            .playableOffline(item, mediaSourceId: mediaSourceId)
         }
     }
 

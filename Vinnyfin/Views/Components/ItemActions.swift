@@ -32,6 +32,7 @@ struct ItemContextMenu: View {
                 Button(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill") {
                     player.play(.item(item))
                 }
+                .playableOffline(item)
             }
             startOver
             goToShow
@@ -76,6 +77,7 @@ struct ItemContextMenu: View {
             Button("Start Over", systemImage: "arrow.counterclockwise") {
                 player.play(.item(item, fromBeginning: true))
             }
+            .playableOffline(item)
         }
     }
 

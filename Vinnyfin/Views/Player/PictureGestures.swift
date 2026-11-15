@@ -313,11 +313,12 @@ extension EnvironmentValues {
 }
 
 /// The player window: kept to the picture's shape as it's resized, and turned to the shape of
-/// each new picture within its screen (`PlayerWindowFrame`), and followed in and out of full
-/// screen.
+/// each new picture within its screen (`PlayerWindowFrame`), floated above other windows when
+/// asked, and followed in and out of full screen.
 struct PlayerWindowShape: NSViewRepresentable {
     /// The picture's shape; nil until it's known.
     let videoSize: CGSize?
+    var floatsOnTop = false
     let onFullScreenChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> ShapeView {
@@ -326,11 +327,15 @@ struct PlayerWindowShape: NSViewRepresentable {
 
     func updateNSView(_ view: ShapeView, context: Context) {
         view.onFullScreenChange = onFullScreenChange
+        view.floatsOnTop = floatsOnTop
         view.videoSize = videoSize
     }
 
     final class ShapeView: NSView {
         var onFullScreenChange: (Bool) -> Void = { _ in }
+        var floatsOnTop = false {
+            didSet { if floatsOnTop != oldValue { applyLevel() } }
+        }
         var videoSize: CGSize? {
             didSet {
                 guard videoSize != oldValue else { return }
@@ -346,6 +351,7 @@ struct PlayerWindowShape: NSViewRepresentable {
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
             guard let window else { return }
+            applyLevel()
             for (name, isFullScreen) in [(NSWindow.didEnterFullScreenNotification, true), (NSWindow.didExitFullScreenNotification, false)] {
                 observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.onFullScreenChange(isFullScreen) }
@@ -353,6 +359,10 @@ struct PlayerWindowShape: NSViewRepresentable {
             }
             onFullScreenChange(window.styleMask.contains(.fullScreen))
             applyShape()
+        }
+
+        private func applyLevel() {
+            window?.level = floatsOnTop ? .floating : .normal
         }
 
         /// Gives the window the picture's shape on its screen; in full screen the system

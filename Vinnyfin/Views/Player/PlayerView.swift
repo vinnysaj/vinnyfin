@@ -58,6 +58,8 @@ struct PlayerView: View {
     #endif
     #if os(macOS)
     @State private var isFullScreen = false
+    /// The window floats above other windows, as Playback › Float on Top has it.
+    @State private var floatsOnTop = false
     #endif
     /// Where the controls' bottom bar starts, in global coordinates.
     @State private var bottomBarTop: CGFloat?
@@ -362,7 +364,7 @@ struct PlayerView: View {
         }
         // The window's close, minimize and zoom buttons go with the controls, off the picture.
         .background(WindowButtons(areHidden: !controlsVisible))
-        .background(PlayerWindowShape(videoSize: model.videoSize) { isFullScreen = $0 })
+        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop) { isFullScreen = $0 })
         .environment(\.playerIsFullScreen, isFullScreen)
         #endif
         #if os(tvOS)
@@ -443,6 +445,7 @@ struct PlayerView: View {
             return .handled
         }
         .focusedValue(\.player, PlayerCommandTarget(model: model, fillsScreen: fillsScreen, isFullScreen: isWindowFullScreen,
+                                                    floatsOnTop: isFloatingOnTop, pictureInPicture: pictureInPictureAction,
                                                     perform: perform))
         .handoffPlayback(model)
         #endif
@@ -1253,9 +1256,26 @@ struct PlayerView: View {
             model.skip(by: -PlayerModel.skipInterval)
         case .skipForward:
             model.skip(by: PlayerModel.skipInterval)
+        case .previousEpisode:
+            guard model.item?.isEpisode == true else { return }
+            Task { await model.playPreviousEpisode() }
         case .nextEpisode:
             guard let next = model.nextEpisode else { return }
             Task { await model.play(next) }
+        case .previousChapter:
+            guard !model.chapters.isEmpty else { return }
+            model.seek(to: ChapterMark.previous(in: model.chapters, before: model.clock.time)?.start ?? 0)
+        case .nextChapter:
+            guard let next = ChapterMark.next(in: model.chapters, after: model.clock.time) else { return }
+            model.seek(to: next.start)
+        case .pictureInPicture:
+            pictureInPictureAction?.toggle()
+            return
+        case .floatOnTop:
+            #if os(macOS)
+            floatsOnTop.toggle()
+            #endif
+            return
         case .episodes:
             guard model.item?.isEpisode == true, fold == nil else { return }
             panel = panel == .episodes ? nil : .episodes
@@ -1298,6 +1318,14 @@ struct PlayerView: View {
     private var isWindowFullScreen: Bool {
         #if os(macOS)
         isFullScreen
+        #else
+        false
+        #endif
+    }
+
+    private var isFloatingOnTop: Bool {
+        #if os(macOS)
+        floatsOnTop
         #else
         false
         #endif

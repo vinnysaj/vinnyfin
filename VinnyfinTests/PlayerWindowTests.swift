@@ -105,3 +105,65 @@ struct NowPlayingOwnershipTests {
     }
 }
 
+#if !os(tvOS)
+/// The Playback menu: what's enabled for a playback, the chapters' moves, and the tooltips that
+/// name the keys.
+struct PlaybackMenuTests {
+    @Test func commandsNeedWhatTheyActOn() {
+        let movie = PlayerCommandOffers()
+        #expect(PlayerCommand.playPause.isEnabled(in: movie))
+        #expect(PlayerCommand.floatOnTop.isEnabled(in: movie))
+        #expect(!PlayerCommand.previousEpisode.isEnabled(in: movie))
+        #expect(!PlayerCommand.nextEpisode.isEnabled(in: movie))
+        #expect(!PlayerCommand.episodes.isEnabled(in: movie))
+        #expect(!PlayerCommand.nextChapter.isEnabled(in: movie))
+        #expect(!PlayerCommand.previousChapter.isEnabled(in: movie))
+        #expect(!PlayerCommand.subtitles.isEnabled(in: movie))
+        #expect(!PlayerCommand.pictureInPicture.isEnabled(in: movie))
+
+        let lastEpisode = PlayerCommandOffers(isEpisode: true, hasNextEpisode: false, hasChapters: true, hasSubtitles: true)
+        #expect(PlayerCommand.previousEpisode.isEnabled(in: lastEpisode))
+        #expect(PlayerCommand.episodes.isEnabled(in: lastEpisode))
+        #expect(!PlayerCommand.nextEpisode.isEnabled(in: lastEpisode))
+        #expect(PlayerCommand.nextChapter.isEnabled(in: lastEpisode))
+        #expect(PlayerCommand.subtitles.isEnabled(in: lastEpisode))
+    }
+
+    @Test func pictureInPictureIsThereWhileItCanStartOrIsUp() {
+        func offers(possible: Bool, active: Bool) -> PlayerCommandOffers {
+            PlayerCommandOffers(pictureInPicture: PictureInPictureButton(isPossible: possible, isActive: active) {})
+        }
+        #expect(PlayerCommand.pictureInPicture.isEnabled(in: offers(possible: true, active: false)))
+        #expect(PlayerCommand.pictureInPicture.isEnabled(in: offers(possible: false, active: true)))
+        #expect(!PlayerCommand.pictureInPicture.isEnabled(in: offers(possible: false, active: false)))
+    }
+
+    private let chapters = [0.0, 300, 900].enumerated().map { ChapterMark(index: $0, start: $1, name: "\($0)", image: nil) }
+
+    @Test func nextChapterGoesToTheNextOnesStartAndNowhereFromTheLast() {
+        #expect(ChapterMark.next(in: chapters, after: 10)?.start == 300)
+        #expect(ChapterMark.next(in: chapters, after: 300)?.start == 900)
+        #expect(ChapterMark.next(in: chapters, after: 1000) == nil)
+    }
+
+    @Test func previousChapterGoesBackToTheStartAndThenToTheOneBefore() {
+        // Well into the second chapter: its start.
+        #expect(ChapterMark.previous(in: chapters, before: 400)?.start == 300)
+        // Just past its start: the chapter before.
+        #expect(ChapterMark.previous(in: chapters, before: 301)?.start == 0)
+        // In the first chapter, its start.
+        #expect(ChapterMark.previous(in: chapters, before: 1)?.start == 0)
+        #expect(ChapterMark.previous(in: [], before: 100) == nil)
+    }
+
+    @Test func tooltipsNameTheKey() {
+        #expect(PlayerCommand.playPause.tooltip("Play") == "Play (Space)")
+        #expect(PlayerCommand.skipBack.tooltip("Back 10 Seconds") == "Back 10 Seconds (←)")
+        #expect(PlayerCommand.nextEpisode.tooltip("Next Episode") == "Next Episode (N)")
+        #expect(PlayerCommand.nextChapter.tooltip("Next Chapter") == "Next Chapter (⇧⌘→)")
+        #expect(PlayerCommand.close.tooltip("Close") == "Close (Esc)")
+        // Without a key, the name alone.
+        #expect(PlayerCommand.pictureInPicture.tooltip("Picture in Picture") == "Picture in Picture")
+    }
+}
+#endif

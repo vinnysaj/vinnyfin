@@ -238,6 +238,7 @@ struct PlayerControls: View {
                         .accessibilityLabel(PlayElsewhereSheet.title)
                         .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("player.playElsewhere")
+                        .playerHelp(PlayElsewhereSheet.title)
                     }
                     #if os(iOS) || os(macOS)
                     RoutePicker()
@@ -256,6 +257,7 @@ struct PlayerControls: View {
                         .accessibilityLabel(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                         .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("player.pictureInPicture")
+                        .playerHelp(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                     }
                     #endif
                     #if os(iOS)
@@ -345,6 +347,8 @@ struct PlayerControls: View {
         .accessibilityLabel("Close")
         .accessibilityShowsLargeContentViewer()
         .accessibilityIdentifier("player.close")
+        // As File › Close's.
+        .playerHelp("Close (⌘W)")
         .dynamicTypeSize(...Self.largestControlSize)
     }
     #endif
@@ -366,15 +370,18 @@ struct PlayerControls: View {
                 model.skip(by: -PlayerModel.skipInterval)
             }
             .overlay(alignment: .top) { skipTally(back: true) }
+            .playerHelp(PlayerCommand.skipBack.tooltip("Back 10 Seconds"))
             transportButton(playPauseSymbol, label: playPauseLabel, size: 44 * scale, showsProgress: isWaiting) {
                 model.togglePlayPause()
             }
             .accessibilityIdentifier("player.playPause")
+            .playerHelp(PlayerCommand.playPause.tooltip(playPauseLabel))
             transportButton("goforward.10", label: "Forward 10 Seconds", size: 30 * scale,
                             turn: .rotate.clockwise.byLayer, turns: forwardSkips) {
                 model.skip(by: PlayerModel.skipInterval)
             }
             .overlay(alignment: .top) { skipTally(back: false) }
+            .playerHelp(PlayerCommand.skipForward.tooltip("Forward 10 Seconds"))
         }
         .animation(.snappy, value: model.scrubbing.skipRun)
     }
@@ -501,7 +508,7 @@ struct PlayerControls: View {
                 }
                 .buttonStyle(.platformGlass)
                 .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Full Screen")
-                .help(isFullScreen ? "Exit Full Screen" : "Full Screen")
+                .help(PlayerCommand.fullScreen.tooltip(isFullScreen ? "Exit Full Screen" : "Full Screen"))
                 #endif
                 #if os(visionOS)
                 CinemaButton(onUse: onInteraction)
@@ -596,6 +603,9 @@ struct PlayerControls: View {
             .buttonStyle(.platformGlass)
             .accessibilityLabel("Next Episode")
             .accessibilityHint(next.name)
+            #if os(macOS)
+            .help(PlayerCommand.nextEpisode.tooltip("Next Episode"))
+            #endif
             .accessibilityShowsLargeContentViewer()
             #if os(tvOS)
             .focused(focus, equals: .next)
@@ -639,6 +649,9 @@ struct PlayerControls: View {
         .buttonBorderShape(text == nil ? .circle : .capsule)
         .accessibilityLabel(kind.title)
         .accessibilityValue(value ?? "")
+        #if os(macOS)
+        .help(kind == .episodes ? PlayerCommand.episodes.tooltip(kind.title) : kind.title)
+        #endif
         .accessibilityShowsLargeContentViewer()
         #if os(tvOS)
         .focused(focus, equals: .panel(kind))
@@ -1194,6 +1207,17 @@ struct TimelineBar: View {
         }
         #if !os(tvOS)
         .timelineDragging(duration: duration, time: time, position: $position, snapPoints: marks, onDrag: onDrag, onSeek: onSeek)
+        #endif
+    }
+}
+
+private extension View {
+    /// A control's tooltip under the Mac's pointer: its name, and its key (`PlayerCommand.tooltip`).
+    @ViewBuilder func playerHelp(_ text: String) -> some View {
+        #if os(macOS)
+        help(text)
+        #else
+        self
         #endif
     }
 }

@@ -28,15 +28,6 @@ nonisolated struct BrowseList: Hashable, Codable, Sendable {
         BrowseList(title: "More Like \(item.titleName)", source: .similar(toItemId: item.titleId))
     }
 
-    /// The movies and shows someone is in, the newest first.
-    static func titles(with person: Person) -> BrowseList {
-        var query = JellyfinClient.ItemQuery(types: ["Movie", "Series"])
-        query.personIds = [person.id]
-        query.sortBy = "PremiereDate"
-        query.ascending = false
-        return BrowseList(title: person.name, source: .items(query))
-    }
-
     /// A collection's titles, oldest first.
     static func collection(_ item: JellyfinItem) -> BrowseList {
         var query = JellyfinClient.ItemQuery(types: ["Movie", "Series"])

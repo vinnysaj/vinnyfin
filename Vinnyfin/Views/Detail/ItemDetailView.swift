@@ -31,6 +31,7 @@ extension View {
     func itemDestinations() -> some View {
         navigationDestination(for: JellyfinItem.self) { ItemDestination(item: $0) }
             .navigationDestination(for: BrowseList.self) { LibraryGridView(list: $0) }
+            .navigationDestination(for: Person.self) { PersonView(person: $0).id($0.id) }
     }
 
     /// Lets the stack's pages open a title as its next page where a link can't be, such as from
@@ -72,9 +73,8 @@ struct ItemDetailView: View {
     /// Another episode of the show, picked on the page, that it shows in place of `item`.
     @State private var picked: JellyfinItem?
     @State private var detail: JellyfinItem?
-    @State private var similar: [JellyfinItem] = []
-    /// The title `similar` is like: an episode's show.
-    @State private var similarTitleId: String?
+    /// Titles like it, its genres and its collections: an episode's show's.
+    @State private var related = RelatedTitles()
     @State private var loadError: LoadFailure?
     /// The server answered that it doesn't have the title, which asking again won't change.
     @State private var isGone = false
@@ -145,6 +145,12 @@ struct ItemDetailView: View {
                         OfflinePlayNote(item: shown, mediaSourceId: pickedSourceId)
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
+                    if detail != nil {
+                        TitleLinks(genres: related.genres(of: shown), collections: related.collections)
+                            #if os(tvOS)
+                            .pageRow("links", in: rowLayout)
+                            #endif
+                    }
                     if sources.count > 1 { versions }
                     if page.isEpisode, !isGone {
                         SeasonBrowser(episode: shown, reloads: reloads) { showEpisode($0) } onChange: { apply($0) }
@@ -154,17 +160,31 @@ struct ItemDetailView: View {
                             .pageRow("episodes", in: rowLayout)
                             #endif
                     }
-                    if let people = detail?.people {
-                        CastShelf(people: people)
+                    ScenesShelf(item: shown, pickedSourceId: pickedSourceId, streamingSource: playbackSource)
+                        #if os(tvOS)
+                        .pageRow("scenes", in: rowLayout)
+                        #endif
+                    if let detail {
+                        CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
                             #if os(tvOS)
                             .pageRow("cast", in: rowLayout)
                             #endif
+                        TitleExtrasShelf(item: detail)
+                            #if os(tvOS)
+                            .pageRow("extras", in: rowLayout)
+                            #endif
                     }
-                    if !similar.isEmpty {
-                        MoreLikeThisShelf(title: shown, titles: $similar)
+                    if !related.similar.isEmpty {
+                        MoreLikeThisShelf(related: $related)
                         #if os(tvOS)
                         .pageRow("similar", in: rowLayout)
                         #endif
+                    }
+                    if !isGone {
+                        TitleInformation(item: shown, source: playbackSource, credits: Credits(people: detail?.people ?? []))
+                            #if os(tvOS)
+                            .pageRow("information", in: rowLayout)
+                            #endif
                     }
                 }
                 .padding(.bottom, Metrics.edge)
@@ -196,7 +216,7 @@ struct ItemDetailView: View {
         .task(id: page.id) { await load() }
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
-            similar = player.endedPlayback.applied(to: similar)
+            related.similar = player.endedPlayback.applied(to: related.similar)
             // Started here, the playback may have moved on to a later episode, which shows instead.
             if let watched = player.endedPlayback.episodeToShow(onPageOf: page) { return showEpisode(watched) }
             Task { await loadDetail() }
@@ -330,7 +350,7 @@ struct ItemDetailView: View {
         pickedSourceId = nil
         loadError = nil
         isGone = false
-        if !sameTitle { similar = [] }
+        if !sameTitle { related = RelatedTitles() }
         picked = episode
         // Apple TV's focus moves to Play as the episode shows, and the page scrolls up after it.
         #if !os(tvOS)
@@ -347,19 +367,18 @@ struct ItemDetailView: View {
         detail = changed
     }
 
-    /// The details and the titles like it. Refreshing asks for both again, and has the season row
-    /// reload its episodes.
+    /// The details and what's around the title: titles like it, its genres and its collections.
+    /// Refreshing asks for both again, and has the season row reload its episodes.
     private func load(refreshing: Bool = false) async {
-        let titleId = page.titleId
         if refreshing { reloads += 1 }
         await loadDetail()
-        guard let session, !isGone, refreshing || similar.isEmpty || titleId != similarTitleId else { return }
+        guard let session, !isGone, refreshing || related.titleId != page.titleId else { return }
         do {
-            similar = try await session.client.similar(to: titleId, userId: session.userId, limit: MoreLikeThisShelf.length)
-            similarTitleId = titleId
+            related = try await RelatedTitles.load(for: detail ?? page, client: session.client, userId: session.userId,
+                                                   length: MoreLikeThisShelf.length)
         } catch {
             guard !error.isCancellation else { return }
-            similar = []
+            related = RelatedTitles()
             loadError = loadError ?? LoadFailure("Couldn't Load Titles Like This", error: error)
         }
     }
@@ -383,29 +402,6 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation, id == page.id else { return }
             loadError = LoadFailure("Couldn't Load the Details", error: error)
-        }
-    }
-}
-
-/// A title page's More Like This: the titles the server ranks as like it, as posters with the
-/// title's menu. See All, which lists more of them, is there only when the row may not have them
-/// all: the server doesn't say how many there are, so a row with as many as it asked for may not.
-struct MoreLikeThisShelf: View {
-    /// How many titles the row asks the server for.
-    static let length = 16
-
-    /// The title they're like.
-    let title: JellyfinItem
-    @Binding var titles: [JellyfinItem]
-
-    var body: some View {
-        Shelf(title: "More Like This", seeAll: titles.count >= Self.length ? .moreLike(title) : nil, items: titles,
-              cardWidth: Metrics.posterWidth) { other in
-            NavigationLink(value: other) { PosterCard(item: other) }
-                .buttonStyle(.artwork)
-                .titleMenu(other) { updated in
-                    if let index = titles.firstIndex(where: { $0.id == updated.id }) { titles[index] = updated }
-                }
         }
     }
 }

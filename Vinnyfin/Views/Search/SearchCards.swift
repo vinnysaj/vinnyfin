@@ -62,7 +62,7 @@ struct TopResultCard: View {
         case "MusicVideo": "Music Video"
         default: item.type
         }
-        let rest = item.isEpisode ? [item.seriesName, LandscapeCard.shortCode(of: item)] : [item.premiereYearText]
+        let rest = item.isEpisode ? [item.seriesName, item.shortEpisodeCode] : [item.premiereYearText]
         return ([kind] + rest.compactMap(\.self)).joined(separator: " · ")
     }
 }

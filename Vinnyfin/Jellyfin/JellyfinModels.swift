@@ -314,6 +314,18 @@ nonisolated struct Person: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// One of the pictures the server keeps of an item, and its size in pixels.
+nonisolated struct ImageInfo: Codable, Hashable, Sendable {
+    /// "Primary", "Backdrop", "Logo" and so on.
+    let imageType: String
+    var width: Int?
+    var height: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case imageType = "ImageType", width = "Width", height = "Height"
+    }
+}
+
 nonisolated struct Chapter: Codable, Hashable, Sendable {
     var startPositionTicks: Int64
     var name: String?

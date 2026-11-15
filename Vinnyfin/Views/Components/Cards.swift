@@ -372,19 +372,12 @@ struct LandscapeCard: View {
 
     private var detail: String {
         guard isEpisodeFirst else { return item.cardDetail }
-        return [item.seriesName, Self.shortCode(of: item)].compactMap(\.self).joined(separator: " · ")
+        return [item.seriesName, item.shortEpisodeCode].compactMap(\.self).joined(separator: " · ")
     }
 
     private var spokenDetail: String {
         guard isEpisodeFirst else { return item.spokenCardDetail }
         return [item.seriesName, item.spokenEpisodeCode].compactMap(\.self).joined(separator: ", ")
-    }
-
-    /// An episode's number, short: "S1, E1", "S1, E2–3".
-    nonisolated static func shortCode(of item: JellyfinItem) -> String? {
-        guard let episode = item.indexNumber else { return nil }
-        let end = item.indexNumberEnd.flatMap { $0 > episode ? "–\($0)" : nil } ?? ""
-        return "S\(item.parentIndexNumber ?? 0), E\(episode)\(end)"
     }
 }
 
@@ -816,16 +809,8 @@ struct MediaBadges: View {
         case let height? where height >= 1080: badges.append(Badge(text: "HD"))
         default: break
         }
-        let range = source.videoStream?.videoRangeType?.uppercased() ?? ""
-        let name = (source.name ?? "").uppercased()
-        if range.hasPrefix("DOVI") || name.contains("DOLBY VISION") || name.contains(" DV") {
-            badges.append(Badge(text: "Dolby Vision"))
-        } else if range.contains("HDR10PLUS") || name.contains("HDR10+") {
-            badges.append(Badge(text: "HDR10+", spoken: "HDR 10 plus"))
-        } else if range.contains("HDR") || name.contains("HDR") {
-            badges.append(Badge(text: "HDR"))
-        } else if range.contains("HLG") {
-            badges.append(Badge(text: "HLG"))
+        if let range = source.dynamicRangeName {
+            badges.append(Badge(text: range, spoken: range == "HDR10+" ? "HDR 10 plus" : nil))
         }
         let audio = source.audioStreams.first
         let audioText = [audio?.audioSpatialFormat, audio?.profile, audio?.displayTitle, source.name].compactMap(\.self).joined(separator: " ").lowercased()

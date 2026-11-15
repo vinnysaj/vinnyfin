@@ -567,10 +567,14 @@ nonisolated struct JellyfinClient: Sendable {
         return page.items
     }
 
-    /// One season's episodes, or every episode of the show in order when `seasonId` is nil.
-    func episodes(seriesId: String, seasonId: String?, userId: String, fields: String = "Overview,MediaSources,MediaStreams") async throws -> [JellyfinItem] {
+    /// One season's episodes, or every episode of the show in order when `seasonId` is nil. Without
+    /// `missing`, only those the library has, leaving out those the server lists from its metadata
+    /// alone.
+    func episodes(seriesId: String, seasonId: String?, userId: String, fields: String = "Overview,MediaSources,MediaStreams",
+                  missing: Bool = true) async throws -> [JellyfinItem] {
         var query = ["userId": userId, "fields": fields, "enableUserData": "true"]
         if let seasonId { query["seasonId"] = seasonId }
+        if !missing { query["isMissing"] = "false" }
         let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: query)
         return page.items
     }
@@ -729,6 +733,11 @@ nonisolated struct JellyfinClient: Sendable {
 
     enum ImageKind: String, Sendable {
         case primary = "Primary", backdrop = "Backdrop", logo = "Logo", thumb = "Thumb"
+    }
+
+    /// The pictures the server keeps of an item, with their sizes.
+    func images(itemId: String) async throws -> [ImageInfo] {
+        try await get("Items/\(itemId)/Images")
     }
 
     func imageURL(itemId: String, kind: ImageKind = .primary, tag: String?, maxWidth: Int) -> URL {
@@ -945,15 +954,25 @@ nonisolated struct PlaybackReport: Encodable, Sendable {
 }
 
 /// A change to an item's user data. The server writes what's given and leaves the rest as it is.
-nonisolated struct UserDataUpdate: Encodable, Sendable {
+nonisolated struct UserDataUpdate: Encodable, Equatable, Sendable {
     let PlaybackPositionTicks: Int64
     var Played: Bool?
     var LastPlayedDate: String?
+    var PlayCount: Int?
 
     init(positionTicks: Int64, played: Bool?, lastPlayed: Date?) {
         PlaybackPositionTicks = positionTicks
         Played = played
         LastPlayedDate = lastPlayed.map(JellyfinDate.format)
+    }
+
+    /// Everything of an item's watch state as `data` has it: whether it was watched, where it was
+    /// left, how many times it was played, and when last, as the server gave them.
+    init(restoring data: UserItemData) {
+        PlaybackPositionTicks = data.playbackPositionTicks ?? 0
+        Played = data.played ?? false
+        LastPlayedDate = data.lastPlayedDate
+        PlayCount = data.playCount ?? 0
     }
 
     /// An item's share of what the server keeps for one of its versions, just reported: that

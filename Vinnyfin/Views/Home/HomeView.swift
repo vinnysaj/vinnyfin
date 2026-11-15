@@ -852,7 +852,7 @@ private struct HeroBanner: View {
     /// episode, "Play Again" for a movie watched, or "Play".
     private func playLabel(for item: JellyfinItem) -> String {
         if item.isSeries {
-            return feed.featuredEpisodes[item.id].flatMap(LandscapeCard.shortCode).map { "Play \($0)" } ?? "Play"
+            return feed.featuredEpisodes[item.id]?.shortEpisodeCode.map { "Play \($0)" } ?? "Play"
         }
         if item.isPlayed { return "Play Again" }
         guard let resume = item.resumeSeconds else { return "Play" }

@@ -109,7 +109,8 @@ final class ShowBrowsingUITests: XCTestCase {
         keep(app.screenshot(), named: "linked-show")
     }
 
-    /// Marking a show watched marks its episodes on its page, without leaving it.
+    /// Marking a show watched asks first, then marks its episodes on its page, without leaving it;
+    /// Undo puts them back.
     @MainActor
     func testMarkingAShowWatchedMarksItsEpisodes() async throws {
         let account = try await ShowcaseAccount(server: server)
@@ -127,16 +128,26 @@ final class ShowBrowsingUITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: uiTimeout), "The Long Field's page doesn't list its episodes")
         XCTAssertFalse(first.label.contains("Watched"))
         let watched = app.switches["detail.watched"]
+        let confirm = app.buttons["confirmation.confirm"]
         tap(watched)
+        XCTAssertTrue(confirm.waitForExistence(timeout: uiTimeout), "Marking the whole show didn't ask first")
+        keep(app.screenshot(), named: "show-watched-question")
+        tap(confirm)
         let badged = NSPredicate(format: "label CONTAINS 'Watched'")
         XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: badged, object: first)], timeout: uiTimeout) == .completed,
                       "Marking the show watched didn't mark its episodes")
         XCTAssertEqual(watched.value as? String, "1")
+        // A watched episode is no selection: SwiftUI took the badge's checkmark for one.
+        XCTAssertFalse(first.isSelected, "VoiceOver hears a watched episode as selected")
         keep(app.screenshot(), named: "show-watched")
 
-        tap(watched)
-        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "NOT (label CONTAINS 'Watched')"), object: first)],
-                                     timeout: uiTimeout) == .completed, "Marking the show unwatched didn't unmark its episodes")
+        let undo = app.buttons["toast.undo"]
+        XCTAssertTrue(undo.waitForExistence(timeout: uiTimeout), "Marking the whole show offered no Undo")
+        tap(undo)
+        let unbadged = NSPredicate(format: "NOT (label CONTAINS 'Watched')")
+        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: unbadged, object: first)], timeout: uiTimeout) == .completed,
+                      "Undo didn't put the show's episodes back")
+        XCTAssertEqual(watched.value as? String, "0")
     }
 
     #else
@@ -181,9 +192,10 @@ final class ShowBrowsingUITests: XCTestCase {
                       "Picking another episode didn't show it")
         keep(app.screenshot(), named: "tv-another-episode")
 
-        focus(app.buttons["detail.eyebrow"], in: app, moving: [.up])
+        // Go to Show is among the buttons beside Play, not a stop for focus above it.
+        focus(app.buttons["detail.eyebrow"], in: app, moving: [.right])
         XCUIRemote.shared.press(.select)
-        XCTAssertTrue(app.buttons["series.play"].waitForExistence(timeout: uiTimeout), "The show's name didn't lead to its page")
+        XCTAssertTrue(app.buttons["series.play"].waitForExistence(timeout: uiTimeout), "Go to Show didn't lead to the show's page")
         keep(app.screenshot(), named: "tv-show-page")
     }
 

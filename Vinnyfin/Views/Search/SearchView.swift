@@ -12,6 +12,8 @@ struct SearchView: View {
     /// The search field has the cursor.
     @State private var fieldIsActive = false
     #endif
+    /// What Spotlight or Siri last asked to search for, which fills the search field.
+    var request: SearchRequest?
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
@@ -77,6 +79,9 @@ struct SearchView: View {
             }
             #endif
             .onSubmit(of: .search) { remember(SearchPhase.term(text)) }
+            .onChange(of: request, initial: true) {
+                if let request { text = request.term }
+            }
             .itemDestinations()
             .task(id: Run(text: text, retries: retries)) { await search() }
             .task { await loadLanding() }

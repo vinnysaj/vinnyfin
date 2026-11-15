@@ -2,12 +2,14 @@ import Foundation
 import Observation
 
 /// Links into the app from outside its windows: a tapped notification, Siri, Shortcuts,
-/// Spotlight's results and Handoff. The root view takes each and follows it as it does a
-/// vinnyfin:// URL the system opens, launching the app or not.
+/// Spotlight's results and searches, and Handoff. The root view takes each and follows it as it
+/// does a vinnyfin:// URL the system opens, launching the app or not.
 @Observable
 final class IncomingLinks {
     nonisolated enum Incoming: Equatable, Sendable {
         case link(URL)
+        /// Something to look for on the Search tab, as Spotlight and Siri ask.
+        case search(String)
         #if !os(tvOS)
         /// A title another of the person's devices handed off, with the sign-in it's from, which
         /// this device may not have.
@@ -24,6 +26,10 @@ final class IncomingLinks {
 
     func open(_ link: AppLink) {
         open(link.url)
+    }
+
+    func search(_ term: String) {
+        pending = .search(term)
     }
 
     #if !os(tvOS)

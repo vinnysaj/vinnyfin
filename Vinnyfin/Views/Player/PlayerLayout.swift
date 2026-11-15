@@ -29,6 +29,14 @@ nonisolated enum PlayerLayout {
         return max(0, containerMaxY - bottomBarTop) + gapAboveControls
     }
 
+    /// Whether a pointer `y` down the screen, in global coordinates, is on the controls' top bar,
+    /// which ends at `topBarBottom`, or their bottom bar, which starts at `bottomBarTop`.
+    static func isOnBars(y: CGFloat, topBarBottom: CGFloat?, bottomBarTop: CGFloat?) -> Bool {
+        if let topBarBottom, y <= topBarBottom { return true }
+        if let bottomBarTop, y >= bottomBarTop { return true }
+        return false
+    }
+
     /// The band between the controls' top bar, which ends at `topBarBottom`, and their bottom
     /// bar, which starts at `bottomBarTop`: whether it's too short for more than the transport.
     static func isShort(topBarBottom: CGFloat?, bottomBarTop: CGFloat?) -> Bool {

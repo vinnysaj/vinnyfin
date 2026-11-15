@@ -247,6 +247,9 @@ final class PlayerModel: Identifiable {
     /// Try Again was pressed a moment ago. The failure stays up meanwhile, saying so, rather than
     /// flashing away and back when the new try fails at once.
     private(set) var isRetrying = false
+    /// Back from the background, the picture the system took away there is being rebuilt, until
+    /// its first frame (`restoreAfterBackground`).
+    private(set) var isRestoringPicture = false
     /// The viewer hid the up-next card, or stopped its countdown, for the episode on screen.
     private(set) var upNextDismissed = false
     let clock = PlaybackClock()
@@ -299,6 +302,8 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private let subtitleOffsets = SubtitleOffsets()
     /// The subtitle track last shown, which the subtitle key turns back on.
     @ObservationIgnored private var lastSubtitle: Int?
+    /// Subtitles shown for what plays again after a skip back, until it's back where it was.
+    @ObservationIgnored private var replaySubtitles: ReplaySubtitles?
     @ObservationIgnored private var appliedSubtitlePreference = false
     /// The engine's load returned, so its track lists are complete.
     @ObservationIgnored private var isLoaded = false
@@ -332,6 +337,11 @@ final class PlayerModel: Identifiable {
     /// The stream playing has shown its picture.
     @ObservationIgnored private var showedPicture = false
     @ObservationIgnored private var watchTask: Task<Void, Never>?
+    /// The app is in the background, where the engine plays the sound alone, unless Picture in
+    /// Picture or AirPlay shows the picture (`pictureOutside`). As the engine has it: from entering
+    /// the background until active again.
+    @ObservationIgnored private var isInBackground = false
+    @ObservationIgnored private var appSubscriptions = Set<AnyCancellable>()
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
     @ObservationIgnored private var hasStarted = false
@@ -380,6 +390,21 @@ final class PlayerModel: Identifiable {
         title = request.title
         startedItemId = if case .item(let id, _) = request.source { id } else { nil }
         volume = PlayerVolume(level: engine.volume)
+        followApp()
+    }
+
+    /// Follows the app in and out of the background, for the watches (`watchConnection`).
+    private func followApp() {
+        #if os(iOS) || os(tvOS)
+        isInBackground = UIApplication.shared.applicationState == .background
+        let center = NotificationCenter.default
+        center.publisher(for: UIApplication.didEnterBackgroundNotification)
+            .sink { [weak self] _ in self?.isInBackground = true }
+            .store(in: &appSubscriptions)
+        center.publisher(for: UIApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.isInBackground = false }
+            .store(in: &appSubscriptions)
+        #endif
     }
 
     var isTranscoding: Bool { current?.isTranscode ?? false }
@@ -489,14 +514,21 @@ final class PlayerModel: Identifiable {
         }
     }
 
-    /// Rebuilds the picture after the system took the video pipeline away in the background.
+    /// Rebuilds the picture after the system took the video pipeline away in the background. Until
+    /// its first frame the title's picture stands in (`isRestoringPicture`), as when it started.
     func restoreAfterBackground() async {
         guard session != nil, engine.needsForegroundVideoRestore else { return }
+        isRestoringPicture = true
+        // The rebuild starts the stream over: its wait for a picture says nothing of the connection.
+        connectionWatch.restart()
+        pictureWatch = PictureWatch()
         do {
             try await engine.reloadAtCurrentPosition()
         } catch is CancellationError {
+            isRestoringPicture = false
             return
         } catch {
+            isRestoringPicture = false
             fail(error, engine: engine.errorInfo)
         }
     }
@@ -627,9 +659,11 @@ final class PlayerModel: Identifiable {
         // A version standing in for another keeps that one's tracks, whatever the request asked.
         if tracks != nil { askedStreams = nil }
         appliedSubtitlePreference = false
+        replaySubtitles = nil
         isLoaded = false
         isPresenting = false
         showedPicture = false
+        isRestoringPicture = false
         pictureOffer = nil
         startedReporting = false
         lastReportedPaused = nil
@@ -857,6 +891,7 @@ final class PlayerModel: Identifiable {
             self.prepareNextEpisodeIfDue(at: time)
             self.followEnding(at: time)
             self.skipIntroIfDue(at: time)
+            self.endReplaySubtitlesIfDue(at: time)
         }
         .store(in: &subscriptions)
         engine.clock.$sourceTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
@@ -868,6 +903,13 @@ final class PlayerModel: Identifiable {
             .store(in: &subscriptions)
         engine.$audioShapingState.receive(on: RunLoop.main).sink { [weak self] state in self?.soundShapingState = state }
             .store(in: &subscriptions)
+        #if os(iOS)
+        // A screen plugged in, or Screen Mirroring, plays the video full screen, as AirPlay does,
+        // rather than showing the phone's screen with the player on it. AVPlayer's default is the
+        // mirror; the engine's wired-screen route and `PictureOutside.externalPlayback` expect this.
+        engine.$currentAVPlayer.sink { player in player?.usesExternalPlaybackWhileExternalScreenIsActive = true }
+            .store(in: &subscriptions)
+        #endif
         #if os(iOS) || os(macOS)
         // AirPlay, or a screen plugged in, shows the picture where the overlay can't go.
         engine.$currentAVPlayer
@@ -958,6 +1000,7 @@ final class PlayerModel: Identifiable {
     }
 
     private func audioTracksChanged(_ tracks: [TrackInfo], active: Int?) {
+        defer { publishNowPlayingCard() }
         if let transcode = current?.transcode, let source = current?.mediaSource {
             audioOptions = source.audioStreams.compactMap { stream in
                 stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.displayTitle) }
@@ -973,6 +1016,7 @@ final class PlayerModel: Identifiable {
     }
 
     private func subtitleTracksChanged(_ tracks: [TrackInfo], active: Int?) {
+        defer { publishNowPlayingCard() }
         if let transcode = current?.transcode, let source = current?.mediaSource {
             subtitleOptions = source.subtitleStreams.compactMap { stream in
                 stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.codec?.uppercased()) }
@@ -1076,6 +1120,13 @@ final class PlayerModel: Identifiable {
         // Someone is watching: a question about it goes, and playing on answers it.
         unattended.viewerActed()
         asksStillWatching = false
+        if case .failed = status { return }
+        // A position being chosen is where Play/Pause goes, as on Apple TV's player: it jumps
+        // there and plays, from the remote, the on-screen button, Siri or a remote command alike.
+        if scrubbing.isActive {
+            play()
+            return
+        }
         switch status {
         case .ended:
             // The way on is the next episode, as the up-next card offers, when there is one.
@@ -1084,8 +1135,6 @@ final class PlayerModel: Identifiable {
             } else {
                 watchAgain()
             }
-        case .failed:
-            return
         case .preparing, .loading:
             // A playback on its way to playing: the press pauses what's coming.
             pause()
@@ -1097,7 +1146,10 @@ final class PlayerModel: Identifiable {
         }
     }
 
+    /// Plays, from the position being chosen when there is one.
     func play() {
+        // At the end, the move there plays it again by itself (`seek`).
+        commitScrub()
         guard status != .ended else { return }
         if sharing?.share(.rate(rate)) == true { return }
         playHere()
@@ -1159,6 +1211,47 @@ final class PlayerModel: Identifiable {
         if status == .ended, seconds > 0 { return }
         scrubbing.noteSkip(seconds)
         seek(to: clock.time + seconds)
+    }
+
+    /// Skips back `seconds` and shows subtitles for what plays again, until the playhead is back
+    /// where it was (`ReplaySubtitles`), as Apple TV's player does for a skip back.
+    func skipBackShowingSubtitles(by seconds: Double) {
+        let from = clock.time
+        skip(by: -seconds)
+        showSubtitlesForReplay(from: from)
+    }
+
+    private func showSubtitlesForReplay(from time: Double) {
+        // A transcode carries its subtitles in its stream, which a change of them replaces.
+        guard isLoaded, !isTranscoding, status != .ended else { return }
+        if replaySubtitles != nil {
+            replaySubtitles?.skippedBack(from: time)
+            return
+        }
+        let audioLanguage = engine.audioTracks.first { $0.id == engine.activeAudioTrackIndex }?.language
+        guard let track = ReplaySubtitles.track(in: engine.subtitleTracks.map(TrackChooser.Candidate.init), showing: selectedSubtitle,
+                                                language: settings.subtitleLanguage, audioLanguage: audioLanguage,
+                                                captions: AccessibleMedia.prefersCaptions) else { return }
+        replaySubtitles = ReplaySubtitles(until: time, before: selectedSubtitle, shown: track)
+        // Not a pick of the viewer's (`pick`): the subtitles go back as they were.
+        engine.selectSubtitleTrack(index: track)
+    }
+
+    /// Puts the subtitles back as they were before a skip back showed some, once the playhead is
+    /// back where it was, unless the viewer has chosen others meanwhile.
+    private func endReplaySubtitlesIfDue(at time: Double) {
+        guard var replay = replaySubtitles else { return }
+        guard replay.playhead(at: time) else {
+            replaySubtitles = replay
+            return
+        }
+        replaySubtitles = nil
+        guard selectedSubtitle == replay.shown else { return }
+        if let before = replay.before {
+            engine.selectSubtitleTrack(index: before)
+        } else {
+            engine.clearSubtitle()
+        }
     }
 
     /// Plays the title that ended again from `position`, with the audio and subtitles it had: the
@@ -1264,6 +1357,26 @@ final class PlayerModel: Identifiable {
         applySound(sound)
     }
 
+    /// What the sound tools cost the audio playing, said under them: Dolby Atmos plays as its
+    /// surround channels alone while one is on (`SoundOptions.atmosNote`). Nil when they cost it
+    /// nothing, or can't shape it.
+    var soundToolsNote: String? {
+        guard soundShapingState != .unavailable, let track = playingAudioTrack else { return nil }
+        return SoundOptions.atmosNote(isAtmos: track.isAtmos, channels: track.channels)
+    }
+
+    /// What the sound tools on are doing to the audio playing, for the Info tab: taking its Atmos.
+    var soundToolsEffect: String? {
+        guard soundShapingState != .unavailable, let track = playingAudioTrack else { return nil }
+        return sound.atmosEffect(isAtmos: track.isAtmos, channels: track.channels)
+    }
+
+    /// The audio track playing, as the engine lists it; nil for a transcode, whose audio is the
+    /// server's stream's.
+    private var playingAudioTrack: TrackInfo? {
+        isTranscoding ? nil : engine.audioTracks.first { $0.id == selectedAudio }
+    }
+
     /// Shapes the sound playing from here on, and every playback's after it. The engine rebuilds
     /// the stream at the playhead to do it, holding the picture a moment.
     private func applySound(_ options: SoundOptions) {
@@ -1324,6 +1437,8 @@ final class PlayerModel: Identifiable {
 
     /// Nil turns subtitles off.
     func chooseSubtitle(_ id: Int?) {
+        // The viewer's choice holds past a replay's end.
+        replaySubtitles = nil
         if let id {
             if let picked = subtitleCandidate(id) { pick { $0.subtitles = .track(TrackPicks.Track(picked)) } }
         } else {
@@ -1615,7 +1730,9 @@ final class PlayerModel: Identifiable {
     /// Hotspot. It also offers a lighter stream while sound plays with no picture (`PictureWatch`),
     /// and counts what a reconnected transcode has played (`TranscodeReconnect`). The watches start
     /// over with each stream; the next playback starts at the streaming limit again, which is lower
-    /// once enough step downs teach this device a bitrate to stay under.
+    /// once enough step downs teach this device a bitrate to stay under. In the background with the
+    /// picture nowhere, and while the picture is rebuilt after it, the watches start over each
+    /// second rather than sample (`ConnectionWatch.samples`).
     private func watchConnection() {
         connectionWatch = ConnectionWatch(isTranscode: current?.isTranscode ?? false)
         recoveryWatch = RecoveryWatch(failedStepUps: failedStepUps)
@@ -1626,8 +1743,10 @@ final class PlayerModel: Identifiable {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 if self.status == .playing { self.transcodeReconnect.played(1) }
-                self.watchPicture()
-                guard self.settings.adaptiveQuality, self.qualityPick == nil else {
+                let samples = ConnectionWatch.samples(inBackground: self.isInBackground, pictureShownOutside: !self.pictureOutside.isEmpty,
+                                                      restoringPicture: self.isRestoringPicture)
+                if samples { self.watchPicture() } else { self.pictureWatch = PictureWatch() }
+                guard samples, self.settings.adaptiveQuality, self.qualityPick == nil else {
                     self.connectionWatch.restart()
                     self.recoveryWatch = RecoveryWatch(failedStepUps: self.failedStepUps)
                     lastPosition = nil
@@ -1890,6 +2009,7 @@ final class PlayerModel: Identifiable {
     /// The stream's first frame is up: what was said while there was none is done with.
     private func pictureCameUp() {
         showedPicture = true
+        isRestoringPicture = false
         pictureOffer = nil
         guard isReconnecting else { return }
         isReconnecting = false
@@ -2339,7 +2459,9 @@ final class PlayerModel: Identifiable {
     /// AirPlay receivers: the title, an episode's show and number, its description, and its
     /// picture once that's loaded.
     private func setNowPlaying(_ playback: ResolvedPlayback) {
-        var info: [String: Any] = [MPMediaItemPropertyTitle: playback.title]
+        // A video, rather than the song the system takes Now Playing to be without it.
+        var info: [String: Any] = [MPMediaItemPropertyTitle: playback.title,
+                                   MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.video.rawValue]
         if let item = playback.item, item.isEpisode {
             if let show = item.seriesName { info[MPMediaItemPropertyArtist] = show }
             if let number = Self.nowPlayingEpisodeNumber(item) { info[MPMediaItemPropertyAlbumTitle] = number }
@@ -2348,12 +2470,8 @@ final class PlayerModel: Identifiable {
         }
         let artwork = playback.item.flatMap { item in nowPlayingArtwork?.itemId == item.id ? nowPlayingArtwork : nil }
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork.artwork }
-        #if os(iOS) || os(tvOS)
-        engine.setVideoNowPlayingInfo(info)
-        #else
         nowPlayingIdentity = info
-        publishNowPlaying()
-        #endif
+        publishNowPlayingCard()
         var metadata = [Self.metadataItem(.commonIdentifierTitle, playback.title as NSString)]
         if let overview = playback.item?.overview, !overview.isEmpty {
             metadata.append(Self.metadataItem(.commonIdentifierDescription, overview as NSString))
@@ -2407,9 +2525,55 @@ final class PlayerModel: Identifiable {
         return item
     }
 
-    #if !(os(iOS) || os(tvOS))
+    /// What plays, for Now Playing's card: its title, show, number and picture (`setNowPlaying`).
     @ObservationIgnored private var nowPlayingIdentity: [String: Any] = [:]
 
+    /// The card: what plays, with the audio tracks and subtitles there are to choose among and
+    /// those chosen (`NowPlayingLanguages`).
+    private var nowPlayingCard: [String: Any] {
+        var info = nowPlayingIdentity
+        let audio = languageOptions(.audio)
+        let subtitles = languageOptions(.subtitles)
+        var groups: [MPNowPlayingInfoLanguageOptionGroup] = []
+        if !audio.isEmpty {
+            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: audio.map(NowPlayingLanguages.mediaPlayerOption),
+                                                              defaultLanguageOption: nil, allowEmptySelection: false))
+        }
+        if !subtitles.isEmpty {
+            groups.append(MPNowPlayingInfoLanguageOptionGroup(languageOptions: subtitles.map(NowPlayingLanguages.mediaPlayerOption),
+                                                              defaultLanguageOption: nil, allowEmptySelection: true))
+        }
+        let chosen = audio.filter { $0.trackId == selectedAudio } + subtitles.filter { $0.trackId == selectedSubtitle }
+        info[MPNowPlayingInfoPropertyAvailableLanguageOptions] = groups
+        info[MPNowPlayingInfoPropertyCurrentLanguageOptions] = chosen.map(NowPlayingLanguages.mediaPlayerOption)
+        return info
+    }
+
+    /// The audio tracks or the subtitles to choose among, as Now Playing lists them: the engine's
+    /// tracks, or a transcode's, the server's streams.
+    private func languageOptions(_ kind: NowPlayingLanguages.Kind) -> [NowPlayingLanguages.Option] {
+        let options = kind == .audio ? audioOptions : subtitleOptions
+        let candidates: [TrackChooser.Candidate]
+        if isTranscoding, let source = current?.mediaSource {
+            candidates = (kind == .audio ? source.audioStreams : source.subtitleStreams).compactMap(TrackChooser.Candidate.init)
+        } else {
+            candidates = (kind == .audio ? engine.audioTracks : engine.subtitleTracks).map(TrackChooser.Candidate.init)
+        }
+        return options.compactMap { option in
+            candidates.first { $0.id == option.id }.map { NowPlayingLanguages.option(kind, $0, title: option.title) }
+        }
+    }
+
+    /// Publishes the card, as what plays or its tracks change.
+    private func publishNowPlayingCard() {
+        #if os(iOS) || os(tvOS)
+        engine.setVideoNowPlayingInfo(nowPlayingCard)
+        #else
+        publishNowPlaying()
+        #endif
+    }
+
+    #if !(os(iOS) || os(tvOS))
     /// The system keeps the clock running from the elapsed time and rate given here, so it is
     /// republished whenever either changes.
     private func publishNowPlaying() {
@@ -2419,7 +2583,7 @@ final class PlayerModel: Identifiable {
             center.playbackState = .stopped
             return
         }
-        var info = nowPlayingIdentity
+        var info = nowPlayingCard
         info[MPMediaItemPropertyPlaybackDuration] = duration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = clock.time
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(rate) : 0
@@ -2448,7 +2612,11 @@ final class PlayerModel: Identifiable {
         unregisterRemoteCommands()
         func add(_ command: MPRemoteCommand, _ handler: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
             command.isEnabled = true
-            commandTargets.append((command, command.addTarget(handler: handler)))
+            commandTargets.append((command, command.addTarget { event in
+                // What Siri and the remotes send, for a test on a device to read.
+                Self.log.notice("Remote command: \(Self.describe(event), privacy: .public)")
+                return handler(event)
+            }))
         }
         if let center = commandCenter {
             add(center.togglePlayPauseCommand) { [weak self] _ in self?.togglePlayPause(); return .success }
@@ -2462,7 +2630,13 @@ final class PlayerModel: Identifiable {
                 return .success
             }
             add(center.skipBackwardCommand) { [weak self] event in
-                self?.skip(by: -((event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval))
+                let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval
+                #if os(tvOS)
+                // As the remote's click back does, and as Apple TV's player does for Siri's skips back.
+                self?.skipBackShowingSubtitles(by: interval)
+                #else
+                self?.skip(by: -interval)
+                #endif
                 return .success
             }
             #if os(tvOS)
@@ -2485,7 +2659,11 @@ final class PlayerModel: Identifiable {
             self?.setRate(PlaybackSpeed.nearest(to: event.playbackRate))
             return .success
         }
-        ownedCommands = [center.changePlaybackRateCommand]
+        // The audio and subtitles Now Playing lists (`nowPlayingCard`), for Siri's "Turn on French
+        // subtitles" and "Turn off captions", and the remotes that list them.
+        add(center.enableLanguageOptionCommand) { [weak self] event in self?.changeLanguageOption(event, on: true) ?? .commandFailed }
+        add(center.disableLanguageOptionCommand) { [weak self] event in self?.changeLanguageOption(event, on: false) ?? .commandFailed }
+        ownedCommands = [center.changePlaybackRateCommand, center.enableLanguageOptionCommand, center.disableLanguageOptionCommand]
         // An episode's neighbours, for a headphone's double and triple press, Siri's "next
         // episode" and Control Center. The episode after it is found once it plays, so the
         // command asks for it when it comes.
@@ -2501,6 +2679,59 @@ final class PlayerModel: Identifiable {
             return .success
         }
         ownedCommands += [center.nextTrackCommand, center.previousTrackCommand]
+    }
+
+    /// Turns on the audio or subtitles a command's option asks for, or with `on` false the
+    /// subtitles off. The automatic subtitles option, as Siri's "Turn on subtitles" may send, turns
+    /// on the ones the subtitle key would.
+    private func changeLanguageOption(_ event: MPRemoteCommandEvent, on: Bool) -> MPRemoteCommandHandlerStatus {
+        guard let asked = (event as? MPChangeLanguageOptionCommandEvent)?.languageOption else { return .commandFailed }
+        let kind: NowPlayingLanguages.Kind = asked.languageOptionType == .audible ? .audio : .subtitles
+        switch (kind, on) {
+        case (.audio, false):
+            // There's no playing without a sound track.
+            return .commandFailed
+        case (.subtitles, false):
+            chooseSubtitle(nil)
+            return .success
+        case (.subtitles, true) where asked.isAutomaticLegibleLanguageOption():
+            if selectedSubtitle == nil { toggleSubtitles() }
+            return selectedSubtitle == nil && subtitleOptions.isEmpty ? .noSuchContent : .success
+        case (.audio, true) where asked.isAutomaticAudibleLanguageOption():
+            return .success
+        default:
+            guard let id = NowPlayingLanguages.trackId(askedFor: asked.identifier, kind: kind, languageTag: asked.languageTag ?? "und",
+                                                       characteristics: asked.languageOptionCharacteristics ?? [],
+                                                       among: languageOptions(kind)) else { return .noSuchContent }
+            if kind == .audio { chooseAudio(id) } else { chooseSubtitle(id) }
+            return .success
+        }
+    }
+
+    /// A remote command for the log: what it is, and what it asks.
+    private nonisolated static func describe(_ event: MPRemoteCommandEvent) -> String {
+        let command = String(describing: event.command)
+        switch event {
+        case let skip as MPSkipIntervalCommandEvent:
+            return "\(command), \(skip.interval) s"
+        case let position as MPChangePlaybackPositionCommandEvent:
+            return "\(command), to \(position.positionTime) s"
+        case let rate as MPChangePlaybackRateCommandEvent:
+            return "\(command), \(rate.playbackRate)×"
+        case let seek as MPSeekCommandEvent:
+            return "\(command), \(seek.type == .beginSeeking ? "begin" : "end")"
+        case let language as MPChangeLanguageOptionCommandEvent:
+            let option = language.languageOption
+            return """
+                \(command), \(option.languageOptionType == .audible ? "audio" : "subtitles") \
+                "\(option.displayName ?? "")" \(option.languageTag ?? "?") \(option.identifier ?? "-") \
+                \(option.languageOptionCharacteristics ?? []) automatic: \
+                \(option.isAutomaticLegibleLanguageOption() || option.isAutomaticAudibleLanguageOption()), \
+                setting \(language.setting.rawValue)
+                """
+        default:
+            return command
+        }
     }
 
     #if os(tvOS)

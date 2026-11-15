@@ -16,6 +16,9 @@ final class Scrubbing {
     /// How far the position moves for a finger's movement along a touchscreen's timeline: below
     /// 1 while the finger has slid up away from the bar to place it finely (`TimelineDrag`).
     var dragRate: Double = 1
+    /// The finger on the Apple TV remote is on the clickpad's ring, going round it or resting
+    /// there ready to (`RingTurn`), and the timeline shows the ring.
+    var isOnRing = false
 
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var skipRunTask: Task<Void, Never>?
@@ -119,15 +122,24 @@ nonisolated enum ScrubMotion {
         return distance * span * gain
     }
 
-    /// Seconds of the title one full circle of the clickpad's ring moves the timeline: a fiftieth
-    /// of the title, between 30 seconds and two minutes, for placing it finely.
+    /// Seconds of the title one full circle of the clickpad's ring moves the timeline at an
+    /// ordinary pace: a fiftieth of the title, between 30 seconds and two minutes, for placing it
+    /// finely.
     static func secondsPerTurn(duration: Double) -> Double {
         min(max(duration / 50, 30), 120)
     }
 
-    /// Seconds the timeline moves for `turn` radians around the ring, clockwise positive.
-    static func circle(_ turn: Double, duration: Double) -> Double {
-        turn / (2 * .pi) * secondsPerTurn(duration: duration)
+    /// Seconds the timeline moves for `turn` radians around the ring, clockwise positive, the
+    /// finger going round at `speed` turns a second (`RingSpeed`).
+    static func circle(_ turn: Double, speed: Double, duration: Double) -> Double {
+        turn / (2 * .pi) * secondsPerTurn(duration: duration) * circleGain(speed: speed)
+    }
+
+    /// How much further than `secondsPerTurn` a turn goes at `speed` turns a second: no further up
+    /// to a turn a second, then as many times further as turns a second, up to three, so a quick
+    /// circle crosses a film in a few turns and slowing down places it finely again.
+    static func circleGain(speed: Double) -> Double {
+        min(max(speed, 1), 3)
     }
 
     /// The scanning speeds, in seconds of the title a second, that a held direction steps through.
@@ -309,10 +321,13 @@ nonisolated enum StraySwipe {
 /// Tells a finger circling the edge of the remote's touch surface, the Siri Remote's clickpad ring,
 /// from one swiping across it, from where on the surface the finger is. Circling, the direction it
 /// moves in turns as far as it goes around the middle; swiping, even in an arc along the edge, it
-/// turns much less.
+/// turns much less. A finger that rests on the ring first, as Apple TV's player asks for, arms it
+/// (`arm()`), and circles as soon as it moves round.
 nonisolated struct RingTurn {
     /// The finger is circling: each new point turns the timeline.
     private(set) var isTurning = false
+    /// The finger rested on the ring and hasn't left it: it circles as soon as it goes round.
+    private(set) var isArmed = false
     private var last: SIMD2<Double>?
     /// Where the stretch of movement being measured for its direction began.
     private var anchor: SIMD2<Double>?
@@ -321,6 +336,10 @@ nonisolated struct RingTurn {
     private var bend: Double = 0
     /// How far around the middle the finger has gone, counterclockwise positive.
     private var sweep: Double = 0
+    /// How far around it had gone at the first measure of its direction, and at the last: the arc
+    /// the bend is measured over.
+    private var sweepAtFirstHeading: Double?
+    private var sweepAtHeading: Double = 0
 
     /// Nearer the middle than this, the finger isn't on the ring.
     static let ringRadius = 0.6
@@ -330,31 +349,66 @@ nonisolated struct RingTurn {
     static let startingSweep = 0.9
     /// The movement turns at least this share of the way around, circling.
     static let bendShare = 0.7
+    /// Armed, how far around it goes before it turns the timeline: past the drift of a resting
+    /// finger, about as far along the edge as a swipe goes before it counts with the controls
+    /// hidden (`StraySwipe.hiddenThreshold`).
+    static let armedStartingSweep = 0.15
+    /// How far around a finger goes before the way it curves says whether it may be circling.
+    static let tellingSweep = 0.1
+    /// Until it's sure, a finger curving at least this share of the way around may be circling.
+    static let possibleBendShare = 0.5
     /// Distance the finger travels between measures of its direction.
     private static let stretch = 0.06
 
+    /// What the finger on the ring is doing, as far as it can be told yet.
+    enum Reading: Equatable {
+        /// Not on the ring, or not going round it: a swipe or a click, if anything.
+        case none
+        /// Going round the ring, curving as a circle does, but not far enough yet to be sure.
+        case possible
+        /// Resting on the ring, ready to circle (`arm()`).
+        case armed
+        case turning
+    }
+
+    var reading: Reading {
+        if isTurning { return .turning }
+        if isArmed { return .armed }
+        guard let last, Self.radius(last) >= Self.ringRadius, abs(sweep) >= Self.tellingSweep else { return .none }
+        // Until its direction has been measured twice, there's no curve to tell by.
+        guard let first = sweepAtFirstHeading, sweepAtHeading != first else { return .possible }
+        let arc = sweepAtHeading - first
+        return (bend < 0) == (arc < 0) && abs(bend) >= abs(arc) * Self.possibleBendShare ? .possible : .none
+    }
+
     /// Takes where the finger is, x to the right and y up, each from -1 to 1, or nil when it has
     /// lifted. Returns the turn to apply in radians, clockwise positive, while circling: on the
-    /// point that shows it is, the whole way it has gone round since it reached the ring.
+    /// point that shows it is, the whole way it has gone round since it reached the ring, or since
+    /// it was armed.
     mutating func update(_ point: SIMD2<Double>?) -> Double? {
         guard let point else {
             self = RingTurn()
             return nil
         }
-        let radius = (point * point).sum().squareRoot()
+        let radius = Self.radius(point)
         defer { last = point }
         guard let last else {
             if radius >= Self.ringRadius { anchor = point }
             return nil
         }
         let turn = Self.wrapped(Self.angle(point) - Self.angle(last))
-        if isTurning {
+        if isTurning || isArmed {
             guard radius >= Self.leaveRadius else {
                 isTurning = false
+                isArmed = false
                 restart()
                 return nil
             }
-            return -turn
+            if isTurning { return -turn }
+            sweep += turn
+            guard abs(sweep) >= Self.armedStartingSweep else { return nil }
+            isTurning = true
+            return -sweep
         }
         guard radius >= Self.ringRadius else {
             restart()
@@ -370,10 +424,29 @@ nonisolated struct RingTurn {
         let direction = atan2(move.y, move.x)
         if let heading { bend += Self.wrapped(direction - heading) }
         heading = direction
+        if sweepAtFirstHeading == nil { sweepAtFirstHeading = sweep }
+        sweepAtHeading = sweep
         self.anchor = point
         guard abs(sweep) >= Self.startingSweep, (bend < 0) == (sweep < 0), abs(bend) >= abs(sweep) * Self.bendShare else { return nil }
         isTurning = true
         return -sweep
+    }
+
+    /// Arms the ring, the finger having rested on it long enough (`TouchRest.arming`): from here
+    /// it circles as soon as it goes round. Says whether it did, which it doesn't with the finger
+    /// off the ring or already circling.
+    mutating func arm() -> Bool {
+        guard !isTurning, let last, Self.radius(last) >= Self.ringRadius else { return false }
+        restart()
+        isArmed = true
+        return true
+    }
+
+    /// Goes back to telling circles by how they curve, as the timeline the ring was armed for goes.
+    mutating func disarm() {
+        guard isArmed else { return }
+        isArmed = false
+        restart()
     }
 
     private mutating func restart() {
@@ -381,7 +454,11 @@ nonisolated struct RingTurn {
         heading = nil
         bend = 0
         sweep = 0
+        sweepAtFirstHeading = nil
+        sweepAtHeading = 0
     }
+
+    private static func radius(_ point: SIMD2<Double>) -> Double { (point * point).sum().squareRoot() }
 
     private static func angle(_ point: SIMD2<Double>) -> Double { atan2(point.y, point.x) }
 
@@ -391,5 +468,165 @@ nonisolated struct RingTurn {
         if angle > .pi { angle -= 2 * .pi }
         if angle < -.pi { angle += 2 * .pi }
         return angle
+    }
+}
+
+/// The sideways swipe under way on the remote's touch surface: where it started moving the
+/// timeline, which a circle that began as the swipe, before it was clear it was circling, goes
+/// back to. Gone back to, the swipe is over, so a swipe after the circle in the same touch starts
+/// from where the circle left the timeline, and a second circle goes back only that far.
+nonisolated struct SwipeUndo: Equatable {
+    /// Where the timeline was as the swipe started moving it; nil with no swipe under way.
+    private(set) var start: Double?
+
+    /// A sideways swipe is moving the timeline.
+    var isSwiping: Bool { start != nil }
+
+    /// A swipe moved the timeline, which was at `position` before it, if it's the swipe's first move.
+    mutating func swiped(from position: Double) {
+        if start == nil { start = position }
+    }
+
+    /// A circle's first turn came, undoing what read as a swipe before it when `undoesSwipe`.
+    /// Returns where the timeline goes back to, or nil to leave it.
+    mutating func circleBegan(undoesSwipe: Bool) -> Double? {
+        guard undoesSwipe, let start else { return nil }
+        self.start = nil
+        return start
+    }
+
+    mutating func lifted() {
+        start = nil
+    }
+}
+
+/// How fast the finger goes round the clickpad's ring, over the last moment of its turns, for
+/// `ScrubMotion.circle`'s gain.
+nonisolated struct RingSpeed {
+    /// The moment the speed is measured over, in seconds.
+    static let window = 0.15
+
+    private var turns: [(time: Double, turn: Double)] = []
+
+    /// Notes a turn of `turn` radians at `time`, in seconds, and returns the speed in turns a
+    /// second. Its first turns, short of a whole moment, read slower than they go, so a circle
+    /// starts out fine.
+    mutating func note(_ turn: Double, at time: Double) -> Double {
+        turns.append((time, turn))
+        turns.removeAll { time - $0.time > Self.window }
+        // Net of any going back, so turning to and fro places the timeline finely.
+        return abs(turns.reduce(0) { $0 + $1.turn }) / (2 * .pi) / Self.window
+    }
+
+    mutating func reset() {
+        turns.removeAll()
+    }
+}
+
+/// A finger resting still on the remote's touch surface: since when, from where it stopped
+/// moving. A finger that moves on rests again from where it stops next.
+nonisolated struct TouchRest {
+    /// A finger drifting no further than this from where it stopped, as a share of the surface's
+    /// half-width, rests.
+    static let slop = 0.08
+    /// Resting this long with the controls hidden shows the timeline, as Apple TV's player does
+    /// (`RemotePeek`).
+    static let peek = 0.3
+    /// Resting this long on the clickpad's ring arms it (`RingTurn.arm()`), and shows its ring.
+    static let arming = 0.4
+
+    /// When the finger stopped where it rests, in seconds; nil while it isn't on the surface.
+    private(set) var since: Double?
+    private var point: SIMD2<Double>?
+
+    /// The finger is at `point` at `time`, or lifted at nil. Returns true when it has come to
+    /// a new rest, which the waits for `peek` and `arming` count from.
+    mutating func moved(to point: SIMD2<Double>?, at time: Double) -> Bool {
+        guard let point else {
+            self = TouchRest()
+            return false
+        }
+        if let rest = self.point {
+            let drift = point - rest
+            guard (drift * drift).sum().squareRoot() > Self.slop else { return false }
+        }
+        self.point = point
+        since = time
+        return true
+    }
+
+    /// The finger has rested `duration` seconds by `time`.
+    func hasRested(for duration: Double, at time: Double) -> Bool {
+        guard let since else { return false }
+        return time - since >= duration
+    }
+}
+
+/// Whether an up or down move command from the Apple TV remote moves focus. The focus engine reads
+/// a swipe up or down on the touch surface as one, and so the start of a circle round the
+/// clickpad's ring at its side too, which would take focus off the timeline the circle is moving.
+nonisolated enum VerticalMove {
+    enum Verdict: Equatable {
+        /// Moves focus, as asked.
+        case go
+        /// Waits on the finger: dropped if it turns out to be circling, else let go.
+        case wait
+        case drop
+    }
+
+    /// How recent an up or down arrow press is to have come with a move command, in seconds.
+    static let pressReach = 0.3
+
+    /// What to do with an up or down move command, the finger on the ring reading `ring`.
+    /// `isSwiping`: a sideways swipe is moving the timeline, which a swipe a little off level
+    /// mustn't take focus from. `pressed`: an up or down arrow press came with it, as a click on
+    /// the ring's top or bottom, a key or a game controller's pad sends, which always goes.
+    static func verdict(ring: RingTurn.Reading, isSwiping: Bool, pressed: Bool) -> Verdict {
+        if pressed { return .go }
+        if isSwiping { return .drop }
+        switch ring {
+        case .turning, .armed: return .drop
+        case .possible: return .wait
+        case .none: return .go
+        }
+    }
+}
+
+/// The timeline a resting finger brings up while the controls are hidden, without moving it, as
+/// Apple TV's player shows its controls for a finger resting on the clickpad.
+nonisolated enum RemotePeek {
+    /// The timeline stays this long after the finger lifts, unless it moved the timeline.
+    static let lingers: Duration = .seconds(3)
+}
+
+/// The remotes whose touch surfaces are followed, by the objects the system gives for them: each
+/// once, however often it connects, and the one the finger was on remembered, so a remote that
+/// goes (asleep, or out of range) ends the touch it was in the middle of.
+nonisolated struct RemoteRoster<Remote: AnyObject> {
+    private(set) var remotes: [Remote] = []
+    private var touchedRemote: ObjectIdentifier?
+
+    /// Lists `remote`, unless it's listed already.
+    mutating func connected(_ remote: Remote) {
+        guard !remotes.contains(where: { $0 === remote }) else { return }
+        remotes.append(remote)
+    }
+
+    /// Lets `remote` go. Returns true when the finger was on it: its touch ended with it.
+    mutating func disconnected(_ remote: Remote) -> Bool {
+        remotes.removeAll { $0 === remote }
+        guard touchedRemote == ObjectIdentifier(remote) else { return false }
+        touchedRemote = nil
+        return true
+    }
+
+    /// The finger is on `remote`'s surface.
+    mutating func touched(_ remote: Remote) {
+        touchedRemote = ObjectIdentifier(remote)
+    }
+
+    mutating func removeAll() {
+        remotes.removeAll()
+        touchedRemote = nil
     }
 }

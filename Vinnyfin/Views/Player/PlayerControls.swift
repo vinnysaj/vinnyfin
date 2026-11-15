@@ -50,6 +50,10 @@ struct PlayerControls: View {
     let onTimelineSelect: () -> Void
     /// A swipe or an arrow up or down from the timeline; sideways is the remote's own (`RemoteInput`).
     let onTimelineMove: (MoveCommandDirection) -> Void
+    /// The finger on the remote may be going round the ring, or swipes the timeline: nothing but the
+    /// timeline takes focus, which the focus engine would move up or down as a circle starts at the
+    /// ring's side, before the move command comes (`VerticalMove`).
+    var holdsFocusOnTimeline = false
     #endif
     @Environment(SharePlay.self) private var sharePlay
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -137,8 +141,9 @@ struct PlayerControls: View {
                 topBar
                     .opacity(showsOnlyTimeline ? 0 : 1)
                     .accessibilityHidden(showsOnlyTimeline)
-                    #if os(macOS)
-                    // The window's own buttons keep the corner, beside the bar.
+                    #if os(macOS) || os(iOS)
+                    // The window's own buttons keep the corner, beside the bar: the Mac's, and an
+                    // iPad window's, which take a tap there even while they're hidden.
                     .containerCornerOffset(.leading, sizeToFit: true)
                     #endif
                 Spacer()
@@ -154,6 +159,7 @@ struct PlayerControls: View {
                     #if os(tvOS)
                     if !showsOnlyTimeline {
                         PlayerTabs(model: model, panel: $panel, focus: focus, onInteraction: onInteraction)
+                            .disabled(holdsFocusOnTimeline)
                             .padding(.top, 20)
                     }
                     #endif
@@ -515,6 +521,9 @@ struct PlayerControls: View {
             // sends it, which shows them first. Disabled, they couldn't take it as they reappear.
             .opacity(showsOnlyTimeline ? 0 : 1)
             .accessibilityHidden(showsOnlyTimeline)
+            #if os(tvOS)
+            .disabled(holdsFocusOnTimeline)
+            #endif
             #if os(visionOS)
             // In the middle of the row, whatever is at its ends.
             .overlay { transport.controlSize(controlSize) }
@@ -782,6 +791,7 @@ struct Scrubber: View {
         .onMoveCommand(perform: onMove)
         .onTapGesture(perform: onSelect)
         .animation(.easeOut(duration: 0.2), value: scrubbing.skipRun?.id)
+        .animation(.easeOut(duration: 0.15), value: scrubbing.isOnRing)
         .animation(.easeOut(duration: 0.15), value: position == nil)
         #endif
         .accessibilityElement()
@@ -855,19 +865,31 @@ struct Scrubber: View {
                     .transition(.opacity)
             }
             #if os(tvOS)
-            if position == nil, let run = model.scrubbing.skipRun {
-                let center = width * min(1, max(0, model.clock.time / duration))
-                SkipTally(seconds: run.seconds)
-                    .fixedSize()
-                    .offset(x: min(max(center, SkipTally.halfWidth), max(SkipTally.halfWidth, width - SkipTally.halfWidth)) - width / 2,
-                            y: above)
-                    .frame(width: width, height: geometry.size.height, alignment: .bottom)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
+            if position == nil, model.scrubbing.isOnRing {
+                // The ring armed by a finger resting on it, before it has moved the timeline.
+                overPlayhead(RingCue().padding(Self.ringCuePadding).platformGlass(in: .circle),
+                             width: width, height: geometry.size.height, above: above, duration: duration)
+            } else if position == nil, let run = model.scrubbing.skipRun {
+                overPlayhead(SkipTally(seconds: run.seconds).fixedSize(),
+                             width: width, height: geometry.size.height, above: above, duration: duration)
             }
             #endif
         }
         .allowsHitTesting(false)
     }
+
+    #if os(tvOS)
+    /// `content` over the playhead, `above` the bar, kept within the timeline.
+    private func overPlayhead(_ content: some View, width: CGFloat, height: CGFloat, above: CGFloat, duration: Double) -> some View {
+        let center = width * min(1, max(0, model.clock.time / duration))
+        return content
+            .offset(x: min(max(center, SkipTally.halfWidth), max(SkipTally.halfWidth, width - SkipTally.halfWidth)) - width / 2, y: above)
+            .frame(width: width, height: height, alignment: .bottom)
+            .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
+    }
+
+    private static let ringCuePadding: CGFloat = 10
+    #endif
 
     /// Where it is, with the chapter when there are chapters.
     private func spokenPosition(_ time: Double, of duration: Double) -> String {
@@ -976,6 +998,8 @@ private struct ScrubPreview: View {
                 #if os(tvOS)
                 if let speed = model.scrubbing.scanSpeed {
                     scanSpeed(speed)
+                } else if model.scrubbing.isOnRing {
+                    RingCue()
                 }
                 #endif
                 Text(Scrubber.format(time)).font(.caption.weight(.semibold))
@@ -1055,6 +1079,18 @@ private struct ScrubPreview: View {
         #endif
     }
 }
+
+#if os(tvOS)
+/// The clickpad's ring, while the finger on the remote goes round it moving the timeline, or rests
+/// on it ready to, as Apple TV's player shows it.
+private struct RingCue: View {
+    var body: some View {
+        Image(systemName: "arrow.clockwise.circle")
+            .font(.callout.weight(.semibold))
+            .accessibilityHidden(true)
+    }
+}
+#endif
 
 /// The sum of the skips in a row: "+30", "−1:00". On Apple TV over the playhead, with the way it
 /// went; elsewhere over the skip button, or the side of the picture double-tapped, which show

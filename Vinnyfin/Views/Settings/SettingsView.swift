@@ -316,6 +316,16 @@ private struct PlaybackSettings: View {
             Toggle("Match Frame Rate and Dynamic Range", isOn: $settings.matchContent)
             #endif
         }
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            Section {
+                Toggle("Play Videos in Landscape", isOn: $settings.playsVideosInLandscape)
+                    .accessibilityIdentifier("settings.playsVideosInLandscape")
+            } footer: {
+                Text("A widescreen title turns the player sideways, even with Portrait Orientation Lock on. The player's Rotation Lock turns it back upright.")
+            }
+        }
+        #endif
     }
 
     /// The bitrate Adaptive Quality learned this device's connection carries, while it holds

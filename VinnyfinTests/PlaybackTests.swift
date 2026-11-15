@@ -1285,6 +1285,40 @@ struct PlaybackEdgeTests {
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
+    @Test func playWhileMovingTheTimelineJumpsThereAndPlays() async throws {
+        let file = try await GeneratedVideo.write(seconds: 20)
+        let model = try makeModel(playing: file, engine: try AetherEngine())
+        await model.start()
+        try await waitUntil { model.status == .playing && model.clock.time > 0.5 }
+        model.togglePlayPause()
+        try await waitUntil { model.status == .paused }
+        try #require(model.status == .paused)
+
+        // Paused, the timeline moved on: Play, the on-screen button's or the remote's, plays from
+        // the position chosen, and the timeline lets go of it.
+        let paused = model.clock.time
+        model.scrub(by: 8)
+        try #require(model.scrubbing.isActive)
+        model.togglePlayPause()
+        #expect(!model.scrubbing.isActive)
+        try await waitUntil { model.status == .playing && model.clock.time > paused + 8.2 }
+        #expect(model.status == .playing)
+        #expect(model.clock.time >= paused + 7.5 && model.clock.time < paused + 11, "Played from \(model.clock.time)")
+
+        // Playing, the timeline moved back: Play plays on from there rather than pausing.
+        let playing = model.clock.time
+        model.scrub(by: -6)
+        model.togglePlayPause()
+        #expect(!model.scrubbing.isActive)
+        try await waitUntil { model.status == .playing && model.clock.time < playing - 3 }
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(model.status == .playing)
+        #expect(model.clock.time < playing - 3, "Played from \(model.clock.time), the timeline moved back from \(playing)")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
     @Test func theCountdownPlaysTheNextEpisodeWhenItRunsOut() async throws {
         let file = try await GeneratedVideo.write(seconds: 4)
         let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())

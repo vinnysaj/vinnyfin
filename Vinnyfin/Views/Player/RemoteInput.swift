@@ -10,9 +10,13 @@ enum RemoteGesture: Equatable {
     /// The finger moved across the touch surface by `distance` of its width, positive to the
     /// right, at `speed` widths a second. Only once the swipe is clearly sideways.
     case swipe(distance: Double, speed: Double)
-    /// The finger went around the ring by `turn` radians, clockwise positive. On the first turn of
-    /// a circle `undoesSwipe`: what the finger did before it was clear it was circling read as a swipe.
-    case circle(turn: Double, undoesSwipe: Bool)
+    /// The finger went around the ring by `turn` radians, clockwise positive, at `speed` turns a
+    /// second (`RingSpeed`), nil on a circle's first turn. On the first turn of a circle that
+    /// wasn't armed `undoesSwipe`: what the finger did before it was clear it was circling read as
+    /// a swipe.
+    case circle(turn: Double, speed: Double?, undoesSwipe: Bool)
+    /// The finger has rested still on the touch surface a moment (`TouchRest.peek`).
+    case rest
     /// The finger left the touch surface.
     case lift
     /// A side clicked and let go.
@@ -28,6 +32,9 @@ enum RemoteGesture: Equatable {
 struct RemoteInput: UIViewRepresentable {
     let surface: TouchSurface
     var isActive: Bool
+    /// The timeline shows, so a finger resting on the ring arms it (`RingTurn.arm()`) and the
+    /// timeline shows the ring.
+    var ringArms: Bool
     /// How far a swipe goes, as a share of the surface's width, before it counts (`StraySwipe`).
     var swipeThreshold: Double
     let onGesture: (RemoteGesture) -> Void
@@ -39,6 +46,7 @@ struct RemoteInput: UIViewRepresentable {
     func updateUIView(_ view: RemoteInputView, context: Context) {
         view.onGesture = onGesture
         view.isActive = isActive
+        surface.ringArms = ringArms
         view.swipeThreshold = CGFloat(swipeThreshold)
     }
 
@@ -74,10 +82,11 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
         pan.delegate = self
         return pan
     }()
-    private lazy var sides: SidePressWatcher = {
-        let sides = SidePressWatcher(target: nil, action: nil)
+    private lazy var sides: ArrowPressWatcher = {
+        let sides = ArrowPressWatcher(target: nil, action: nil)
         sides.delegate = self
-        sides.onChange = { [weak self] forward, isDown in self?.side(forward: forward, isDown: isDown) }
+        sides.onSide = { [weak self] forward, isDown in self?.side(forward: forward, isDown: isDown) }
+        sides.onUpOrDown = { [weak self] isDown in self?.surface.noteVerticalPress(isDown: isDown) }
         return sides
     }()
 
@@ -102,7 +111,10 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
         isUserInteractionEnabled = false
         pan.isEnabled = false
         sides.isEnabled = false
-        surface.onTurn = { [weak self] turn, isFirst in self?.onGesture(.circle(turn: turn, undoesSwipe: isFirst)) }
+        surface.onTurn = { [weak self] turn, speed, undoesSwipe in
+            self?.onGesture(.circle(turn: turn, speed: speed, undoesSwipe: undoesSwipe))
+        }
+        surface.onRest = { [weak self] in self?.onGesture(.rest) }
     }
 
     @available(*, unavailable)
@@ -144,8 +156,8 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
             guard swipeIsSideways == true else { return }
             let distance = translation.x - passedTranslation
             passedTranslation = translation.x
-            // Circling, the ring takes the finger's movement instead.
-            guard !surface.isCircling else { return }
+            // Circling, or armed to, the ring takes the finger's movement instead.
+            guard !surface.holdsSwipes else { return }
             onGesture(.swipe(distance: distance / width, speed: abs(pan.velocity(in: window).x) / width))
         default:
             swipeIsSideways = nil
@@ -183,29 +195,27 @@ final class RemoteInputView: UIView, UIGestureRecognizerDelegate {
     }
 }
 
-/// Sees the left and right arrow presses go down and up, without ever recognizing: the presses go
-/// on to focus and SwiftUI's commands as if it weren't there.
-private final class SidePressWatcher: UIGestureRecognizer {
-    var onChange: ((_ forward: Bool, _ isDown: Bool) -> Void)?
+/// Sees the arrow presses go down and up, without ever recognizing: the presses go on to focus and
+/// SwiftUI's commands as if it weren't there. Left and right are the sides clicked or held; up and
+/// down tell a click on the ring's top or bottom from a swipe (`VerticalMove`).
+private final class ArrowPressWatcher: UIGestureRecognizer {
+    var onSide: ((_ forward: Bool, _ isDown: Bool) -> Void)?
+    var onUpOrDown: ((_ isDown: Bool) -> Void)?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
-        allowedPressTypes = [UIPress.PressType.leftArrow, .rightArrow].map { NSNumber(value: $0.rawValue) }
+        allowedPressTypes = [UIPress.PressType.leftArrow, .rightArrow, .upArrow, .downArrow].map { NSNumber(value: $0.rawValue) }
         allowedTouchTypes = []
         cancelsTouchesInView = false
         delaysTouchesEnded = false
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent) {
-        for press in presses {
-            if let forward = Self.forward(press) { onChange?(forward, true) }
-        }
+        for press in presses { changed(press, isDown: true) }
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent) {
-        for press in presses {
-            if let forward = Self.forward(press) { onChange?(forward, false) }
-        }
+        for press in presses { changed(press, isDown: false) }
         state = .failed
     }
 
@@ -213,39 +223,60 @@ private final class SidePressWatcher: UIGestureRecognizer {
         pressesEnded(presses, with: event)
     }
 
-    private static func forward(_ press: UIPress) -> Bool? {
+    private func changed(_ press: UIPress, isDown: Bool) {
         switch press.type {
-        case .rightArrow: true
-        case .leftArrow: false
-        default: nil
+        case .rightArrow: onSide?(true, isDown)
+        case .leftArrow: onSide?(false, isDown)
+        case .upArrow, .downArrow: onUpOrDown?(isDown)
+        default: break
         }
     }
 }
 
 /// The finger on a Siri Remote's touch surface, through Game Controller, which unlike UIKit's
-/// touches tells where on the surface it is: for circling the clickpad's ring, and for clicking a
-/// side of the first Siri Remote's surface, which clicks as one button.
-@MainActor
+/// touches tells where on the surface it is: for circling the clickpad's ring, for a finger resting
+/// on the surface, and for clicking a side of the first Siri Remote's surface, which clicks as one
+/// button. Follows every remote connected, Control Center's among them, and lets go of one that
+/// disconnects, as a remote does as the Apple TV sleeps.
+@MainActor @Observable
 final class TouchSurface: NSObject {
-    /// Told each turn of the finger around the ring, in radians clockwise, and whether it's the
-    /// first, while active.
-    var onTurn: ((_ turn: Double, _ isFirst: Bool) -> Void)?
-    var isActive = false
-    var isCircling: Bool { ring.isTurning }
+    /// Told each turn of the finger around the ring, in radians clockwise, with its speed in turns
+    /// a second (nil on a circle's first turn) and whether it undoes what read as a swipe before it,
+    /// while active.
+    @ObservationIgnored var onTurn: ((_ turn: Double, _ speed: Double?, _ undoesSwipe: Bool) -> Void)?
+    /// Told when the finger has rested still a moment (`TouchRest.peek`), while active.
+    @ObservationIgnored var onRest: (() -> Void)?
+    @ObservationIgnored var isActive = false {
+        didSet { if !isActive { disarm() } }
+    }
+    /// A finger resting on the ring arms it: the timeline is up to show its ring.
+    @ObservationIgnored var ringArms = false {
+        didSet { if !ringArms { disarm() } }
+    }
+    /// What the finger on the ring is doing, as far as it can be told yet.
+    private(set) var reading = RingTurn.Reading.none
+    /// The ring takes the finger's movement, rather than a swipe: circling, or armed to.
+    var holdsSwipes: Bool { ring.isTurning || ring.isArmed }
 
-    private var ring = RingTurn()
-    private var point: SIMD2<Double>?
+    @ObservationIgnored private var ring = RingTurn()
+    @ObservationIgnored private var speed = RingSpeed()
+    @ObservationIgnored private var rest = TouchRest()
+    @ObservationIgnored private var restWait: Task<Void, Never>?
+    @ObservationIgnored private var point: SIMD2<Double>?
     /// The remote the finger is on clicks its sides as arrows of their own.
-    private var sidesClickApart = true
-    private var lastSidePress: ContinuousClock.Instant?
-    private var remotes: [GCController] = []
-    private var isStarted = false
+    @ObservationIgnored private var sidesClickApart = true
+    @ObservationIgnored private var lastSidePress: ContinuousClock.Instant?
+    @ObservationIgnored private var lastVerticalPress: ContinuousClock.Instant?
+    @ObservationIgnored private var verticalPressIsDown = false
+    @ObservationIgnored private var roster = RemoteRoster<GCController>()
+    @ObservationIgnored private var isStarted = false
 
     func start() {
         guard !isStarted else { return }
         isStarted = true
-        // Control Center's remote connects as it opens.
+        // Control Center's remote connects as it opens; a Siri Remote again as the Apple TV wakes.
         NotificationCenter.default.addObserver(self, selector: #selector(connected(_:)), name: .GCControllerDidConnect, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(disconnected(_:)), name: .GCControllerDidDisconnect, object: nil)
         GCController.controllers().forEach(attach)
     }
 
@@ -253,17 +284,34 @@ final class TouchSurface: NSObject {
         guard isStarted else { return }
         isStarted = false
         NotificationCenter.default.removeObserver(self, name: .GCControllerDidConnect, object: nil)
-        for remote in remotes {
+        NotificationCenter.default.removeObserver(self, name: .GCControllerDidDisconnect, object: nil)
+        for remote in roster.remotes {
             remote.microGamepad?.dpad.valueChangedHandler = nil
             remote.microGamepad?.reportsAbsoluteDpadValues = false
         }
-        remotes = []
-        ring = RingTurn()
-        point = nil
+        roster.removeAll()
+        lifted()
     }
 
+    /// A click, the finger resting on the ring as it clicks there, isn't a circle: the ring armed
+    /// by the rest lets go, and focus can move with the click.
     func noteSidePress() {
         lastSidePress = .now
+        disarm()
+    }
+
+    func noteVerticalPress(isDown: Bool) {
+        verticalPressIsDown = isDown
+        lastVerticalPress = .now
+        if isDown { disarm() }
+    }
+
+    /// An up or down arrow is down, or was pressed just now (`VerticalMove.pressReach`): a click
+    /// on the ring's top or bottom, or a key, rather than a swipe.
+    var verticalPressCame: Bool {
+        if verticalPressIsDown { return true }
+        guard let lastVerticalPress else { return false }
+        return ContinuousClock.now - lastVerticalPress < .seconds(VerticalMove.pressReach)
     }
 
     /// The side of the surface a click just now was on, forward for the right: on a remote whose
@@ -280,27 +328,83 @@ final class TouchSurface: NSObject {
         if let controller = note.object as? GCController { attach(controller) }
     }
 
+    @objc private func disconnected(_ note: Notification) {
+        guard let controller = note.object as? GCController else { return }
+        controller.microGamepad?.dpad.valueChangedHandler = nil
+        // The finger on it lifted with it, as far as anything here will hear.
+        if roster.disconnected(controller) { lifted() }
+    }
+
+    /// Follows `controller`'s surface, again if it was followed before: one that connects again
+    /// may have lost the handler.
     private func attach(_ controller: GCController) {
         // The Siri Remotes and Control Center's remote; a game controller's stick isn't a surface.
-        guard controller.extendedGamepad == nil, let gamepad = controller.microGamepad,
-              !remotes.contains(where: { $0 === controller }) else { return }
-        remotes.append(controller)
+        guard controller.extendedGamepad == nil, let gamepad = controller.microGamepad else { return }
+        roster.connected(controller)
         gamepad.reportsAbsoluteDpadValues = true
         let sidesClickApart = controller.physicalInputProfile.dpads[GCInputDirectionalCardinalDpad] != nil
         // Called on the controller's handler queue, the main queue.
-        gamepad.dpad.valueChangedHandler = { [weak self] _, x, y in
+        gamepad.dpad.valueChangedHandler = { [weak self, weak controller] _, x, y in
             MainActor.assumeIsolated {
-                self?.moved(to: x == 0 && y == 0 ? nil : SIMD2(Double(x), Double(y)), sidesClickApart: sidesClickApart)
+                guard let self, let controller else { return }
+                self.moved(on: controller, to: x == 0 && y == 0 ? nil : SIMD2(Double(x), Double(y)), sidesClickApart: sidesClickApart)
             }
         }
     }
 
-    private func moved(to point: SIMD2<Double>?, sidesClickApart: Bool) {
+    private func moved(on remote: GCController, to point: SIMD2<Double>?, sidesClickApart: Bool) {
+        guard let point else { return lifted() }
+        roster.touched(remote)
         self.point = point
-        if point != nil { self.sidesClickApart = sidesClickApart }
+        self.sidesClickApart = sidesClickApart
+        let now = ProcessInfo.processInfo.systemUptime
+        if rest.moved(to: point, at: now) { waitOnRest() }
         let wasTurning = ring.isTurning
-        guard let turn = ring.update(point), isActive else { return }
-        onTurn?(turn, !wasTurning)
+        let wasArmed = ring.isArmed
+        let turn = ring.update(point)
+        updateReading()
+        guard let turn else {
+            if !ring.isTurning { speed.reset() }
+            return
+        }
+        // A circle's first turn catches up on how far it went round before it was one.
+        let measured: Double? = wasTurning ? speed.note(turn, at: now) : nil
+        guard isActive else { return }
+        onTurn?(turn, measured, !wasTurning && !wasArmed)
+    }
+
+    private func lifted() {
+        point = nil
+        _ = ring.update(nil)
+        _ = rest.moved(to: nil, at: 0)
+        speed.reset()
+        restWait?.cancel()
+        updateReading()
+    }
+
+    /// From a new rest: after `TouchRest.peek` tells of it, and after `TouchRest.arming`, with the
+    /// finger on the ring and the timeline up, arms the ring.
+    private func waitOnRest() {
+        restWait?.cancel()
+        restWait = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(TouchRest.peek))
+            guard let self, !Task.isCancelled else { return }
+            if self.isActive { self.onRest?() }
+            try? await Task.sleep(for: .seconds(TouchRest.arming - TouchRest.peek))
+            guard !Task.isCancelled, self.isActive, self.ringArms, self.ring.arm() else { return }
+            self.speed.reset()
+            self.updateReading()
+        }
+    }
+
+    private func disarm() {
+        ring.disarm()
+        updateReading()
+    }
+
+    private func updateReading() {
+        let reading = ring.reading
+        if reading != self.reading { self.reading = reading }
     }
 }
 #endif

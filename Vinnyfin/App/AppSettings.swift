@@ -124,6 +124,9 @@ final class AppSettings {
     var subtitleScale = 1.0 { didSet { store(subtitleScale, Keys.subtitleScale) } }
     /// Switches the TV's frame rate and dynamic range to the video's (Apple TV).
     var matchContent = true { didSet { store(matchContent, Keys.matchContent) } }
+    /// A landscape title turns the player to landscape on an iPhone held upright, Portrait
+    /// Orientation Lock or not (`PlayerOrientationLock`).
+    var playsVideosInLandscape = true { didSet { store(playsVideosInLandscape, Keys.playsVideosInLandscape) } }
     /// The sound Sounds plays (`SoundPlayer`), the one picked last.
     var sound = Sound.brownNoise { didSet { store(sound.rawValue, Keys.sound) } }
 
@@ -158,6 +161,7 @@ final class AppSettings {
         static let subtitleMode = "settings.subtitleMode"
         static let subtitleScale = "settings.subtitleScale"
         static let matchContent = "settings.matchContent"
+        static let playsVideosInLandscape = "settings.playsVideosInLandscape"
         static let sound = "settings.sound"
         /// Settings no longer offered. Left in the defaults, they'd go to iCloud with the rest.
         static let retired = ["settings.smartDownloadCount"]
@@ -207,6 +211,7 @@ final class AppSettings {
         subtitleMode = defaults.string(forKey: Keys.subtitleMode).flatMap(SubtitleMode.init) ?? subtitleMode
         subtitleScale = defaults.object(forKey: Keys.subtitleScale) as? Double ?? subtitleScale
         matchContent = defaults.object(forKey: Keys.matchContent) as? Bool ?? matchContent
+        playsVideosInLandscape = defaults.object(forKey: Keys.playsVideosInLandscape) as? Bool ?? playsVideosInLandscape
         sound = defaults.string(forKey: Keys.sound).flatMap(Sound.init) ?? sound
     }
 

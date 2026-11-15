@@ -1095,7 +1095,7 @@ struct SkipTally: View {
 
 /// One thumbnail cut from its sheet of scrub previews, which comes from the image cache, or from
 /// disk for a download.
-private struct TrickplayThumbnail: View {
+struct TrickplayThumbnail: View {
     let tiles: TrickplayTiles
     let time: Double
     @State private var sheet: (index: Int, image: CGImage)?

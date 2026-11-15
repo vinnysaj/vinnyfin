@@ -151,6 +151,10 @@ struct ItemDetailView: View {
                             .pageRow("episodes", in: rowLayout)
                             #endif
                     }
+                    ScenesShelf(item: shown, pickedSourceId: pickedSourceId, streamingSource: playbackSource)
+                        #if os(tvOS)
+                        .pageRow("scenes", in: rowLayout)
+                        #endif
                     if let people = detail?.people {
                         CastShelf(people: people)
                             #if os(tvOS)

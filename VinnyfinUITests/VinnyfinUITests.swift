@@ -109,8 +109,11 @@ final class VinnyfinUITests: XCTestCase {
         tap(app.buttons["index.B"])
         tap(app.buttons["poster.Big Test Movie"])
 
-        tap(app.buttons["version.1080p"])
-        XCTAssertTrue(app.buttons["version.1080p"].wait(for: \.isSelected, toEqual: true, timeout: timeout))
+        let version = app.descendants(matching: .any)["detail.version"].firstMatch
+        tap(version)
+        tap(app.buttons.matching(NSPredicate(format: "label BEGINSWITH '1080p'")).firstMatch)
+        let picked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == '1080p'"), object: version)
+        XCTAssertEqual(XCTWaiter.wait(for: [picked], timeout: timeout), .completed, "Picking 1080p didn't pick it")
         tap(app.buttons["detail.play"])
 
         // The controls fade while playing; a tap on the picture brings them back.

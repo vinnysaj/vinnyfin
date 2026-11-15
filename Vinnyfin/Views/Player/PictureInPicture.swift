@@ -2,6 +2,7 @@ import SwiftUI
 #if os(iOS) || os(macOS)
 import AetherEngine
 import AVKit
+import Combine
 import OSLog
 #endif
 
@@ -36,6 +37,8 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AV
     @ObservationIgnored private weak var engine: AetherEngine?
     @ObservationIgnored private var attachedLayer: AnyObject?
     @ObservationIgnored private var possibleObservation: NSKeyValueObservation?
+    /// Tells the sample-buffer window of the software path's pauses, plays and length.
+    @ObservationIgnored private var playbackChanges: AnyCancellable?
     /// The window is stopping because a player is coming back for the picture.
     @ObservationIgnored private var isRestoring = false
     /// The window is stopping because its playback ended; nothing comes back for it.
@@ -53,11 +56,18 @@ final class PictureInPicture: NSObject, AVPictureInPictureControllerDelegate, AV
         if let layer = engine.nativePlayerLayer {
             guard attachedLayer !== layer else { return }
             attachedLayer = layer
+            playbackChanges = nil
             controller = AVPictureInPictureController(playerLayer: layer)
         } else if let source = engine.softwarePiPSource {
             guard attachedLayer !== source.layer else { return }
             attachedLayer = source.layer
             controller = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: source.layer, playbackDelegate: self))
+            // AVKit asks whether it's paused, and how long it is, only when told it changed: a
+            // pause from the Lock Screen, AirPods, Siri or the group, and the end of a title,
+            // would leave the window's button and progress wrong. AVPlayer's layer tells it itself.
+            playbackChanges = engine.$state.map { _ in () }.merge(with: engine.$duration.map { _ in () })
+                .receive(on: RunLoop.main)
+                .sink { [weak controller] in controller?.invalidatePlaybackState() }
         } else {
             return
         }

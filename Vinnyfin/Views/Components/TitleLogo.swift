@@ -8,10 +8,11 @@ import SwiftUI
 /// logo, or while it can't load, the name shows in large bold type instead.
 ///
 /// Put it under `.environment(\.colorScheme, .dark)`, as the heroes do, so the name reads on the
-/// dark fade behind it.
+/// dark fade behind it. As a link, a chevron after the logo or name says it leads on.
 struct TitleLogo: View {
     let url: URL?
     let name: String
+    var leadsOn = false
 
     /// The width logos are asked for at, the same everywhere, so a logo seen on Home is already
     /// there, at the size wanted, on the title's page.
@@ -38,6 +39,10 @@ struct TitleLogo: View {
                         image.resizable().scaledToFit()
                             // Keeps a light logo apart from a light picture behind it.
                             .shadow(color: .black.opacity(0.35), radius: 10)
+                            // Just past the logo however wide it is, out of its box.
+                            .overlay(alignment: .trailing) {
+                                if leadsOn { chevron.alignmentGuide(.trailing) { $0[.leading] - 8 } }
+                            }
                     }
                 } onCompletion: { result in
                     let failed: URL? = if case .failure = result { url } else { nil }
@@ -47,7 +52,7 @@ struct TitleLogo: View {
                 .frame(maxWidth: size.width, maxHeight: showsName ? 0 : size.height, alignment: .bottomLeading)
             }
             if showsName {
-                Text(name)
+                Text(leadsOn ? "\(name) \(Image(systemName: "chevron.right"))" : "\(name)")
                     .font(.largeTitle.weight(.bold))
                     .lineLimit(dynamicTypeSize.lineLimit(3))
                     .minimumScaleFactor(0.7)
@@ -62,6 +67,13 @@ struct TitleLogo: View {
     }
 
     private var showsName: Bool { url == nil || failedURL == url }
+
+    private var chevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.title2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .shadow(color: .black.opacity(0.35), radius: 6)
+    }
 
     /// The box the logo fits in. Held sideways, a phone keeps the hero short, and the logo with it.
     private var size: CGSize {

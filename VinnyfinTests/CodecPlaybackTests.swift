@@ -73,7 +73,7 @@ struct PlayerHandoffTests {
         let settings = AppSettings(defaults: defaults)
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { _, _ in nil }
         return PlayerModel(request: try .file(file), engine: engine, lease: lease,
-                           resolver: resolver, accounts: accounts, history: history, settings: settings) { _ in nil }
+                           resolver: resolver, accounts: accounts, history: history, settings: settings) { _, _ in nil }
     }
 
     /// Copies library files into a temporary folder. The sandboxed Mac app can only bookmark files

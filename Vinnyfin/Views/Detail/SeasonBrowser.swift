@@ -1,13 +1,19 @@
 import SwiftUI
 
 /// A show's seasons as chips to pick one by, on a show's page and an episode's. A long press on a
-/// chip offers what `menu` gives for its season.
+/// chip offers what `menu` gives for its season. On Apple TV, focus coming into the chips lands on
+/// the season chosen, wherever it comes from.
 struct SeasonPicker<Menu: View>: View {
     let seasons: [JellyfinItem]
     @Binding var selection: String?
     @ViewBuilder var menu: (JellyfinItem) -> Menu
     /// Where the mark of the season chosen slides from chip to chip.
     @Namespace private var selectionMark
+    #if os(tvOS)
+    @FocusState private var focused: String?
+    /// Bounds the chips' default focus, so it's theirs to take as focus comes in, not the page's.
+    @Namespace private var chipsScope
+    #endif
 
     var body: some View {
         if seasons.count > 1 {
@@ -21,6 +27,9 @@ struct SeasonPicker<Menu: View>: View {
                                 .padding(.horizontal, 6)
                         }
                         .buttonStyle(SeasonChipStyle(isSelected: season.id == selection, mark: selectionMark))
+                        #if os(tvOS)
+                        .focused($focused, equals: season.id)
+                        #endif
                         .contextMenu { menu(season) }
                         .accessibilityAddTraits(season.id == selection ? .isSelected : [])
                         .accessibilityIdentifier("season.\(season.name)")
@@ -35,6 +44,8 @@ struct SeasonPicker<Menu: View>: View {
             .scrollIndicators(.hidden)
             #if os(tvOS)
             .focusSection()
+            .focusScope(chipsScope)
+            .defaultFocus($focused, selection, priority: .userInitiated)
             #endif
         }
     }
@@ -206,9 +217,11 @@ struct SeasonBrowser: View {
                         #if os(tvOS)
                         .focused($focused, equals: other.id)
                         #endif
-                        .titleMenu(other) { updated in
+                        .titleMenu(other, onChange: { updated in
                             update(updated.id) { $0 = updated }
                             onChange(updated)
+                        }) {
+                            MarkPreviousWatchedButton(episode: other) { await reloadAfterBatchChange() }
                         }
                         .accessibilityHint(other.id == episode.id ? "Goes back up to it" : "Shows this episode")
                         .accessibilityIdentifier("seasonBrowser.episode.\(other.indexNumber ?? 0)")
@@ -316,6 +329,14 @@ struct SeasonBrowser: View {
                                                              fields: "Overview,PrimaryImageAspectRatio"),
               seasonId == self.seasonId else { return }
         show(found, of: seasonId)
+    }
+
+    /// After a change to several episodes from a card's menu, and after its Undo: the season's
+    /// episodes as they are now, and the episode shown's state for the page.
+    private func reloadAfterBatchChange() async {
+        guard let seriesId = episode.seriesId else { return }
+        await reload(seriesId: seriesId)
+        if let shown = episodes?.first(where: { $0.id == episode.id }) { onChange(shown) }
     }
 
     /// Puts a season's episodes in the row, fading from the last season's.

@@ -265,6 +265,8 @@ struct TrackPanel: View {
                             isOn: model.sound.reducesLoudSounds, set: model.setReducesLoudSounds)
                 if model.soundShapingState == .unavailable {
                     noteLabel("Not available for this stream")
+                } else if let note = model.soundToolsNote {
+                    noteLabel(note)
                 }
             }
             .padding(.bottom, Self.rowInset + 6)

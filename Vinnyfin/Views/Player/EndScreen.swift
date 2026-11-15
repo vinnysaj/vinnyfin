@@ -61,6 +61,10 @@ struct EndScreen: View {
                 .accessibilityIdentifier("player.close")
                 .padding(.horizontal, Metrics.playerInset)
                 .padding(.vertical, 12)
+                #if os(iOS)
+                // Beside an iPad window's own buttons, as the controls' Close is.
+                .containerCornerOffset(.leading, sizeToFit: true)
+                #endif
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 #endif
             }

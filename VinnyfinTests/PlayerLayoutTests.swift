@@ -176,8 +176,81 @@ struct PlayerOrientationRuleTests {
         rule.isHalfOpen = false
         #expect(rule.allowed == .landscape)
     }
+
+    private let film = CGSize(width: 1920, height: 800)
+
+    @Test func aLandscapeTitleHeldUprightTurnsThePlayerAndHoldsItThere() {
+        var rule = PlayerOrientationLock.Rule()
+        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(turns)
+        #expect(rule.isLocked)
+        #expect(rule.allowed == .landscape)
+        // Still upright, the lock waits, lit, as the way back to portrait.
+        #expect(rule.isTurnedAgainst(.portrait))
+        rule.unlock()
+        #expect(rule.allowed == .all)
+    }
+
+    @Test func itTurnsOnlyForTheFirstShapeKnownWhileOpen() {
+        var rule = PlayerOrientationLock.Rule()
+        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(turns)
+        rule.unlock()
+        // The next episode, or the stream's own size arriving after the server's, leaves the
+        // shape the viewer turned it back to.
+        let turns2 = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(!turns2)
+        #expect(!rule.isLocked)
+    }
+
+    @Test func itDoesntTurnWhenItNeedntOrIsntAsked() {
+        // The setting off.
+        var off = PlayerOrientationLock.Rule()
+        let turns = off.pictureShaped(film, current: .portrait, playsInLandscape: false)
+        #expect(!turns)
+        // A picture taller than wide.
+        var upright = PlayerOrientationLock.Rule()
+        let turns2 = upright.pictureShaped(CGSize(width: 1080, height: 1920), current: .portrait, playsInLandscape: true)
+        #expect(!turns2)
+        // On its side already.
+        var sideways = PlayerOrientationLock.Rule()
+        let turns3 = sideways.pictureShaped(film, current: .landscapeLeft, playsInLandscape: true)
+        #expect(!turns3)
+        #expect(!sideways.isLocked)
+        // Standing half open, with the picture above the fold.
+        var halfOpen = PlayerOrientationLock.Rule()
+        halfOpen.isHalfOpen = true
+        let turns4 = halfOpen.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(!turns4)
+    }
+
+    @Test func theViewersOwnLockComesFirst() {
+        var rule = PlayerOrientationLock.Rule()
+        rule.lock(current: .portrait)
+        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(!turns)
+        #expect(rule.allowed == .portrait)
+    }
+
+    @Test func aShapeNotYetKnownSettlesNothing() {
+        var rule = PlayerOrientationLock.Rule()
+        let turns = rule.pictureShaped(.zero, current: .portrait, playsInLandscape: true)
+        #expect(!turns)
+        let turns2 = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(turns2)
+    }
 }
 #endif
+
+struct PointerOnControlsTests {
+    @Test func thePointerIsOnTheControlsOnEitherBar() {
+        #expect(PlayerLayout.isOnBars(y: 40, topBarBottom: 80, bottomBarTop: 900))
+        #expect(PlayerLayout.isOnBars(y: 950, topBarBottom: 80, bottomBarTop: 900))
+        #expect(!PlayerLayout.isOnBars(y: 500, topBarBottom: 80, bottomBarTop: 900))
+        // Bars not laid out yet hold nothing.
+        #expect(!PlayerLayout.isOnBars(y: 40, topBarBottom: nil, bottomBarTop: nil))
+    }
+}
 
 struct PictureTapsTests {
     @Test func theThirdsOfThePicture() {

@@ -1068,6 +1068,13 @@ final class PlayerModel: Identifiable {
         // Someone is watching: a question about it goes, and playing on answers it.
         unattended.viewerActed()
         asksStillWatching = false
+        if case .failed = status { return }
+        // A position being chosen is where Play/Pause goes, as on Apple TV's player: it jumps
+        // there and plays, from the remote, the on-screen button, Siri or a remote command alike.
+        if scrubbing.isActive {
+            play()
+            return
+        }
         switch status {
         case .ended:
             // The way on is the next episode, as the up-next card offers, when there is one.
@@ -1076,8 +1083,6 @@ final class PlayerModel: Identifiable {
             } else {
                 watchAgain()
             }
-        case .failed:
-            return
         case .preparing, .loading:
             // A playback on its way to playing: the press pauses what's coming.
             pause()
@@ -1089,7 +1094,10 @@ final class PlayerModel: Identifiable {
         }
     }
 
+    /// Plays, from the position being chosen when there is one.
     func play() {
+        // At the end, the move there plays it again by itself (`seek`).
+        commitScrub()
         guard status != .ended else { return }
         if sharing?.share(.rate(rate)) == true { return }
         playHere()

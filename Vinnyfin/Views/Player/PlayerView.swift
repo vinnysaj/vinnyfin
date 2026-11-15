@@ -372,13 +372,8 @@ struct PlayerView: View {
                         onGesture: remote)
         }
         .onPlayPauseCommand {
-            // Moving the timeline, Play jumps there and plays.
-            if model.scrubbing.isActive {
-                model.commitScrub()
-                model.play()
-            } else {
-                model.togglePlayPause()
-            }
+            // Moving the timeline, Play jumps there and plays (`PlayerModel.togglePlayPause`).
+            model.togglePlayPause()
             showControls()
         }
         .onExitCommand {

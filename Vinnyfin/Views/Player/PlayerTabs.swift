@@ -173,10 +173,12 @@ private struct PlayerInfo: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// "English · Dolby Digital Plus 5.1"
+    /// "English · Dolby Digital Plus 5.1 Atmos", and below it what the sound tools on are doing to
+    /// it: "Without Atmos, as 5.1 surround, while Boost Dialogue is on".
     private var audio: String? {
         guard let option = model.audioOptions.first(where: { $0.id == model.selectedAudio }) else { return nil }
-        return [option.title, option.detail].compactMap(\.self).joined(separator: " · ")
+        let track = [option.title, option.detail].compactMap(\.self).joined(separator: " · ")
+        return [track, model.soundToolsEffect].compactMap(\.self).joined(separator: "\n")
     }
 }
 #endif

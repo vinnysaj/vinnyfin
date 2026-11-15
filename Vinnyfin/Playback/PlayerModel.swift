@@ -1304,6 +1304,26 @@ final class PlayerModel: Identifiable {
         applySound(sound)
     }
 
+    /// What the sound tools cost the audio playing, said under them: Dolby Atmos plays as its
+    /// surround channels alone while one is on (`SoundOptions.atmosNote`). Nil when they cost it
+    /// nothing, or can't shape it.
+    var soundToolsNote: String? {
+        guard soundShapingState != .unavailable, let track = playingAudioTrack else { return nil }
+        return SoundOptions.atmosNote(isAtmos: track.isAtmos, channels: track.channels)
+    }
+
+    /// What the sound tools on are doing to the audio playing, for the Info tab: taking its Atmos.
+    var soundToolsEffect: String? {
+        guard soundShapingState != .unavailable, let track = playingAudioTrack else { return nil }
+        return sound.atmosEffect(isAtmos: track.isAtmos, channels: track.channels)
+    }
+
+    /// The audio track playing, as the engine lists it; nil for a transcode, whose audio is the
+    /// server's stream's.
+    private var playingAudioTrack: TrackInfo? {
+        isTranscoding ? nil : engine.audioTracks.first { $0.id == selectedAudio }
+    }
+
     /// Shapes the sound playing from here on, and every playback's after it. The engine rebuilds
     /// the stream at the playhead to do it, holding the picture a moment.
     private func applySound(_ options: SoundOptions) {

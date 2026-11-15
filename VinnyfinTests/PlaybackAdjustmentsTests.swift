@@ -97,6 +97,28 @@ struct SoundOptionsTests {
             #expect(SoundOptions.saved(in: defaults) == sound)
         }
     }
+
+    @Test func anAtmosTrackSaysWhatTheToolsCostIt() {
+        #expect(SoundOptions.atmosNote(isAtmos: true, channels: 6) == "While either is on, Dolby Atmos plays as 5.1 surround")
+        #expect(SoundOptions.atmosNote(isAtmos: true, channels: 8) == "While either is on, Dolby Atmos plays as 7.1 surround")
+        #expect(SoundOptions.atmosNote(isAtmos: true, channels: 0) == "While either is on, Dolby Atmos plays as surround sound")
+        // Anything else they cost nothing worth saying.
+        #expect(SoundOptions.atmosNote(isAtmos: false, channels: 6) == nil)
+    }
+
+    @Test func theInfoTabSaysWhichToolsAreTakingTheAtmos() {
+        var sound = SoundOptions()
+        #expect(sound.atmosEffect(isAtmos: true, channels: 6) == nil)
+        sound.boostsDialogue = true
+        #expect(sound.atmosEffect(isAtmos: true, channels: 6) == "Without Atmos, as 5.1 surround, while Boost Dialogue is on")
+        sound.reducesLoudSounds = true
+        #expect(sound.namesOn == "Boost Dialogue and Reduce Loud Sounds")
+        #expect(sound.atmosEffect(isAtmos: true, channels: 6)
+            == "Without Atmos, as 5.1 surround, while Boost Dialogue and Reduce Loud Sounds are on")
+        #expect(sound.atmosEffect(isAtmos: false, channels: 6) == nil)
+        sound.boostsDialogue = false
+        #expect(sound.atmosEffect(isAtmos: true, channels: 8) == "Without Atmos, as 7.1 surround, while Reduce Loud Sounds is on")
+    }
 }
 
 struct PlayerVolumeTests {

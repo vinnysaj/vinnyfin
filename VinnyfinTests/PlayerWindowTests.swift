@@ -167,3 +167,26 @@ struct PlaybackMenuTests {
     }
 }
 #endif
+
+/// On Vision Pro the player's buttons are in an ornament below the window, so each panel opens in
+/// a popover from its button, off the picture; elsewhere they open over the picture by it.
+struct PanelPopoverTests {
+    private let panelsWithButtons: [PlayerPanel] = [.audioAndSubtitles, .speed, .chapters, .quality, .episodes]
+
+    @Test func panelsOpenInPopoversOnlyOnVisionPro() {
+        for panel in panelsWithButtons {
+            #if os(visionOS)
+            #expect(panel.opensInPopover, "\(panel.title)")
+            #else
+            #expect(!panel.opensInPopover, "\(panel.title)")
+            #endif
+        }
+    }
+
+    /// Apple TV's tabs open by focus, below the buttons, never in a popover.
+    @Test func tabsNeverOpenInPopovers() {
+        for panel in [PlayerPanel.episodes, .info] where panel.isTab {
+            #expect(!panel.opensInPopover)
+        }
+    }
+}

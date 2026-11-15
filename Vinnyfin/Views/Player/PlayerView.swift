@@ -290,12 +290,12 @@ struct PlayerView: View {
                 .frame(width: 0, height: 0)
                 .sheet(isPresented: episodesSheet) { episodesSheetContent }
             #endif
-            if panel == .quality {
+            if panel == .quality, !PlayerPanel.quality.opensInPopover {
                 placed(.quality, opensFrom: Self.qualityButtonIsAtTop ? .top : .bottom) { room in
                     QualityPanel(model: model, room: room) { closePanel() }
                 }
             }
-            if let panel, panel.isTrackPanel {
+            if let panel, panel.isTrackPanel, !panel.opensInPopover {
                 placed(panel, opensFrom: .bottom) { room in
                     TrackPanel(model: model, panel: panel, room: room) { closePanel() }
                 }
@@ -792,8 +792,7 @@ struct PlayerView: View {
     /// A panel over the controls, by the button that opened it: above a button along the bottom,
     /// growing upward over the timeline and below the top bar, or below one in the top bar, down
     /// to the bottom bar; where the band between the bars is short, as far as the screen goes.
-    /// Without its button's place, as on Vision Pro, whose controls are below the window, it
-    /// keeps to the band between the bars at the trailing edge.
+    /// Without its button's place it keeps to the band between the bars at the trailing edge.
     ///
     /// - Parameters:
     ///   - edge: The edge it grows from as it opens: its button's.

@@ -193,19 +193,45 @@ struct PlayerControls: View {
 
     #if os(visionOS)
     private var underWindow: some View {
-        VStack(spacing: 18) {
-            VStack(spacing: 14) {
-                topBar
-                if !isFailed { bottomBar }
-            }
-            .padding(.horizontal, 28)
-            if let item = model.item, item.isEpisode {
-                EpisodeStrip(model: model, playing: item, onInteraction: onInteraction)
-            }
+        VStack(spacing: 14) {
+            topBar
+            if !isFailed { bottomBar }
         }
+        .padding(.horizontal, 28)
         .padding(.vertical, 22)
         .frame(width: 920)
         .glassBackgroundEffect(in: .rect(cornerRadius: 40))
+    }
+
+    /// Opens `kind`'s panel in a popover from its button (`PlayerPanel.opensInPopover`), which
+    /// closes it as it's dismissed.
+    private func popover(_ kind: PlayerPanel) -> Binding<Bool> {
+        Binding {
+            panel == kind
+        } set: { isPresented in
+            guard !isPresented, panel == kind else { return }
+            panel = nil
+            onInteraction()
+        }
+    }
+
+    @ViewBuilder private func panelContent(_ kind: PlayerPanel) -> some View {
+        let close = {
+            panel = nil
+            onInteraction()
+        }
+        switch kind {
+        case .audioAndSubtitles, .speed, .chapters:
+            TrackPanel(model: model, panel: kind, room: .infinity, onClose: close)
+        case .quality:
+            QualityPanel(model: model, room: .infinity, onClose: close)
+        case .episodes:
+            if let item = model.item {
+                EpisodesPanel(model: model, playing: item, form: .drawer, onInteraction: onInteraction, onClose: close)
+            }
+        case .info:
+            EmptyView()
+        }
     }
     #endif
 
@@ -291,6 +317,9 @@ struct PlayerControls: View {
             panel = panel == .quality ? nil : .quality
             onInteraction()
         }
+        #if os(visionOS)
+        .popover(isPresented: popover(.quality)) { panelContent(.quality) }
+        #endif
     }
     #endif
 
@@ -565,11 +594,11 @@ struct PlayerControls: View {
         #endif
     }
 
-    /// The Episodes panel, which has Previous and Next in it, for an episode on iPhone, iPad and
-    /// the Mac. Elsewhere Next, and on Apple TV Previous too: below the fold and on Vision Pro the
-    /// episodes are on screen already, and Apple TV has them a swipe down from these buttons.
+    /// The Episodes panel, which has Previous and Next in it, for an episode. Elsewhere Next, and
+    /// on Apple TV Previous too: below the fold the episodes are on screen already, and Apple TV
+    /// has them a swipe down from these buttons.
     @ViewBuilder private var episodeButtons: some View {
-        #if os(iOS) || os(macOS)
+        #if !os(tvOS)
         if !isBelowFold, let item = model.item, item.isEpisode, item.seriesId != nil {
             panelButton(.episodes, identifier: "player.episodes", value: item.episodeCode)
         } else {
@@ -663,6 +692,9 @@ struct PlayerControls: View {
                 Color.clear.preference(key: PanelButtonFrames.self, value: [kind: geometry.frame(in: .global)])
             }
         }
+        #if os(visionOS)
+        .popover(isPresented: popover(kind)) { panelContent(kind) }
+        #endif
     }
 }
 

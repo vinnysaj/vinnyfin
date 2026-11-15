@@ -67,6 +67,7 @@ struct ItemDetailView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(ServerReachability.self) private var reachability
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
@@ -136,11 +137,14 @@ struct ItemDetailView: View {
                     if isGone {
                         TitleGoneNotice(playsDownload: isDownloaded)
                             .padding(.horizontal, Metrics.edge)
-                    } else if let loadError {
+                    } else if let loadError, !reachability.isOutOfReach {
                         LoadFailureNotice(loadError) { Task { await load() } }
                             .padding(.horizontal, Metrics.edge)
                     }
                     if !isGone, shown.isNotYetAvailable() { notYetAvailableNote }
+                    if !isGone || isDownloaded, !shown.isNotYetAvailable() {
+                        OfflinePlayNote(item: shown, mediaSourceId: pickedSourceId)
+                    }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
                     if detail != nil {
                         TitleLinks(genres: related.genres(of: shown), collections: related.collections)
@@ -210,6 +214,10 @@ struct ItemDetailView: View {
         // Siri knows which title the page is about: "play this", "download this".
         .appEntityIdentifier(EntityIdentifier.title(page))
         .task(id: page.id) { await load() }
+        // The server answering again, after it was out of reach.
+        .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+            if !isOutOfReach { Task { await load() } }
+        }
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
             related.similar = player.endedPlayback.applied(to: related.similar)
@@ -352,11 +360,17 @@ struct ItemDetailView: View {
     }
 
     /// The details and what's around the title: titles like it, its genres and its collections.
-    /// Refreshing asks for both again, and has the season row reload its episodes.
+    /// Refreshing asks for both again, and has the season row reload its episodes. While the server
+    /// is out of reach the page keeps what it shows, and loads once the server answers; refreshing
+    /// asks it whether it does.
     private func load(refreshing: Bool = false) async {
+        guard !reachability.isOutOfReach else {
+            if refreshing { await reachability.check() }
+            return
+        }
         if refreshing { reloads += 1 }
         await loadDetail()
-        guard let session, !isGone, refreshing || related.titleId != page.titleId else { return }
+        guard let session, !isGone, !reachability.isOutOfReach, refreshing || related.titleId != page.titleId else { return }
         do {
             related = try await RelatedTitles.load(for: detail ?? page, client: session.client, userId: session.userId,
                                                    length: MoreLikeThisShelf.length)
@@ -368,7 +382,7 @@ struct ItemDetailView: View {
     }
 
     private func loadDetail() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         let id = page.id
         // Only this title's details, so a load that fails can't leave another title's actions.
         if detail?.id != id { detail = nil }
@@ -386,6 +400,8 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation, id == page.id else { return }
             loadError = LoadFailure("Couldn't Load the Details", error: error)
+            // Out of reach, the page says so under Play rather than this.
+            await reachability.check()
         }
     }
 }
@@ -538,9 +554,11 @@ struct PlayButton: View {
     let focus: FocusState<Bool>.Binding
     #endif
     @Environment(PlayerCoordinator.self) private var player
+    private let playable = PlayableNow(isDownloaded: nil)
 
     var body: some View {
         Button {
+            guard playable(item, mediaSourceId: mediaSourceId) else { return }
             player.play(.item(item, mediaSourceId: mediaSourceId, loaded: item))
         } label: {
             PlayLabel(title: label, progress: item.resumeSeconds != nil ? item.progress : nil)
@@ -551,7 +569,14 @@ struct PlayButton: View {
         .accessibilityInputLabels([item.resumeSeconds != nil ? "Resume" : "Play", label])
         .accessibilityIdentifier("detail.play")
         #if os(tvOS)
+        // Focusable while it can't play, the server being out of reach, so focus can start on it:
+        // a page opened then has nothing else to focus, and the remote's Back would do nothing.
+        .opacity(playable(item, mediaSourceId: mediaSourceId) ? 1 : 0.5)
+        .accessibilityHint(OfflinePlayability.reason(for: item, server: playable.serverTitle),
+                           isEnabled: !playable(item, mediaSourceId: mediaSourceId))
         .focused(focus)
+        #else
+        .playableOffline(item, mediaSourceId: mediaSourceId)
         #endif
         .layoutValue(key: WidensTitleAction.self, value: true)
         if item.resumeSeconds != nil {
@@ -564,6 +589,7 @@ struct PlayButton: View {
             .actionCaption("Start Over")
             .help("Start Over")
             .accessibilityIdentifier("detail.startOver")
+            .playableOffline(item, mediaSourceId: mediaSourceId)
         }
     }
 
@@ -607,7 +633,8 @@ struct PlayLabel: View {
 }
 
 /// Marks a title watched or unwatched. A whole show or season asks first, saying how many
-/// episodes that is, and then offers Undo (`WatchActions.setPlayedAfterAsking`).
+/// episodes that is, and then offers Undo (`WatchActions.setPlayedAfterAsking`). Off while the
+/// server is out of reach.
 struct WatchedButton: View {
     let item: JellyfinItem
     /// Told of the change as it's made, and again of the item as it was if the server refuses it.
@@ -626,7 +653,7 @@ struct WatchedButton: View {
                 Text("Watched")
             } icon: {
                 Image(systemName: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
-                    .foregroundStyle(item.isPlayed ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .modifier(StateSymbol(isOn: item.isPlayed))
                     .contentTransition(.symbolEffect(.replace))
             }
         }
@@ -640,6 +667,7 @@ struct WatchedButton: View {
             Toggle("Watched", isOn: Binding(get: { item.isPlayed }, set: { _ in press() }))
         }
         .accessibilityIdentifier("detail.watched")
+        .needsServer()
     }
 
     private func press() {
@@ -659,7 +687,21 @@ struct WatchedButton: View {
     }
 }
 
-/// Adds a title to the favorites or takes it out.
+/// The symbol of a round action that shows a state, as Watched and Favorite do: in the accent while
+/// the state is on. Its color is its own, so it doesn't fade with the button's when the button is
+/// turned off, as the other actions' symbols do: it fades here instead.
+private struct StateSymbol: ViewModifier {
+    let isOn: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+/// Adds a title to the favorites or takes it out. Off while the server is out of reach.
 struct FavoriteButton: View {
     let item: JellyfinItem
     let onChange: (JellyfinItem) -> Void
@@ -675,7 +717,7 @@ struct FavoriteButton: View {
                 Text("Favorite")
             } icon: {
                 Image(systemName: item.isFavorite ? "heart.fill" : "heart")
-                    .foregroundStyle(item.isFavorite ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .modifier(StateSymbol(isOn: item.isFavorite))
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.bounce, value: additions)
             }
@@ -689,6 +731,7 @@ struct FavoriteButton: View {
             Toggle("Favorite", isOn: Binding(get: { item.isFavorite }, set: { _ in press() }))
         }
         .accessibilityIdentifier("detail.favorite")
+        .needsServer()
     }
 
     private func press() {

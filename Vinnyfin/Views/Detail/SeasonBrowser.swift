@@ -133,6 +133,8 @@ struct SeasonChipStyle: ButtonStyle {
 ///
 /// The episode shown is the page's: a change to it there, such as marking it watched, shows on
 /// its card, and one made from a card's menu goes back to the page.
+///
+/// While the server is out of reach it keeps what it shows, and loads once the server answers.
 struct SeasonBrowser: View {
     /// The episode the page shows.
     let episode: JellyfinItem
@@ -144,6 +146,7 @@ struct SeasonBrowser: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var seasons: [JellyfinItem] = []
     @State private var seasonId: String?
@@ -184,6 +187,14 @@ struct SeasonBrowser: View {
                 update(shown.id) { $0.userData = shown.userData }
             }
             .onChange(of: reloads) { Task { await reload(seriesId: seriesId) } }
+            // The server answering again, after it was out of reach.
+            .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+                guard !isOutOfReach else { return }
+                Task {
+                    if seasons.isEmpty { await loadSeasons(seriesId: seriesId) }
+                    await loadEpisodes(seriesId: seriesId)
+                }
+            }
             .onChange(of: player.endedPlayback) {
                 if let episodes { self.episodes = player.endedPlayback.applied(to: episodes) }
                 loaded = loaded.mapValues { player.endedPlayback.applied(to: $0) }
@@ -195,7 +206,7 @@ struct SeasonBrowser: View {
     private var isSwitching: Bool { episodes != nil && episodesSeasonId != seasonId }
 
     @ViewBuilder private var row: some View {
-        if let problem, episodes == nil || isSwitching, let seriesId = episode.seriesId {
+        if let problem, !reachability.isOutOfReach, episodes == nil || isSwitching, let seriesId = episode.seriesId {
             LoadFailureNotice(problem) {
                 Task {
                     if seasons.isEmpty { await loadSeasons(seriesId: seriesId) }
@@ -250,9 +261,13 @@ struct SeasonBrowser: View {
             .onChange(of: episode.id) { reveal(in: episodes) }
             .onChange(of: episodesSeasonId) { reveal(in: episodes) }
         } else if episodes == nil {
-            ProgressView()
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 20)
+            if reachability.isOutOfReach {
+                EpisodesOfflineNote()
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
+            }
         }
     }
 
@@ -291,7 +306,7 @@ struct SeasonBrowser: View {
     }
 
     private func loadSeasons(seriesId: String) async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         do {
             let found = try await session.client.seasons(seriesId: seriesId, userId: session.userId)
             seasons = found
@@ -308,6 +323,7 @@ struct SeasonBrowser: View {
     private func loadEpisodes(seriesId: String) async {
         guard let session, let seasonId else { return }
         if episodesSeasonId != seasonId, let known = loaded[seasonId] { show(known, of: seasonId) }
+        guard !reachability.isOutOfReach else { return }
         do {
             let found = try await session.client.episodes(seriesId: seriesId, seasonId: seasonId, userId: session.userId,
                                                           fields: "Overview,PrimaryImageAspectRatio")
@@ -323,7 +339,7 @@ struct SeasonBrowser: View {
     /// The season's episodes as they are now, with the others' to load again as they're picked:
     /// what changed may have changed them too, as marking a show watched does.
     private func reload(seriesId: String) async {
-        guard let session, let seasonId else { return }
+        guard let session, let seasonId, !reachability.isOutOfReach else { return }
         loaded = loaded.filter { $0.key == seasonId }
         guard let found = try? await session.client.episodes(seriesId: seriesId, seasonId: seasonId, userId: session.userId,
                                                              fields: "Overview,PrimaryImageAspectRatio"),

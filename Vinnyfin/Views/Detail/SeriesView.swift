@@ -15,6 +15,8 @@ struct SeriesView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(ServerReachability.self) private var reachability
+    private let playableNow = PlayableNow(isDownloaded: nil)
     #if !os(tvOS)
     @Environment(SmartDownloads.self) private var smartDownloads
     @Environment(DownloadManager.self) private var downloads
@@ -76,6 +78,9 @@ struct SeriesView: View {
     /// What Play plays: the episode next, or with none, the first again.
     private var playTarget: JellyfinItem? { nextUp ?? firstEpisode }
 
+    /// Play plays its episode now, by `PlayAvailability`.
+    private var playsNow: Bool { playTarget.map { playableNow($0, mediaSourceId: nil) } ?? false }
+
     /// Nothing is next, though some of the show was watched: Play starts it over.
     private var watchesAgain: Bool {
         nextUp == nil && firstEpisode != nil && (shown.isPlayed || (shown.userData?.playedPercentage ?? 0) > 0)
@@ -104,10 +109,11 @@ struct SeriesView: View {
                     if isGone {
                         TitleGoneNotice()
                             .padding(.horizontal, Metrics.edge)
-                    } else if let loadError {
+                    } else if let loadError, !reachability.isOutOfReach {
                         LoadFailureNotice(loadError) { Task { await retry() } }
                             .padding(.horizontal, Metrics.edge)
                     }
+                    if showsPlay { OfflinePlayNote(item: playTarget ?? shown, mediaSourceId: nil) }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
                     if detail != nil {
                         TitleLinks(genres: related.genres(of: shown), collections: related.collections)
@@ -177,6 +183,10 @@ struct SeriesView: View {
         .appEntityIdentifier(EntityIdentifier.title(series))
         .task(id: series.id) { await load() }
         .task(id: seasonId) { await loadEpisodes() }
+        // The server answering again, after it was out of reach.
+        .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+            if !isOutOfReach { Task { await retry() } }
+        }
         .onChange(of: player.endedPlayback) {
             related.similar = player.endedPlayback.applied(to: related.similar)
             Task { await reloadWatchState() }
@@ -208,11 +218,12 @@ struct SeriesView: View {
 
     /// The next episode's Play, or with none, the first's, as Watch Again once the show's been
     /// watched; until it's known, Play standing in for it, which plays nothing. It's the same
-    /// button throughout, so focus stays on it as the episode comes.
+    /// button throughout, so focus stays on it as the episode comes. While the server is out of
+    /// reach it plays nothing either, but for an episode that's downloaded.
     private var playButton: some View {
         let label = playTarget.map { watchesAgain ? "Watch Again" : ShowPlayback.playLabel(for: $0, seasons: seasonCount) } ?? "Play"
         return Button {
-            guard let playTarget else { return }
+            guard let playTarget, playsNow else { return }
             player.play(.item(playTarget, fromBeginning: watchesAgain))
         } label: {
             PlayLabel(title: label, progress: playTarget?.resumeSeconds != nil ? playTarget?.progress : nil,
@@ -221,10 +232,14 @@ struct SeriesView: View {
         .buttonStyle(.platformGlassProminent)
         .controlSize(.large)
         #if os(tvOS)
-        // Still focusable, so focus can start on it.
-        .opacity(playTarget == nil ? 0.5 : 1)
+        // Still focusable, so focus can start on it. Opened while the server is out of reach, the
+        // page has nothing else to focus, and the remote's Back would do nothing.
+        .opacity(playsNow ? 1 : 0.5)
+        .accessibilityHint(OfflinePlayability.reason(for: playTarget ?? shown, server: playableNow.serverTitle),
+                           isEnabled: reachability.isOutOfReach && !playsNow)
         #else
         .disabled(playTarget == nil)
+        .playableOffline(playTarget ?? shown)
         #endif
         .accessibilityLabel(playTarget.map { watchesAgain ? "Watch again from the start" : ShowPlayback.spokenPlayLabel(for: $0, seasons: seasonCount) } ?? "Play")
         .accessibilityInputLabels(playTarget.map { [watchesAgain ? "Watch Again" : $0.resumeSeconds != nil ? "Resume" : "Play", label] } ?? ["Play"])
@@ -247,6 +262,8 @@ struct SeriesView: View {
         .actionCaption("Shuffle")
         .help("Shuffle")
         .accessibilityIdentifier("series.shuffle")
+        // It asks the server for all the show's episodes to shuffle.
+        .playableOffline(shown)
     }
 
     @ViewBuilder private var secondaryButtons: some View {
@@ -353,6 +370,7 @@ struct SeriesView: View {
                     Label("Mark Watched or Unwatched", systemImage: "checkmark.circle")
                 }
                 .disabled(selection.isEmpty)
+                .needsServer()
                 .accessibilityIdentifier("series.mark")
             }
         }
@@ -397,6 +415,7 @@ struct SeriesView: View {
                    systemImage: season.isPlayed ? "eye.slash" : "eye") {
                 Task { await setPlayed(!season.isPlayed, season: season) }
             }
+            .needsServer()
         }
     }
 
@@ -419,6 +438,8 @@ struct SeriesView: View {
             #if os(tvOS)
             .focusSection()
             #endif
+        } else if reachability.isOutOfReach {
+            EpisodesOfflineNote()
         } else if loadError == nil {
             ProgressView().frame(maxWidth: .infinity)
         }
@@ -452,8 +473,9 @@ struct SeriesView: View {
 
     // MARK: Loading
 
+    /// While the server is out of reach, the page keeps what it shows, and loads once it answers.
     private func load() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         loadError = nil
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
@@ -479,6 +501,9 @@ struct SeriesView: View {
         } catch {
             guard !error.isCancellation else { return }
             loadError = LoadFailure("Couldn't Load the Show", error: error)
+            // Out of reach, the page waits for the server rather than say this.
+            await reachability.check()
+            if reachability.isOutOfReach { return }
         }
         do {
             related = try await RelatedTitles.load(for: detail ?? series, client: session.client, userId: session.userId,
@@ -493,7 +518,7 @@ struct SeriesView: View {
     /// The season picked's episodes: at once if they loaded before, then as they are now. Until
     /// they come, the last season's stay listed, dimmed, so the page keeps its place.
     private func loadEpisodes() async {
-        guard let session, let seasonId else { return }
+        guard let session, let seasonId, !reachability.isOutOfReach else { return }
         selection.removeAll()
         if episodesSeasonId != seasonId, let known = loaded[seasonId] { show(known, of: seasonId) }
         do {
@@ -522,7 +547,7 @@ struct SeriesView: View {
     /// state, where it goes on, the seasons' watched states, and the season's episodes, kept on
     /// screen and selected as they are while they load.
     private func reloadWatchState() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
             async let nextUp = session.client.upNext(seriesId: series.id, userId: session.userId)
@@ -576,8 +601,13 @@ struct SeriesView: View {
         if seasonId == self.seasonId { show(found, of: seasonId) }
     }
 
-    /// Pulled down: all of the page again, the season's episodes as they are now too.
+    /// Pulled down: all of the page again, the season's episodes as they are now too. While the
+    /// server is out of reach, whether it answers now.
     private func refresh() async {
+        guard !reachability.isOutOfReach else {
+            await reachability.check()
+            return
+        }
         await load()
         guard let session, !isGone else { return }
         do {
@@ -596,7 +626,8 @@ struct SeriesView: View {
 
 /// An episode: its still with progress, number and title, length and overview, and whether it's
 /// the one to watch next. A press plays it; a button beside it opens its page, which on Apple TV
-/// focus reaches by moving right.
+/// focus reaches by moving right. While the server is out of reach, one that isn't downloaded
+/// stands dimmed and doesn't play.
 private struct EpisodeRow: View {
     let episode: JellyfinItem
     let isSelecting: Bool
@@ -615,6 +646,12 @@ private struct EpisodeRow: View {
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
+    private let playable = PlayableNow(isDownloaded: nil)
+
+    /// A press would play the episode, which it can't now, by `PlayAvailability`.
+    private var cantPlay: Bool {
+        !isSelecting && !episode.isNotYetAvailable() && !playable(episode, mediaSourceId: nil)
+    }
 
     var body: some View {
         #if os(tvOS)
@@ -714,14 +751,23 @@ private struct EpisodeRow: View {
         .accessibilityRepresentation {
             Button(spokenLabel, action: action)
         }
+        // Inside the menu, so its Details still opens the episode's page.
+        .disabled(cantPlay)
+        .opacity(cantPlay ? 0.45 : 1)
         .titleMenu(episode, onChange: onChange) {
             Button("Details", systemImage: "info.circle", action: openPage)
             MarkPreviousWatchedButton(episode: episode, afterChange: afterBatchChange)
         }
         .accessibilityAddTraits(isSelecting && isSelected ? .isSelected : [])
-        .accessibilityHint(isSelecting ? "" : episode.isNotYetAvailable() ? "Not yet available. Opens the episode" : "Plays the episode")
+        .accessibilityHint(hint)
         .accessibilityInputLabels([episode.name, "Episode \(episode.indexNumber ?? 0)"])
         .accessibilityIdentifier("episode.\(episode.indexNumber ?? 0)")
+    }
+
+    private var hint: String {
+        if isSelecting { return "" }
+        if episode.isNotYetAvailable() { return "Not yet available. Opens the episode" }
+        return cantPlay ? OfflinePlayability.reason(for: episode, server: playable.serverTitle) : "Plays the episode"
     }
 
     /// What the row shows, in the order it shows it: "Up Next, 3. What the Gulls Saw, Downloaded,

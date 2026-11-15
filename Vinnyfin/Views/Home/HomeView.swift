@@ -12,9 +12,14 @@ struct HomeView: View {
 
     @Environment(\.session) private var session
     @Environment(AccountStore.self) private var accounts
+    @Environment(ServerReachability.self) private var reachability
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    @Environment(WatchHistory.self) private var history
+    #endif
     @State private var feed = HomeFeed()
     /// The featured title the banner shows, kept here so it stays as the banner scrolls out of
     /// the page and back, and as the titles load again.
@@ -58,15 +63,20 @@ struct HomeView: View {
                     Group {
                         if feed.sessionEnded {
                             sessionEndedNotice
-                        } else if let loadError = feed.loadError {
+                        } else if let loadError = feed.loadError, !feed.isOffline {
                             failureNotice(loadError)
                         }
                     }
                     #if os(tvOS)
                     .pageRow("notice", in: rowLayout, holding: .whole)
                     #endif
+                    #if !os(tvOS)
+                    if feed.isOffline, !downloadedTitles.isEmpty {
+                        downloadsRow
+                    }
+                    #endif
                     ForEach(feed.rows) { row in
-                        HomeRowView(row: row, titles: feed.items[row.id], problem: feed.problems[row.id],
+                        HomeRowView(row: row, titles: feed.items[row.id], problem: feed.isOffline ? nil : feed.problems[row.id],
                                     isShown: feed.isShown(row.id), isTruncated: feed.truncated.contains(row.id), feed: feed) {
                             feed.removeFromContinueWatching($0) { messages.show($0) }
                         }
@@ -88,7 +98,13 @@ struct HomeView: View {
             .onScrollPhaseChange { _, phase in isScrolling = phase != .idle }
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
-            .overlay { if feed.hasNoTitles { noTitles } }
+            .overlay {
+                if feed.hasNoTitles {
+                    noTitles
+                } else if showsNothingOffline {
+                    nothingOffline
+                }
+            }
             // The app's toast offers to put a title taken out of Continue Watching back; it goes
             // as the removal does, as when the server turns it down.
             .onChange(of: feed.removal) { old, new in
@@ -101,6 +117,7 @@ struct HomeView: View {
             .onDisappear {
                 isOnScreen = false
                 feed.wentAway()
+                saveForNextTime()
             }
             #if os(tvOS)
             .toolbarVisibility(hasBanner ? .hidden : .automatic, for: .navigationBar)
@@ -142,11 +159,23 @@ struct HomeView: View {
             .sheet(isPresented: $showingSounds) { SoundsView() }
             #endif
             .itemDestinations()
-            .refreshable { await load(reshuffling: true) }
-            .task { await load() }
+            // Out of reach, a pull asks the server again, and Home loads once it answers.
+            .refreshable {
+                if reachability.isOutOfReach {
+                    await reachability.check()
+                } else {
+                    await load(reshuffling: true)
+                }
+            }
+            // Again when the server goes out of reach, to stop asking it and show what's saved,
+            // and when it answers again.
+            .task(id: reachability.isOutOfReach) { await load() }
             // Back from the background, Home refreshes as on coming back to it.
             .onChange(of: scenePhase) { _, phase in
-                if phase == .background { feed.wentAway() }
+                if phase == .background {
+                    feed.wentAway()
+                    saveForNextTime()
+                }
                 if phase == .active, isOnScreen { Task { await load() } }
             }
             // A playback started here, from the banner or a card, moved Continue Watching.
@@ -285,8 +314,56 @@ struct HomeView: View {
 
     private func load(reshuffling: Bool = false) async {
         guard let session else { return }
-        await feed.load(session: session, reshuffling: reshuffling)
+        await feed.load(session: session, isServerOutOfReach: reachability.isOutOfReach, reshuffling: reshuffling)
+        // Asks whether the server's there at all, rather than say only that Home didn't load.
+        if feed.loadError != nil { await reachability.check() }
     }
+
+    /// Saves Home for the next time it opens, while still signed in where it's from: one going
+    /// away as its sign-in ends has been deleted, and stays so.
+    private func saveForNextTime() {
+        guard let session, accounts.account?.isSame(as: session.account) == true else { return }
+        feed.saveForNextTime()
+    }
+
+    /// Offline with nothing saved of Home, and nothing downloaded to show in its place.
+    private var showsNothingOffline: Bool {
+        #if os(tvOS)
+        feed.isOffline && feed.featured.isEmpty && !feed.rows.contains { feed.isShown($0.id) }
+        #else
+        feed.isOffline && feed.featured.isEmpty && !feed.rows.contains { feed.isShown($0.id) } && downloadedTitles.isEmpty
+        #endif
+    }
+
+    /// Why Home is empty: the server out of reach before Home was ever saved.
+    private var nothingOffline: some View {
+        ContentUnavailableView {
+            Label("Can't Reach \(session?.account.serverTitle ?? "the Server")", systemImage: "wifi.slash")
+        } description: {
+            if case .outOfReach(let absence) = reachability.state {
+                Text(absence.explanation(server: session?.account.serverTitle ?? "The server"))
+            }
+        } actions: {
+            Button("Try Again") { Task { await reachability.check() } }
+                .buttonStyle(.platformGlassProminent)
+                .disabled(reachability.isChecking)
+                .accessibilityIdentifier("home.offlineRetry")
+        }
+    }
+
+    #if !os(tvOS)
+    /// What's downloaded for the sign-in, for the row that leads Home offline.
+    private var downloadedTitles: [JellyfinItem] {
+        OfflineDownloads.titles(downloads.jobs, of: session?.account) { history.entry(for: $0) }
+    }
+
+    /// The sign-in's downloads, which play on a tap, first on Home while the server is out of reach.
+    private var downloadsRow: some View {
+        Shelf(title: "Downloads", items: downloadedTitles, cardWidth: Metrics.landscapeWidth, placeholderStyle: .landscape) { item in
+            DownloadedCard(item: item)
+        }
+    }
+    #endif
 }
 
 extension FocusedValues {
@@ -333,8 +410,10 @@ private struct HomeRowView: View {
                 .buttonStyle(.artwork)
                 .titleMenu(item, playsOnTap: true) { feed.replace($0) } more: {
                     Button("Remove from Continue Watching", systemImage: "minus.circle") { removeFromContinueWatching(item) }
+                        .needsServer()
                 }
                 .accessibilityHint(item.resumeSeconds != nil ? "Resumes it" : "Plays it")
+                .playableOffline(item, dimming: true)
         } else {
             switch row.list.style {
             case .poster:
@@ -430,6 +509,7 @@ private struct HeroBanner: View {
 
     @Environment(\.session) private var session
     @Environment(PlayerCoordinator.self) private var player
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.topBarsHeight) private var topBarsHeight
     @Environment(\.colorScheme) private var colorScheme
@@ -555,7 +635,7 @@ private struct HeroBanner: View {
         .focusScope(focusScope)
         // Up from the rows, focus goes to the title's main button, not whichever is above the
         // card it leaves.
-        .defaultFocus($focusedButton, showsPlay(for: item) ? .play : .details, priority: .userInitiated)
+        .defaultFocus($focusedButton, focusesPlay(item) ? .play : .details, priority: .userInitiated)
         #else
         .onChange(of: shownId) { showPage(of: shownId) }
         .onChange(of: items.map(\.id)) { showPage(of: shownId) }
@@ -786,7 +866,7 @@ private struct HeroBanner: View {
         .onChange(of: isGoingBack) { _, going in
             guard going else { return }
             let previous = items[FeaturedRotation.position(of: FeaturedRotation.id(after: shownId, by: -1, in: items), in: items)]
-            focusedButton = showsPlay(for: previous) ? .play : .details
+            focusedButton = focusesPlay(previous) ? .play : .details
             turn(by: -1)
         }
         .onMoveCommand { direction in
@@ -802,6 +882,19 @@ private struct HeroBanner: View {
         item.isSeries || (item.isPlayable && !item.isNotYetAvailable())
     }
 
+    /// What Play plays: the title, or for a show its next episode, once that's known.
+    private func playing(_ item: JellyfinItem) -> JellyfinItem {
+        item.isSeries ? feed.featuredEpisodes[item.id] ?? item : item
+    }
+
+    #if os(tvOS)
+    /// Whether focus goes to Play: shown, and not off with the server out of reach, as Apple TV
+    /// has no downloads.
+    private func focusesPlay(_ item: JellyfinItem) -> Bool {
+        showsPlay(for: item) && !reachability.isOutOfReach
+    }
+    #endif
+
     @ViewBuilder private func playButton(_ item: JellyfinItem, oneLine: Bool) -> some View {
         if showsPlay(for: item) {
             Button {
@@ -813,6 +906,7 @@ private struct HeroBanner: View {
             .buttonStyle(.platformGlassProminent)
             .fixedSize(horizontal: oneLine, vertical: false)
             .accessibilityLabel(spokenPlayLabel(for: item))
+            .playableOffline(playing(item))
             .focused($focusedButton, equals: .play)
         }
     }
@@ -1052,7 +1146,7 @@ private struct HeroPlaceholder: View {
             .padding(.bottom, HeroBackdrop.blendHeight(in: colorScheme))
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(fullHeight, visible: visibleHeight), alignment: .bottom)
             .background {
-                HeroBackdrop(url: nil, placeholder: nil, from: 0.3, middle: 0.7, at: 0.72)
+                HeroBackdrop(url: nil, fillsEmpty: false, from: 0.3, middle: 0.7, at: 0.72)
                     .background(.quaternary.opacity(0.5))
             }
             .onGeometryChange(for: CGFloat.self) { $0.bounds(of: .scrollView)?.height ?? 0 } action: { visibleHeight = $0 }

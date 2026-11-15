@@ -1,8 +1,8 @@
 import Foundation
 
 /// A list to browse in full, in a grid: a library, everything a Home row samples, a collection.
-nonisolated struct BrowseList: Hashable, Sendable {
-    enum Style: Hashable, Sendable {
+nonisolated struct BrowseList: Hashable, Codable, Sendable {
+    enum Style: Hashable, Codable, Sendable {
         /// Posters, for movies and shows.
         case poster
         /// 16:9 stills, for episodes, videos and what's in progress.

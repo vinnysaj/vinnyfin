@@ -54,8 +54,7 @@ struct DetailHero<Actions: View>: View {
             .padding(.top, topBarsHeight > 0 ? topBarsHeight + Self.clearance : 0)
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(Self.fullHeight, visible: visibleHeight), alignment: .bottomLeading)
             .background {
-                HeroBackdrop(url: backdropURL, placeholder: isMeasuringStill ? nil : item.isSeries ? "tv" : "film",
-                             from: 0.35, middle: 0.75, at: 0.7)
+                HeroBackdrop(url: backdropURL, fillsEmpty: !isMeasuringStill, from: 0.35, middle: 0.75, at: 0.7)
             }
             // Again once the details come with the still, for a page opened from a link that
             // names only the episode.
@@ -234,10 +233,11 @@ struct DetailHero<Actions: View>: View {
 }
 
 /// A picture that, given another, keeps the one before up until the next is in, and fades the next
-/// in over it, rather than going blank between them. One that can't load goes, for the placeholder.
+/// in over it, rather than going blank between them. One that can't load goes, for the gray.
 private struct CrossfadingPicture: View {
     let url: URL?
-    let placeholder: String?
+    /// Gray stands in while there's no picture; else the frame is left empty.
+    let fillsEmpty: Bool
     /// The last picture that loaded, under the one asked for. The same one under itself once it's
     /// in, so nothing shows through it as it fades in.
     @State private var under: URL?
@@ -253,13 +253,8 @@ private struct CrossfadingPicture: View {
                 ServerImage(url: url) { state in
                     if let image = state.image {
                         image.resizable().aspectRatio(contentMode: .fill)
-                    } else if under == nil, let placeholder {
+                    } else if under == nil, fillsEmpty {
                         Rectangle().fill(.quaternary)
-                            .overlay {
-                                if !state.isLoading {
-                                    Image(systemName: placeholder).font(.title2).foregroundStyle(.tertiary)
-                                }
-                            }
                     }
                 } onCompletion: { result in
                     switch result {
@@ -281,7 +276,9 @@ private struct CrossfadingPicture: View {
 /// the picture stretches up from its foot to fill the space. Another picture fades in over it.
 struct HeroBackdrop: View {
     let url: URL?
-    var placeholder: String? = "film"
+    /// Gray stands in, under the fade, for a picture that's loading or can't load; with no symbol
+    /// on it, which would show between the words and buttons over it. Else the frame is empty.
+    var fillsEmpty = true
     /// Where the fade starts, as a share of the height.
     var start: Double
     /// How dark it is at `location`, as a share of the height; at the foot it's solid.
@@ -291,16 +288,16 @@ struct HeroBackdrop: View {
     @Environment(\.colorSchemeContrast) private var contrast
     @Environment(\.colorScheme) private var colorScheme
 
-    init(url: URL?, placeholder: String? = "film", from start: Double, middle: Double, at location: Double) {
+    init(url: URL?, fillsEmpty: Bool = true, from start: Double, middle: Double, at location: Double) {
         self.url = url
-        self.placeholder = placeholder
+        self.fillsEmpty = fillsEmpty
         self.start = start
         self.middle = middle
         self.location = location
     }
 
     var body: some View {
-        CrossfadingPicture(url: url, placeholder: placeholder)
+        CrossfadingPicture(url: url, fillsEmpty: fillsEmpty)
             .clipped()
             #if os(visionOS)
             .mask { fade(Color.black).environment(\.colorScheme, .dark) }

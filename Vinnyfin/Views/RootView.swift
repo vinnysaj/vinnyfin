@@ -3,6 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AccountStore.self) private var accounts
+    @Environment(ServerReachability.self) private var reachability
     @Environment(KnownServers.self) private var knownServers
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppMessages.self) private var messages
@@ -154,9 +155,24 @@ struct RootView: View {
         // Links and handed-off titles open in the window that's open, rather than in a new one.
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         #endif
+        // VoiceOver hears it when the server goes out of reach and when it answers again: the
+        // banner that says so is at the foot of the screen, out of its way.
+        .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+            guard let session else { return }
+            let server = session.account.serverTitle
+            AccessibilityNotification.Announcement(isOutOfReach ? "Offline. Can't reach \(server)." : "\(server) answers again.").post()
+        }
+        // Whether the server answers, asked as the app opens and as it comes back from the
+        // background, and for another sign-in; until it goes to the background.
+        .task(id: ServerWatch(isOpen: scenePhase != .background, signIn: accounts.account?.tokenKey)) {
+            guard scenePhase != .background else { return }
+            await reachability.follow(session)
+        }
         // Runs while the app is open, and stops as it goes to the background. Another sign-in
-        // starts it over, to send what that one watched offline and plan its smart downloads.
-        .task(id: OpenWork(isOpen: scenePhase != .background, signIn: accounts.account?.tokenKey)) {
+        // starts it over, to send what that one watched offline and plan its smart downloads, as
+        // does the server answering again after it was out of reach.
+        .task(id: OpenWork(isOpen: scenePhase != .background, signIn: accounts.account?.tokenKey,
+                           isServerOutOfReach: reachability.isOutOfReach)) {
             guard scenePhase != .background else {
                 #if os(tvOS)
                 TopShelf.reload()
@@ -168,7 +184,9 @@ struct RootView: View {
                 return
             }
             // What was watched offline goes to the server first, so smart downloads plan from it.
-            if let session { await history.syncPending(using: session.client, userId: session.userId) }
+            if let session, !reachability.isOutOfReach {
+                await history.syncPending(using: session.client, userId: session.userId)
+            }
             #if !os(tvOS)
             async let spotlightRefresh: Void = spotlight.refreshWhileOpen()
             await smartDownloads.refreshWhileOpen()
@@ -272,6 +290,7 @@ struct MainTabs: View {
     /// What Spotlight or Siri asked to search for, which the Search tab searches for.
     @Binding var linkedSearch: String?
     @State private var navigation = TabNavigation()
+    @Environment(ServerReachability.self) private var reachability
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlayerCoordinator.self) private var player
@@ -285,15 +304,53 @@ struct MainTabs: View {
     var body: some View {
         tabs
             #if os(iOS)
-            .tabViewBottomAccessory(isEnabled: remote.isActive) { RemoteMiniPlayer() }
-            #elseif os(macOS)
-            .safeAreaInset(edge: .bottom) {
+            // The remote's mini player while it plays elsewhere, or else the offline banner.
+            .tabViewBottomAccessory(isEnabled: remote.isActive || reachability.isOutOfReach) {
                 if remote.isActive {
                     RemoteMiniPlayer()
-                        .padding(.vertical, 10)
-                        .background(.bar)
+                } else {
+                    OfflineBanner().padding(.horizontal, 16)
                 }
             }
+            #elseif os(macOS)
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 0) {
+                    if reachability.isOutOfReach {
+                        OfflineBanner()
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                    }
+                    if remote.isActive {
+                        RemoteMiniPlayer()
+                            .padding(.vertical, 10)
+                    }
+                }
+                .background(.bar)
+            }
+            #elseif os(visionOS)
+            .ornament(visibility: reachability.isOutOfReach ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
+                OfflineBanner()
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .frame(maxWidth: 520)
+                    .glassBackgroundEffect()
+            }
+            #elseif os(tvOS)
+            // Not over Search's own field, under which it says what it can't do offline.
+            .overlay(alignment: .topTrailing) {
+                if reachability.isOutOfReach, navigation.selection != .search || !navigation.search.isEmpty {
+                    OfflineBanner()
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 16)
+                        .platformGlass(in: .capsule)
+                        .padding(.top, 40)
+                        .padding(.trailing, Metrics.edge)
+                        .allowsHitTesting(false)
+                }
+            }
+            #endif
+            #if !os(tvOS)
+            .environment(\.openDownloads, OpenDownloadsAction { navigation.selection = .downloads })
             #endif
     }
 
@@ -459,8 +516,30 @@ extension AppSettings.Appearance {
     }
 }
 
-/// What the work done while the app is open depends on: whether it's open, and who's signed in.
+/// What the work done while the app is open depends on: whether it's open, who's signed in,
+/// and whether their server is out of reach.
 private struct OpenWork: Equatable {
     let isOpen: Bool
     let signIn: String?
+    let isServerOutOfReach: Bool
+}
+
+/// When the server is asked whether it answers: as the app opens, and for each sign-in.
+private struct ServerWatch: Equatable {
+    let isOpen: Bool
+    let signIn: String?
+}
+
+/// Shows the Downloads tab.
+struct OpenDownloadsAction {
+    let open: () -> Void
+
+    func callAsFunction() {
+        open()
+    }
+}
+
+extension EnvironmentValues {
+    /// Nil where there's no Downloads tab, as on Apple TV.
+    @Entry var openDownloads: OpenDownloadsAction?
 }

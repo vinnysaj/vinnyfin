@@ -102,6 +102,7 @@ extension View {
     func withAppEnvironment(_ app: AppDelegate) -> some View {
         #if os(tvOS)
         environment(app.accounts)
+            .environment(app.reachability)
             .environment(app.knownServers)
             .environment(app.settings)
             .environment(app.history)
@@ -113,6 +114,7 @@ extension View {
             .environment(app.sounds)
         #else
         environment(app.accounts)
+            .environment(app.reachability)
             .environment(app.knownServers)
             .environment(app.settings)
             .environment(app.history)
@@ -154,6 +156,8 @@ final class AppDelegate: NSObject {
     let accounts = AccountStore()
     #endif
     private(set) lazy var history = WatchHistory { [accounts] in accounts.account?.tokenKey }
+    /// Whether the signed-in server answers, which the screens go by rather than wait out requests.
+    let reachability = ServerReachability()
     let messages = AppMessages()
     let links = IncomingLinks()
     private(set) lazy var knownServers = KnownServers(accounts: accounts, cloud: NSUbiquitousKeyValueStore.default)
@@ -194,7 +198,10 @@ final class AppDelegate: NSObject {
 
     private func launched() {
         ImageCache.configure()
+        reachability.outOfReachChanged = { ImageCache.serverOutOfReach($0) }
         StreamingNetwork.follow()
+        accounts.forgetting = { HomeCache.drop(for: $0) }
+        HomeCache.keepOnly(accounts.saved)
         if let problem = accounts.savedSignInProblem { messages.show(problem) }
         #if os(iOS) || os(macOS)
         if let problem = accounts.sharingProblem { messages.show(problem) }

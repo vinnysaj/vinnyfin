@@ -1,7 +1,7 @@
 import Foundation
 
 /// A row of Home: the list it samples, which its title opens in full.
-nonisolated struct HomeRow: Identifiable, Hashable, Sendable {
+nonisolated struct HomeRow: Identifiable, Hashable, Codable, Sendable {
     let id: String
     let list: BrowseList
 }

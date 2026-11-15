@@ -117,14 +117,23 @@ struct TitleExtrasShelf: View {
         let shown = extras?.itemId == item.id ? extras?.list : nil
         if TitleExtra.mayHave(item, opensWeb: Self.opensWeb), shown.map({ !$0.isEmpty }) ?? true {
             Shelf(title: "Trailers & Extras", items: shown, cardWidth: Metrics.landscapeWidth, placeholderStyle: .landscape) { extra in
-                Button { open(extra) } label: { ExtraCard(extra: extra, title: item) }
-                    .buttonStyle(.artwork)
-                    .foregroundStyle(.primary)
-                    .accessibilityHint(isWeb(extra) ? "Opens in the browser" : "Plays it")
+                card(extra)
             }
             .task(id: Key(itemId: item.id, trailers: item.localTrailerCount ?? 0, features: item.specialFeatureCount ?? 0)) {
                 await load()
             }
+        }
+    }
+
+    @ViewBuilder private func card(_ extra: TitleExtra) -> some View {
+        let button = Button { open(extra) } label: { ExtraCard(extra: extra, title: item) }
+            .buttonStyle(.artwork)
+            .foregroundStyle(.primary)
+            .accessibilityHint(isWeb(extra) ? "Opens in the browser" : "Plays it")
+        switch extra {
+        // The server's, even of a title that's downloaded, as downloads don't keep them.
+        case .video(let video): button.playableOffline(video, dimming: true)
+        case .web: button
         }
     }
 

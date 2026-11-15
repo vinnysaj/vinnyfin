@@ -59,6 +59,9 @@ struct VinnyfinApp: App {
         .windowResizability(.contentSize)
         #endif
         .restorationBehavior(.disabled)
+        // A player window opens for a playback only: File › New Player Window would open one
+        // with nothing to play.
+        .commandsRemoved()
         #endif
 
         #if os(visionOS)

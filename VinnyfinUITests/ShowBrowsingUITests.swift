@@ -23,7 +23,10 @@ final class ShowBrowsingUITests: XCTestCase {
         signInIfNeeded(app, server: server, username: "Alex")
         tap(tab("Shows", in: app))
         tap(app.buttons["poster.Port Ellery"])
-        tap(app.buttons["episode.2.details"])
+        // The episodes list as they scroll into view, under the show's hero and buttons.
+        let details = app.buttons["episode.2.details"]
+        for _ in 0..<6 where !details.exists { app.swipeUp() }
+        tap(details)
 
         let show = app.buttons["detail.eyebrow"]
         XCTAssertTrue(show.waitForExistence(timeout: uiTimeout), "The episode's page doesn't lead to its show")
@@ -128,7 +131,8 @@ final class ShowBrowsingUITests: XCTestCase {
         XCTAssertTrue(first.waitForExistence(timeout: uiTimeout), "The Long Field's page doesn't list its episodes")
         XCTAssertFalse(first.label.contains("Watched"))
         let watched = app.switches["detail.watched"]
-        let confirm = app.buttons["confirmation.confirm"]
+        // The alert's button holds another with its identifier.
+        let confirm = app.buttons["confirmation.confirm"].firstMatch
         tap(watched)
         XCTAssertTrue(confirm.waitForExistence(timeout: uiTimeout), "Marking the whole show didn't ask first")
         keep(app.screenshot(), named: "show-watched-question")
@@ -163,8 +167,15 @@ final class ShowBrowsingUITests: XCTestCase {
         let play = app.buttons["detail.play"]
 
         // Resume joins Start Over to the row as the episode's details come, which mustn't take focus off it.
+        // Select on a Continue Watching card resumes it; its page is the card's menu's Details.
         if let resumed = try await account.resumedEpisode() {
             focusAlongItsRow(app.buttons["card.\(resumed)"], in: app)
+            XCUIRemote.shared.press(.select, forDuration: 1.2)
+            // A menu's commands are rows with their names in them, which take focus themselves.
+            let details = app.cells.containing(.any, identifier: "Details").firstMatch
+            XCTAssertTrue(details.waitForExistence(timeout: uiTimeout), "The card's menu has no Details")
+            for _ in 0..<4 where !details.hasFocus { XCUIRemote.shared.press(.up) }
+            XCTAssertTrue(details.hasFocus, "Details never took focus")
             XCUIRemote.shared.press(.select)
             XCTAssertTrue(play.waitForExistence(timeout: uiTimeout), "The episode's page never opened")
             XCTAssertTrue(play.wait(for: \.hasFocus, toEqual: true, timeout: uiTimeout), "Focus didn't start on Resume")
@@ -233,6 +244,8 @@ final class ShowBrowsingUITests: XCTestCase {
     private func focusAlongItsRow(_ element: XCUIElement, in app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: uiTimeout), "\(element) never appeared", file: file, line: line)
         let focused = app.buttons.matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        // Its frame is where to move from.
+        XCTAssertTrue(focused.waitForExistence(timeout: uiTimeout), "No button has focus", file: file, line: line)
         // Level with it, allowing for focus lifting a card.
         let inItsRow = { focused.exists && abs(focused.frame.midY - element.frame.midY) < 40 }
         for _ in 0..<10 where !inItsRow() {

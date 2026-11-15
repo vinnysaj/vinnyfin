@@ -1,10 +1,12 @@
+import AppIntents
 import ImageIO
 import OSLog
 import SwiftUI
 import WidgetKit
 
 /// What's downloading and how far along, and what's ready to watch offline. A download opens
-/// its title's page; a title that's ready plays.
+/// its title's page; a title that's ready plays; a button beside the downloads pauses or resumes
+/// them. Each link opens under the sign-in that downloaded the title while it's kept here.
 struct DownloadsWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: DownloadsSnapshot.widgetKind, provider: Provider()) { entry in
@@ -92,7 +94,11 @@ private struct SmallView: View {
     var body: some View {
         if let download = snapshot.current {
             VStack(alignment: .leading, spacing: 6) {
-                TitleArtwork(title: download.title).frame(width: 40, height: 40)
+                HStack(alignment: .top) {
+                    TitleArtwork(title: download.title).frame(width: 40, height: 40)
+                    Spacer(minLength: 0)
+                    RunningButton(snapshot: snapshot)
+                }
                 Spacer(minLength: 0)
                 TitleText(title: download.title)
                 DownloadProgress(download: download, more: snapshot.unfinishedCount - 1)
@@ -130,8 +136,11 @@ private struct ListView: View {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(downloads) { download in
-                    Link(destination: download.title.openLink) {
-                        Row(title: download.title) { DownloadProgress(download: download, more: nil) }
+                    HStack(spacing: 8) {
+                        Link(destination: download.title.openLink) {
+                            Row(title: download.title) { DownloadProgress(download: download, more: nil) }
+                        }
+                        if download.id == downloads.first?.id { RunningButton(snapshot: snapshot) }
                     }
                 }
                 if !downloads.isEmpty, !ready.isEmpty { Divider() }
@@ -223,6 +232,27 @@ private struct RectangularView: View {
     }
 }
 #endif
+
+/// Pauses every download while any is under way or waiting its turn, and resumes the paused
+/// ones otherwise, without opening the app, as the Downloads control does. Downloads that
+/// stopped on a failure wait for Retry in the app, so with only those there's no button.
+private struct RunningButton: View {
+    let snapshot: DownloadsSnapshot
+
+    var body: some View {
+        if snapshot.isRunning || snapshot.unfinishedCount > snapshot.stoppedCount {
+            Button(intent: SetDownloadsRunningIntent(running: !snapshot.isRunning)) {
+                Image(systemName: snapshot.isRunning ? "pause.fill" : "play.fill")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tint)
+            .background(.fill.secondary, in: .circle)
+            .accessibilityLabel(snapshot.isRunning ? "Pause Downloads" : "Resume Downloads")
+        }
+    }
+}
 
 private struct Nothing: View {
     var body: some View {

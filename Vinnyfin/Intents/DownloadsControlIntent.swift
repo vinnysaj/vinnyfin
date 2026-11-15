@@ -9,9 +9,9 @@ protocol DownloadsRunning: AnyObject, Sendable {
     func setRunning(_ isRunning: Bool) async
 }
 
-/// Runs or pauses every download, as the Downloads control's switch does. The control shows in
-/// the widget extension, which only draws it: the intent runs in the app, where the downloads
-/// are, which the system launches in the background when it isn't running.
+/// Runs or pauses every download, as the Downloads control's switch and the Downloads widget's
+/// button do. Both show in the widget extension, which only draws them: the intent runs in the
+/// app, where the downloads are, which the system launches in the background when it isn't running.
 struct SetDownloadsRunningIntent: SetValueIntent {
     static let title: LocalizedStringResource = "Run or Pause Downloads"
     static let isDiscoverable = false
@@ -19,6 +19,13 @@ struct SetDownloadsRunningIntent: SetValueIntent {
 
     @Parameter(title: "Downloading")
     var value: Bool
+
+    init() {}
+
+    /// Runs every download, or pauses them, as a button that does one of them asks.
+    init(running: Bool) {
+        value = running
+    }
 
     @Dependency private var downloads: any DownloadsRunning
 

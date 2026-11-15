@@ -71,6 +71,8 @@ struct VinnyfinApp: App {
         }
         // The Digital Crown brings the room back in around the theater.
         .immersionStyle(selection: $cinemaImmersion, in: .progressive)
+        // A dark theater: the system shows the picture as bright as it would in a dark room.
+        .immersiveContentBrightness(.dark)
         #endif
 
         #if os(macOS)

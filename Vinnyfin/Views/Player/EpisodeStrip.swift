@@ -11,6 +11,8 @@ struct EpisodeStrip<Accessory: View>: View {
     var axis: Axis = .horizontal
     /// Smaller cards, for a short screen.
     var isCompact = false
+    /// Nothing moves on its own: below the fold, which stays still while the picture plays above.
+    var isStill = false
     /// Called as it's scrolled or used, so controls that fade stay up meanwhile.
     var onInteraction: () -> Void = {}
     /// Called as an episode is picked to play.
@@ -194,7 +196,7 @@ struct EpisodeStrip<Accessory: View>: View {
                     Image(systemName: "waveform")
                         .font(.title2.weight(.semibold))
                         // Still with Reduce Motion: the stroke around it marks it.
-                        .symbolEffect(.variableColor.iterative, isActive: model.isPlaying && !reduceMotion)
+                        .symbolEffect(.variableColor.iterative, isActive: model.isPlaying && !reduceMotion && !isStill)
                         .shadow(radius: 4)
                 }
             }
@@ -275,10 +277,10 @@ struct EpisodeStrip<Accessory: View>: View {
 }
 
 extension EpisodeStrip where Accessory == EmptyView {
-    init(model: PlayerModel, playing: JellyfinItem, axis: Axis = .horizontal, isCompact: Bool = false,
+    init(model: PlayerModel, playing: JellyfinItem, axis: Axis = .horizontal, isCompact: Bool = false, isStill: Bool = false,
          onInteraction: @escaping () -> Void = {}, onPlay: @escaping () -> Void = {}) {
-        self.init(model: model, playing: playing, axis: axis, isCompact: isCompact, onInteraction: onInteraction,
-                  onPlay: onPlay) { EmptyView() }
+        self.init(model: model, playing: playing, axis: axis, isCompact: isCompact, isStill: isStill,
+                  onInteraction: onInteraction, onPlay: onPlay) { EmptyView() }
     }
 }
 

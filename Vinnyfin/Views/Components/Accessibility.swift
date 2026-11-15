@@ -47,20 +47,19 @@ extension View {
     }
 
     /// A title's long-press menu with `more` commands after its own, all of them among its
-    /// accessibility actions too. With `playsOnTap`, for a card that plays its title on a tap, it
-    /// leads with the title's page (see `ItemContextMenu.playsOnTap`).
-    func titleMenu<More: View>(_ item: JellyfinItem?, playsOnTap: Bool = false, onChange: @escaping (JellyfinItem) -> Void = { _ in },
+    /// accessibility actions too.
+    func titleMenu<More: View>(_ item: JellyfinItem?, onChange: @escaping (JellyfinItem) -> Void = { _ in },
                                @ViewBuilder more: () -> More) -> some View {
         let more = more()
         return contextMenu {
             if let item {
-                ItemContextMenu(item: item, playsOnTap: playsOnTap, onChange: onChange)
+                ItemContextMenu(item: item, onChange: onChange)
                 more
             }
         }
         .accessibilityActions {
             if let item {
-                ItemContextMenu(item: item, playsOnTap: playsOnTap, onChange: onChange)
+                ItemContextMenu(item: item, onChange: onChange)
                 more
             }
         }

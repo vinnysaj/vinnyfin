@@ -169,14 +169,18 @@ struct PlaybackMenuTests {
 #endif
 
 /// On Vision Pro the player's buttons are in an ornament below the window, so each panel opens in
-/// a popover from its button, off the picture; elsewhere they open over the picture by it.
+/// a popover from its button, off the picture. On iPhone and iPad the choices do, growing out of
+/// their buttons, and the episodes are a drawer or a sheet. On the Mac and Apple TV the panels
+/// open over the picture by their buttons.
 struct PanelPopoverTests {
-    private let panelsWithButtons: [PlayerPanel] = [.audioAndSubtitles, .speed, .chapters, .quality, .episodes]
+    private let panelsWithButtons: [PlayerPanel] = [.audioAndSubtitles, .chapters, .quality, .episodes]
 
-    @Test func panelsOpenInPopoversOnlyOnVisionPro() {
+    @Test func panelsOpenInPopoversWhereTheyGrowFromTheirButtons() {
         for panel in panelsWithButtons {
             #if os(visionOS)
             #expect(panel.opensInPopover, "\(panel.title)")
+            #elseif os(iOS)
+            #expect(panel.opensInPopover == (panel != .episodes), "\(panel.title)")
             #else
             #expect(!panel.opensInPopover, "\(panel.title)")
             #endif

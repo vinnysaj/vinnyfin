@@ -35,9 +35,8 @@ struct PlayerView: View {
     /// The controls stay up until they're hidden the way they were shown. VoiceOver, Voice Control
     /// and Switch Control take longer to reach a control than the few seconds they'd stay.
     @State private var holdsControls = false
-    /// Play On's sheet or SharePlay's is up. Here rather than with the controls, which come and go
-    /// under them.
-    @State private var elsewhere: Elsewhere?
+    /// SharePlay's sheet is up. Here rather than with the controls, which come and go under it.
+    @State private var showsGroup = false
     @State private var hideTask: Task<Void, Never>?
     @State private var fillsScreen = false
     @State private var panel: PlayerPanel?
@@ -115,6 +114,8 @@ struct PlayerView: View {
     #if os(iOS)
     @Environment(AppSettings.self) private var settings
     @State private var rotation = PlayerRotation()
+    /// The controls' buttons that open the player's sheets, which grow out of them.
+    @Namespace private var sheetSources
     /// The fold across the screen of an iPhone Duo standing half open, in window coordinates.
     @State private var fold: CGRect?
     /// The whole screen's size, which the episodes' sheet fills the part below the picture of.
@@ -139,6 +140,7 @@ struct PlayerView: View {
                 if folded { showControls() }
             }
             .environment(rotation)
+            .environment(\.playerSheetSources, sheetSources)
             .onHingeChange { _, context in
                 rotation.hingeChanged(isUnfolded: [.partiallyOpen, .fullyOpen].contains(context.hinge?.status))
             }
@@ -364,21 +366,13 @@ struct PlayerView: View {
                 onClose()
             }
             #if !os(tvOS)
-            .sheet(item: $elsewhere) { sheet in
-                Group {
-                    switch sheet {
-                    case .playOn:
-                        #if os(iOS) || os(macOS)
-                        PlayOnSheet(subject: .playback(model), onHandedOver: onClose)
-                        #else
-                        EmptyView()
-                        #endif
-                    case .sharePlay:
-                        SharePlaySheet(subject: .playback(model))
-                    }
-                }
-                // Half the screen, the picture still playing above it.
-                .presentationDetents([.medium, .large])
+            .sheet(isPresented: $showsGroup) {
+                SharePlaySheet(subject: .playback(model))
+                    // Half the screen, the picture still playing above it.
+                    .presentationDetents([.medium, .large])
+                    #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: PlayerSheet.sharePlay, in: sheetSources))
+                    #endif
             }
             #endif
             .onAppear(perform: appeared)
@@ -459,7 +453,12 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                     #if os(iOS)
                     .onGeometryChange(for: CGRect?.self) { Self.fold(in: $0) } action: { fold = $0 }
-                    .onGeometryChange(for: CGSize.self) { $0.size } action: { screenSize = $0 }
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                        screenSize = size
+                        #if DEBUG
+                        Self.log.debug("Player screen \(Int(size.width))x\(Int(size.height))")
+                        #endif
+                    }
                     #endif
                 #endif
                 PlayerSurface(engine: model.engine)
@@ -548,7 +547,7 @@ struct PlayerView: View {
             if controlsVisible, !showsEndScreen {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
-                               onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playOn: nil, watchTogether: nil,
+                               onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, watchTogether: nil,
                                focus: $focus, isCompact: controlsCompact,
                                onTimelineSelect: timelineClicked, onTimelineMove: timelineMoved,
                                holdsFocusOnTimeline: timelineHoldsFocus)
@@ -561,7 +560,7 @@ struct PlayerView: View {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: { showControls() }, pictureInPicture: pictureInPictureAction,
-                               playOn: playOnAction, watchTogether: watchTogetherAction, isBelowFold: true)
+                               watchTogether: watchTogetherAction, isBelowFold: true)
                     .opacity(controlsVisible ? 1 : Self.dimmedBelowFold)
                     .contentShape(.rect)
                     .simultaneousGesture(TapGesture().onEnded { showControls() })
@@ -571,7 +570,7 @@ struct PlayerView: View {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
-                               playOn: playOnAction, watchTogether: watchTogetherAction)
+                               watchTogether: watchTogetherAction)
                     #if DEBUG
                     .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in
                         // Records a bottom inset that lifts the controls up the screen, such as a
@@ -1088,6 +1087,7 @@ struct PlayerView: View {
                 .presentationBackgroundInteraction(.enabled(upThrough: .height(episodesSheetHeight)))
                 .presentationDragIndicator(.visible)
                 .preferredColorScheme(.dark)
+                .navigationTransition(.zoom(sourceID: PlayerSheet.episodes, in: sheetSources))
         }
     }
 
@@ -1220,7 +1220,7 @@ struct PlayerView: View {
     private var controlsOrnament: some View {
         PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                        bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
-                       onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playOn: nil,
+                       onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil,
                        watchTogether: watchTogetherAction)
             .padding(.top, 24)
     }
@@ -1282,28 +1282,13 @@ struct PlayerView: View {
         #endif
     }
 
-    private enum Elsewhere: Identifiable {
-        case playOn, sharePlay
-
-        var id: Self { self }
-    }
-
-    /// For a server title, on iPhone, iPad and the Mac.
-    private var playOnAction: (() -> Void)? {
-        #if os(iOS) || os(macOS)
-        model.item != nil ? { elsewhere = .playOn } : nil
-        #else
-        nil
-        #endif
-    }
-
     /// For a server title: watches it with everyone on the call, or shows the group watching. On
     /// Apple TV, SharePlay starts from a title's page.
     private var watchTogetherAction: (() -> Void)? {
         #if os(tvOS)
         nil
         #else
-        model.item != nil ? { sharePlay.buttonTapped(for: .playback(model)) { elsewhere = .sharePlay } } : nil
+        model.item != nil ? { sharePlay.buttonTapped(for: .playback(model)) { showsGroup = true } } : nil
         #endif
     }
 

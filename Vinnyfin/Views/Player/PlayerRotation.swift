@@ -1,4 +1,5 @@
 #if os(iOS)
+import CoreMotion
 import Observation
 import OSLog
 import UIKit
@@ -13,6 +14,11 @@ import UIKit
 /// is. iPhone only: an iPad turns its windows itself, as does an iPhone Duo unfolded, which
 /// ignores the orientations its windows allow and refuses to turn them on request, so there the
 /// player turns with the device. Folded shut again, the Duo's front screen keeps the shape it's in.
+///
+/// Which way the phone is held comes from gravity (`Held`), not from the system's device
+/// orientation, which Portrait Orientation Lock keeps upright however the phone is held: with
+/// the lock on, the offer would stay the way back to portrait, and turning the phone would never
+/// offer anything. The app turns the system's way as the player closes, upright under the lock.
 @Observable
 final class PlayerRotation {
     /// What the app's windows may turn to, as the app delegate tells the system.
@@ -27,8 +33,14 @@ final class PlayerRotation {
     private(set) var isAnnouncing = false
 
     @ObservationIgnored private var hold = Hold()
-    /// The way the phone is turned, as an interface orientation.
+    /// The way the phone is held, as an interface orientation.
     @ObservationIgnored private var turned: UIInterfaceOrientation?
+    @ObservationIgnored private var held = Held()
+    /// Gravity, while the player is open on a device that feels it. The simulator doesn't, and
+    /// follows the system's device orientation instead.
+    @ObservationIgnored private var motion: CMMotionManager?
+    /// The way the system has the phone turned, which Portrait Orientation Lock keeps upright.
+    @ObservationIgnored private var systemTurned: UIInterfaceOrientation?
     @ObservationIgnored private var observer: (any NSObjectProtocol)?
     @ObservationIgnored private var announcing: Task<Void, Never>?
     /// Play Videos in Landscape is on.
@@ -47,9 +59,23 @@ final class PlayerRotation {
         observer = NotificationCenter.default.addObserver(
             forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.deviceTurned() }
+            MainActor.assumeIsolated { self?.systemOrientationChanged() }
         }
-        deviceTurned()
+        let motion = CMMotionManager()
+        Self.log.debug("""
+            Player opened \(self.currentOrientation.logName, privacy: .public), holding \(self.hold.allowed.rawValue), \
+            unfolded \(self.hold.isUnfolded), gravity \(motion.isDeviceMotionAvailable)
+            """)
+        if motion.isDeviceMotionAvailable {
+            motion.deviceMotionUpdateInterval = Held.interval
+            motion.startDeviceMotionUpdates(to: .main) { [weak self] sample, _ in
+                guard let sample else { return }
+                let (x, y, time) = (sample.gravity.x, sample.gravity.y, sample.timestamp)
+                MainActor.assumeIsolated { self?.felt(x: x, y: y, at: time) }
+            }
+            self.motion = motion
+        }
+        systemOrientationChanged()
     }
 
     /// Lets the app turn freely again as the player closes, turning it the way the phone is,
@@ -58,14 +84,20 @@ final class PlayerRotation {
         guard let observer else { return }
         NotificationCenter.default.removeObserver(observer)
         self.observer = nil
+        motion?.stopDeviceMotionUpdates()
+        motion = nil
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         withdraw()
         // Opened again, it starts over, a landscape title turning it again.
         let isUnfolded = hold.isUnfolded
         hold = Hold()
         hold.isUnfolded = isUnfolded
-        // Flat on a table, the phone says no way up: the app stays as it is.
-        apply(.all, turningTo: turned.map(Hold.mask(for:)))
+        turned = nil
+        held = Held()
+        // Turned the phone's way under Portrait Orientation Lock, the app would stay sideways
+        // with nothing to turn it back. Flat on a table, the phone says no way up: the app stays
+        // as it is.
+        apply(.all, turningTo: systemTurned.map(Hold.mask(for:)))
     }
 
     /// The picture of the title playing is `size`: a landscape one, held upright, turns the player
@@ -74,17 +106,18 @@ final class PlayerRotation {
         guard observer != nil, let current = currentOrientation,
               hold.pictureShaped(size, current: current, playsInLandscape: playsInLandscape) else { return }
         apply(hold.allowed, turningTo: .landscape)
-        deviceTurned()
+        reconsiderOffer()
     }
 
     /// Unfolded, the player turns with the device; folded shut, it holds the shape the front
-    /// screen is in, which is the way the phone is turned.
+    /// screen is in, which is the way the system has the phone turned.
     func hingeChanged(isUnfolded: Bool) {
         guard isUnfolded != hold.isUnfolded else { return }
+        Self.log.debug("\(isUnfolded ? "Unfolded" : "Folded shut", privacy: .public)")
         hold.isUnfolded = isUnfolded
-        if !isUnfolded, let shape = turned ?? currentOrientation { hold.hold(shape) }
+        if !isUnfolded, let shape = systemTurned ?? currentOrientation { hold.hold(shape) }
         apply(hold.allowed)
-        deviceTurned()
+        reconsiderOffer()
     }
 
     /// Takes the offer: turns the player the way the phone is, and holds it there.
@@ -97,13 +130,29 @@ final class PlayerRotation {
 
     // MARK: Following the phone
 
-    private func deviceTurned() {
+    private func felt(x: Double, y: Double, at time: TimeInterval) {
+        guard let orientation = held.felt(x: x, y: y, at: time) else { return }
+        Self.log.debug("Held \(Optional(orientation).logName, privacy: .public)")
+        turned = orientation
+        reconsiderOffer()
+    }
+
+    private func systemOrientationChanged() {
         // Flat on a table, or unknown: nothing new about which way is up.
-        if let orientation = Self.interfaceOrientation(facing: UIDevice.current.orientation) { turned = orientation }
+        guard let orientation = Self.interfaceOrientation(facing: UIDevice.current.orientation) else { return }
+        Self.log.debug("System turned \(Optional(orientation).logName, privacy: .public)")
+        systemTurned = orientation
+        guard motion == nil else { return }
+        turned = orientation
+        reconsiderOffer()
+    }
+
+    private func reconsiderOffer() {
         guard let turned, hold.offers(turned) else { return withdraw() }
         let isNew = offer == nil
         offer = turned
         guard isNew else { return }
+        Self.log.debug("Offering \(Optional(turned).logName, privacy: .public)")
         isAnnouncing = true
         announcing?.cancel()
         announcing = Task {
@@ -122,6 +171,7 @@ final class PlayerRotation {
     /// device turns them itself.
     private func apply(_ mask: UIInterfaceOrientationMask, turningTo turn: UIInterfaceOrientationMask? = nil) {
         guard mask != Self.allowed || turn != nil else { return }
+        Self.log.debug("Allowing \(mask.rawValue), turning to \(turn?.rawValue ?? 0)")
         Self.allowed = mask
         guard let scene else { return }
         for window in scene.windows {
@@ -157,6 +207,55 @@ final class PlayerRotation {
         case .landscapeLeft: .landscapeRight
         case .landscapeRight: .landscapeLeft
         default: nil
+        }
+    }
+
+    /// The way the phone is held, from gravity along its screen. It's settled once the phone has
+    /// stayed turned well toward a new way for a moment, so holding it near 45 degrees, or a
+    /// jolt, doesn't flicker the offer; lying near flat says nothing new.
+    nonisolated struct Held {
+        /// How often gravity is felt.
+        static let interval: TimeInterval = 0.1
+        /// How long the phone stays turned toward a new way before it's held that way.
+        static let settling: TimeInterval = 0.4
+        /// Tipped up less than this from lying flat, the phone isn't turned any way.
+        private static let leastTilt = 30.0
+        /// Turned further than this from a way up, it isn't turned toward it.
+        private static let widestTurn = 30.0
+
+        private(set) var orientation: UIInterfaceOrientation?
+        /// The new way the phone's turned toward, since when.
+        private var leaning: (orientation: UIInterfaceOrientation, since: TimeInterval)?
+
+        /// Gravity is `x`, `y` along the screen, in g, at `time`, in seconds: the way the phone is
+        /// held, when that's just settled.
+        mutating func felt(x: Double, y: Double, at time: TimeInterval) -> UIInterfaceOrientation? {
+            // Between ways, or near flat, it's still leaning the way it was.
+            guard let toward = Self.toward(x: x, y: y) else { return nil }
+            guard toward != orientation else {
+                leaning = nil
+                return nil
+            }
+            guard let leaning, leaning.orientation == toward else {
+                leaning = (toward, time)
+                return nil
+            }
+            guard time - leaning.since >= Self.settling else { return nil }
+            orientation = toward
+            self.leaning = nil
+            return toward
+        }
+
+        /// The way up the phone is turned toward, with gravity `x`, `y` along its screen: the
+        /// interface orientation upright that way. Landscape is mirrored as the device's is: the
+        /// phone's left side down shows its interface turned right.
+        static func toward(x: Double, y: Double) -> UIInterfaceOrientation? {
+            let along = (x * x + y * y).squareRoot()
+            guard along >= sin(leastTilt * .pi / 180) else { return nil }
+            let ways: [(UIInterfaceOrientation, Double)] = [
+                (.portrait, -y), (.portraitUpsideDown, y), (.landscapeRight, -x), (.landscapeLeft, x),
+            ]
+            return ways.first { $0.1 / along >= cos(widestTurn * .pi / 180) }?.0
         }
     }
 
@@ -209,6 +308,17 @@ final class PlayerRotation {
         /// Both orientations of the same shape, so turning the phone end over end still follows.
         static func mask(for orientation: UIInterfaceOrientation) -> UIInterfaceOrientationMask {
             orientation.isLandscape ? .landscape : .portrait
+        }
+    }
+}
+private extension UIInterfaceOrientation? {
+    var logName: String {
+        switch self {
+        case .portrait: "portrait"
+        case .portraitUpsideDown: "upside down"
+        case .landscapeLeft: "landscape left"
+        case .landscapeRight: "landscape right"
+        default: "unknown"
         }
     }
 }

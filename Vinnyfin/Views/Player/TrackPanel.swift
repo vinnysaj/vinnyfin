@@ -10,14 +10,16 @@ import UIKit
 enum PlayerPanel: Identifiable {
     /// The audio tracks when there's a choice, the subtitles and their timing, and the sound tools.
     case audioAndSubtitles
-    case speed, chapters, episodes, quality, info
+    case chapters, episodes
+    /// What plays and the ways to play it, and the speed.
+    case quality
+    case info
 
     var id: Self { self }
 
     var title: String {
         switch self {
         case .audioAndSubtitles: "Audio & Subtitles"
-        case .speed: "Speed"
         case .chapters: "Chapters"
         case .episodes: "Episodes"
         case .quality: "Quality"
@@ -28,7 +30,6 @@ enum PlayerPanel: Identifiable {
     var symbol: String {
         switch self {
         case .audioAndSubtitles: "captions.bubble"
-        case .speed: "gauge.with.dots.needle.67percent"
         case .chapters: "list.bullet.rectangle"
         case .episodes: "rectangle.stack"
         case .quality: "sparkles.tv"
@@ -39,7 +40,7 @@ enum PlayerPanel: Identifiable {
     /// A list of `TrackPanel`'s.
     var isTrackPanel: Bool {
         switch self {
-        case .audioAndSubtitles, .speed, .chapters: true
+        case .audioAndSubtitles, .chapters: true
         case .episodes, .quality, .info: false
         }
     }
@@ -57,12 +58,15 @@ enum PlayerPanel: Identifiable {
     /// choice, stays.
     var closesOnChoice: Bool { self != .audioAndSubtitles }
 
-    /// It opens in a popover from its button rather than over the picture: on Vision Pro, whose
-    /// buttons are in an ornament below the window, out of the picture's coordinates, so a panel
-    /// over the picture could neither find its button nor keep off the picture.
+    /// It opens in a popover from its button rather than over the picture. On iPhone and iPad the
+    /// popover's glass grows out of the button's; the episodes are a drawer along the bottom or a
+    /// sheet. On Vision Pro the buttons are in an ornament below the window, out of the picture's
+    /// coordinates, so a panel over the picture could neither find its button nor keep off it.
     var opensInPopover: Bool {
         #if os(visionOS)
         !isTab
+        #elseif os(iOS)
+        self != .episodes
         #else
         false
         #endif
@@ -102,29 +106,8 @@ nonisolated enum PanelPlacement {
     }
 }
 
-/// The speeds the player offers, and how it writes one.
-enum PlaybackSpeed {
-    static let choices: [Float] = [0.5, 0.75, 1, 1.25, 1.5, 2]
-
-    /// "1.5×".
-    static func label(_ rate: Float) -> String {
-        "\(rate.formatted())×"
-    }
-
-    /// What VoiceOver calls it, "Normal" at 1×.
-    static func name(_ rate: Float) -> String {
-        rate == 1 ? "Normal" : label(rate)
-    }
-
-    /// The choice nearest `rate`, as a remote can ask for any speed.
-    static func nearest(to rate: Float) -> Float {
-        choices.min { abs($0 - rate) < abs($1 - rate) } ?? 1
-    }
-}
-
 /// A panel of choices with the current one checked: the audio tracks when there's a choice, the
-/// subtitles and their timing, and the sound tools; the speeds in a row with the current one
-/// lit; or the chapters.
+/// subtitles and their timing, and the sound tools; or the chapters.
 struct TrackPanel: View {
     let model: PlayerModel
     let panel: PlayerPanel
@@ -135,7 +118,6 @@ struct TrackPanel: View {
     private struct Row: Identifiable {
         let id: String
         let title: String
-        var spokenTitle: String?
         let detail: String?
         let isSelected: Bool
         /// A chapter's picture.
@@ -165,13 +147,6 @@ struct TrackPanel: View {
         }
     }
 
-    private var speedRows: [Row] {
-        PlaybackSpeed.choices.map { rate in
-            Row(id: "speed.\(rate)", title: PlaybackSpeed.label(rate), spokenTitle: PlaybackSpeed.name(rate), detail: nil,
-                isSelected: model.rate == rate) { model.setRate(rate) }
-        }
-    }
-
     private var chapterRows: [Row] {
         let playing = ChapterMark.current(in: model.chapters, at: model.clock.time)
         return model.chapters.map { chapter in
@@ -188,7 +163,6 @@ struct TrackPanel: View {
     private var currentRow: String? {
         switch panel {
         case .audioAndSubtitles: subtitleRows.first(where: \.isSelected)?.id
-        case .speed: speedRows.first(where: \.isSelected)?.id ?? speedRows.first?.id
         case .chapters: chapterRows.first(where: \.isSelected)?.id ?? chapterRows.first?.id
         case .episodes, .quality, .info: nil
         }
@@ -218,16 +192,15 @@ struct TrackPanel: View {
             .padding([.horizontal, .top])
             switch panel {
             case .audioAndSubtitles: tracks
-            case .speed: speeds
             case .chapters: chapters
             // Panels of their own (`PlayerPanel.isTrackPanel`).
             case .episodes, .quality, .info: EmptyView()
             }
         }
-        // The speeds' row sets the width of theirs.
-        .frame(width: panel == .speed ? nil : Self.width)
+        .frame(width: Self.width)
         .frame(maxHeight: min(Self.maxHeight, room))
-        .fixedSize(horizontal: panel == .speed, vertical: true)
+        // As tall as its rows; a popover, short of room, scrolls them instead.
+        .fixedSize(horizontal: false, vertical: !panel.opensInPopover)
         .panelGlass(in: .rect(cornerRadius: 24), for: panel)
         #if os(tvOS)
         .focusSection()
@@ -321,7 +294,7 @@ struct TrackPanel: View {
         #endif
     }
 
-    // MARK: Chapters and speeds
+    // MARK: Chapters
 
     /// The chapters, opening on the one playing, as far down a long list as it is.
     private var chapters: some View {
@@ -394,36 +367,6 @@ struct TrackPanel: View {
         .accessibilityIdentifier("panel.note")
     }
 
-    /// Every speed in one row, in reach in any orientation. They keep their size past the default
-    /// text size, as the player's buttons do, and the Large Content Viewer shows each one large.
-    private var speeds: some View {
-        HStack(spacing: Self.chipSpacing) {
-            ForEach(speedRows) { row in
-                speedChip(row)
-            }
-        }
-        .padding(.horizontal, Self.chipInset)
-        .padding(.bottom, Self.chipInset)
-        .dynamicTypeSize(...DynamicTypeSize.large)
-    }
-
-    private func speedChip(_ row: Row) -> some View {
-        Button {
-            choose(row.choose)
-        } label: {
-            Text(row.title)
-                .frame(minWidth: Self.chipMinWidth)
-        }
-        .buttonStyle(SpeedChipStyle(isSelected: row.isSelected))
-        #if os(tvOS)
-        .focused($focusedRow, equals: row.id)
-        #endif
-        .accessibilityLabel(row.spokenTitle ?? row.title)
-        .accessibilityAddTraits(row.isSelected ? .isSelected : [])
-        .accessibilityShowsLargeContentViewer()
-        .accessibilityIdentifier("panel.\(row.id)")
-    }
-
     /// Makes a choice, closing a panel that closes on one. The choice ticks on iPhone here, as
     /// it's made: a panel closing with it would be gone before a sensory feedback modifier on it
     /// could see the change.
@@ -486,30 +429,6 @@ struct TrackPanel: View {
         #endif
     }
 
-    /// Between the speeds and the glass: on Apple TV room for the focused one to lift.
-    private static var chipInset: CGFloat {
-        #if os(tvOS)
-        28
-        #else
-        16
-        #endif
-    }
-
-    private static var chipSpacing: CGFloat {
-        #if os(tvOS)
-        20
-        #else
-        4
-        #endif
-    }
-
-    private static var chipMinWidth: CGFloat {
-        #if os(tvOS)
-        48
-        #else
-        20
-        #endif
-    }
 }
 
 /// Moves the subtitles a tenth of a second earlier or later, holding a button to keep going, and
@@ -562,53 +481,6 @@ private struct SubtitleTiming: View {
         .buttonStyle(SpeedChipStyle(isSelected: false))
         .buttonRepeatBehavior(.enabled)
         .accessibilityLabel(later ? "Later" : "Earlier")
-    }
-}
-
-/// A speed's chip, lit when it's the speed, like a season's chip on a show's page but closer cut,
-/// so every speed fits across a phone held upright. A finger's height to tap, though drawn shorter.
-private struct SpeedChipStyle: ButtonStyle {
-    let isSelected: Bool
-    #if os(tvOS)
-    @Environment(\.isFocused) private var isFocused
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    #endif
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.subheadline.weight(.semibold))
-            .monospacedDigit()
-            .padding(.horizontal, Self.padding)
-            .padding(.vertical, 8)
-            .foregroundStyle(isSelected ? AnyShapeStyle(.black) : AnyShapeStyle(.primary))
-            .background(fill, in: .capsule)
-            #if os(tvOS)
-            // With Reduce Motion, focus lifts it with its shadow alone.
-            .scaleEffect(isFocused && !reduceMotion ? 1.12 : 1)
-            .shadow(radius: isFocused ? 12 : 0)
-            .animation(.easeOut(duration: 0.15), value: isFocused)
-            #else
-            .padding(.vertical, 4)
-            .contentShape(.rect)
-            #endif
-            .opacity(configuration.isPressed ? 0.7 : 1)
-    }
-
-    /// The speed lit white; on Apple TV the chip with focus brighter than the rest.
-    private var fill: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(.white) }
-        #if os(tvOS)
-        if isFocused { return AnyShapeStyle(.white.opacity(0.35)) }
-        #endif
-        return AnyShapeStyle(.quaternary)
-    }
-
-    private static var padding: CGFloat {
-        #if os(tvOS)
-        18
-        #else
-        8
-        #endif
     }
 }
 

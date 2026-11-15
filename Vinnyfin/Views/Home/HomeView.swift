@@ -3,8 +3,8 @@ import SwiftUI
 
 /// What to watch next, and everything else to find: a featured banner, what's in progress and
 /// new, then a long run of rows from what was watched and liked, the best and newest, collections
-/// and every genre. Continue Watching plays on a tap; every other card opens its title. A row's
-/// title opens all of its titles when it holds only some.
+/// and every genre. A card opens its title, an episode's page saying what it's about before it
+/// plays. A row's title opens all of its titles when it holds only some.
 struct HomeView: View {
     /// The pages open on top of Home: titles, and lists in full.
     @Binding var path: NavigationPath
@@ -37,6 +37,8 @@ struct HomeView: View {
     #if os(iOS)
     @Environment(TVRemote.self) private var tvRemote
     @State private var showingRemote = false
+    /// The bar's buttons, which their sheets grow out of.
+    @Namespace private var sheetSources
     #elseif os(macOS)
     @Environment(\.openWindow) private var openWindow
     #elseif os(tvOS)
@@ -132,20 +134,30 @@ struct HomeView: View {
                 #if os(iOS)
                 if tvRemote.hasFoundTV {
                     ToolbarItem(placement: .barTrailing) { remoteButton }
+                        .matchedTransitionSource(id: Sheet.remote, in: sheetSources)
                 }
-                #endif
+                ToolbarItem(placement: .barTrailing) { soundsButton }
+                    .matchedTransitionSource(id: Sheet.sounds, in: sheetSources)
+                ToolbarItem(placement: .barTrailing) { settingsButton }
+                    .matchedTransitionSource(id: Sheet.settings, in: sheetSources)
+                #else
                 ToolbarItem(placement: .barTrailing) { soundsButton }
                 ToolbarItem(placement: .barTrailing) { settingsButton }
+                #endif
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
                     #if os(iOS)
                     // A big iPad's Settings as a page rather than a small card.
                     .presentationSizing(.page)
+                    .navigationTransition(.zoom(sourceID: Sheet.settings, in: sheetSources))
                     #endif
             }
             #if os(iOS)
-            .sheet(isPresented: $showingRemote) { TVRemoteScreen() }
+            .sheet(isPresented: $showingRemote) {
+                TVRemoteScreen()
+                    .navigationTransition(.zoom(sourceID: Sheet.remote, in: sheetSources))
+            }
             .task(id: session?.account) { await tvRemote.lookForTV() }
             #endif
             #elseif os(macOS)
@@ -156,7 +168,12 @@ struct HomeView: View {
             }
             #endif
             #if !os(tvOS)
-            .sheet(isPresented: $showingSounds) { SoundsView() }
+            .sheet(isPresented: $showingSounds) {
+                SoundsView()
+                    #if os(iOS)
+                    .navigationTransition(.zoom(sourceID: Sheet.sounds, in: sheetSources))
+                    #endif
+            }
             #endif
             .itemDestinations()
             // Out of reach, a pull asks the server again, and Home loads once it answers.
@@ -225,6 +242,13 @@ struct HomeView: View {
 
     #if !os(tvOS)
     /// Moves while a sound plays.
+    #if os(iOS)
+    /// The sheets the bar's buttons open.
+    private enum Sheet: Hashable {
+        case remote, sounds, settings
+    }
+    #endif
+
     private var soundsButton: some View {
         Button("Sounds", systemImage: "waveform") { showingSounds = true }
             .symbolEffect(.variableColor.iterative, isActive: sounds.state == .playing && !sounds.isSteppedAside)
@@ -405,15 +429,12 @@ private struct HomeRowView: View {
 
     @ViewBuilder private func card(_ item: JellyfinItem) -> some View {
         if row.id == HomeRows.continueWatching.id {
-            // Picks up where it was left, as the widget does; the title's page is in the menu.
-            Button { player.play(.item(item)) } label: { LandscapeCard(item: item, playsOnTap: true) }
+            NavigationLink(value: item) { LandscapeCard(item: item) }
                 .buttonStyle(.artwork)
-                .titleMenu(item, playsOnTap: true) { feed.replace($0) } more: {
+                .titleMenu(item) { feed.replace($0) } more: {
                     Button("Remove from Continue Watching", systemImage: "minus.circle") { removeFromContinueWatching(item) }
                         .needsServer()
                 }
-                .accessibilityHint(item.resumeSeconds != nil ? "Resumes it" : "Plays it")
-                .playableOffline(item, dimming: true)
         } else {
             switch row.list.style {
             case .poster:

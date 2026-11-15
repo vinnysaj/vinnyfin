@@ -35,10 +35,9 @@ struct PlayerControls: View {
     let onClose: () -> Void
     /// Called on every use, so the controls stay up while they're being used.
     let onInteraction: () -> Void
-    /// Picture in Picture's button; nil where the player has none.
+    /// Picture in Picture's button, on the Mac; nil where the player has none. iPhone and iPad
+    /// start the window as the app leaves the screen, and need no button.
     let pictureInPicture: PictureInPictureButton?
-    /// Opens Play On; nil when the playback is only this device's, or where there's no Play On.
-    let playOn: (() -> Void)?
     /// SharePlay's button, which shows only on a FaceTime call or while watching together
     /// (`SharePlay.isOffered`); nil when the playback is only this device's, or on Apple TV.
     let watchTogether: (() -> Void)?
@@ -192,7 +191,7 @@ struct PlayerControls: View {
             }
             .padding(.horizontal, Metrics.playerInset)
             if let item = model.item, item.isEpisode {
-                EpisodeStrip(model: model, playing: item, onInteraction: onInteraction)
+                EpisodeStrip(model: model, playing: item, isStill: true, onInteraction: onInteraction)
             }
             Spacer(minLength: 0)
         }
@@ -211,12 +210,14 @@ struct PlayerControls: View {
         .frame(width: 920)
         .glassBackgroundEffect(in: .rect(cornerRadius: 40))
     }
+    #endif
 
+    #if os(iOS) || os(visionOS)
     /// Opens `kind`'s panel in a popover from its button (`PlayerPanel.opensInPopover`), which
     /// closes it as it's dismissed.
     private func popover(_ kind: PlayerPanel) -> Binding<Bool> {
         Binding {
-            panel == kind
+            kind.opensInPopover && panel == kind
         } set: { isPresented in
             guard !isPresented, panel == kind else { return }
             panel = nil
@@ -230,7 +231,7 @@ struct PlayerControls: View {
             onInteraction()
         }
         switch kind {
-        case .audioAndSubtitles, .speed, .chapters:
+        case .audioAndSubtitles, .chapters:
             TrackPanel(model: model, panel: kind, room: .infinity, onClose: close)
         case .quality:
             QualityPanel(model: model, room: .infinity, onClose: close)
@@ -241,6 +242,12 @@ struct PlayerControls: View {
         case .info:
             EmptyView()
         }
+    }
+
+    /// A panel as a popover, which stays one on iPhone rather than becoming a sheet.
+    private func popoverContent(_ kind: PlayerPanel) -> some View {
+        panelContent(kind)
+            .presentationCompactAdaptation(.popover)
     }
     #endif
 
@@ -273,27 +280,14 @@ struct PlayerControls: View {
                         .accessibilityHint(sharePlay.group == nil ? "Watches with everyone on the call" : "")
                         .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("player.sharePlay")
+                        .opens(.sharePlay)
                         .playerHelp(sharePlay.group == nil ? "Watch Together on This Call" : SharePlay.buttonTitle)
                         .transition(.opacity.combined(with: .scale(scale: 0.6)))
                     }
                     #if os(iOS) || os(macOS)
-                    if let playOn {
-                        Button {
-                            playOn()
-                            onInteraction()
-                        } label: {
-                            symbol(PlayOnSheet.symbol)
-                        }
-                        .buttonStyle(.platformGlass)
-                        .buttonBorderShape(.circle)
-                        .accessibilityLabel(PlayOnSheet.title)
-                        .accessibilityShowsLargeContentViewer()
-                        .accessibilityIdentifier("player.playOn")
-                        .playerHelp(PlayOnSheet.title)
-                    }
-                    #endif
-                    #if os(iOS) || os(macOS)
                     RoutePicker()
+                    #endif
+                    #if os(macOS)
                     if let pictureInPicture {
                         // Always there, so it's found where it was, and dimmed while the window can't start.
                         Button {
@@ -345,8 +339,8 @@ struct PlayerControls: View {
             panel = panel == .quality ? nil : .quality
             onInteraction()
         }
-        #if os(visionOS)
-        .popover(isPresented: popover(.quality)) { panelContent(.quality) }
+        #if os(iOS) || os(visionOS)
+        .popover(isPresented: popover(.quality)) { popoverContent(.quality) }
         #endif
     }
     #endif
@@ -555,10 +549,9 @@ struct PlayerControls: View {
             #endif
             trackMenus
             #if os(tvOS)
-            if !model.qualityOptions.isEmpty {
-                panelButton(.quality, identifier: "player.quality", text: model.qualityLabel,
-                            value: model.qualityStatus?.summary)
-            }
+            // Always there: the speed is in its panel.
+            panelButton(.quality, identifier: "player.quality", text: model.qualityLabel,
+                        value: model.qualityStatus?.summary)
             #endif
             Spacer()
             #if os(macOS) || os(visionOS)
@@ -640,13 +633,16 @@ struct PlayerControls: View {
         #endif
     }
 
-    /// The Episodes panel, which has Previous and Next in it, for an episode. Elsewhere Next, and
-    /// on Apple TV Previous too: below the fold the episodes are on screen already, and Apple TV
-    /// has them a swipe down from these buttons.
+    /// The Episodes panel, which has Previous and Next in it, for an episode, and Next for
+    /// whatever else plays next. Below the fold, nothing: the episodes are on screen under the
+    /// controls. Apple TV has Previous and Next, and the episodes a swipe down from them.
     @ViewBuilder private var episodeButtons: some View {
         #if !os(tvOS)
-        if !isBelowFold, let item = model.item, item.isEpisode, item.seriesId != nil {
+        if isBelowFold {
+            EmptyView()
+        } else if let item = model.item, item.isEpisode, item.seriesId != nil {
             panelButton(.episodes, identifier: "player.episodes", value: item.episodeCode)
+                .opens(.episodes)
         } else {
             nextButton
         }
@@ -694,9 +690,6 @@ struct PlayerControls: View {
         let audio = model.audioOptions.count > 1 ? model.audioOptions.first { $0.id == model.selectedAudio }?.title : nil
         panelButton(.audioAndSubtitles, identifier: "player.subtitles", filled: subtitle != nil,
                     value: [audio, "Subtitles \(subtitle ?? "Off")"].compactMap(\.self).joined(separator: ", "))
-        // Away from 1×, the button reads the speed in place of its symbol.
-        panelButton(.speed, identifier: "player.speed", text: model.rate == 1 ? nil : PlaybackSpeed.label(model.rate),
-                    value: PlaybackSpeed.name(model.rate))
         if !model.chapters.isEmpty {
             panelButton(.chapters, identifier: "player.chapters",
                         value: ChapterMark.current(in: model.chapters, at: model.clock.time)?.name)
@@ -738,8 +731,8 @@ struct PlayerControls: View {
                 Color.clear.preference(key: PanelButtonFrames.self, value: [kind: geometry.frame(in: .global)])
             }
         }
-        #if os(visionOS)
-        .popover(isPresented: popover(kind)) { panelContent(kind) }
+        #if os(iOS) || os(visionOS)
+        .popover(isPresented: popover(kind)) { popoverContent(kind) }
         #endif
     }
 }
@@ -822,15 +815,48 @@ private struct VolumeControl: View {
 }
 #endif
 
-/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
-/// that the server is transcoding. With `action`, a button that opens the Quality panel, there
-/// for every stream, which says the stream's picture size too.
 extension EnvironmentValues {
     /// The square of a round player button's symbol, which sizes its circle, for the buttons along
     /// the controls' top that draw their own (`PlayerControls.symbolSide`).
     @Entry var playerSymbolSide: CGFloat = 22
+    /// Where the player's sheets grow from: the controls' buttons that open them (`PlayerSheet`).
+    @Entry var playerSheetSources: Namespace.ID?
 }
 
+/// The sheets the player opens from its controls' buttons.
+enum PlayerSheet: Hashable {
+    case sharePlay, episodes
+}
+
+#if os(iOS)
+private struct PlayerSheetSource: ViewModifier {
+    let sheet: PlayerSheet
+    @Environment(\.playerSheetSources) private var sources
+
+    func body(content: Content) -> some View {
+        if let sources {
+            content.matchedTransitionSource(id: sheet, in: sources)
+        } else {
+            content
+        }
+    }
+}
+#endif
+
+private extension View {
+    /// The button `sheet` grows out of, on iPhone and iPad.
+    @ViewBuilder func opens(_ sheet: PlayerSheet) -> some View {
+        #if os(iOS)
+        modifier(PlayerSheetSource(sheet: sheet))
+        #else
+        self
+        #endif
+    }
+}
+
+/// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
+/// that the server is transcoding. With `action`, a button that opens the Quality panel, always
+/// there since the speed is in it, which says the stream's picture size too.
 private struct FormatBadge: View {
     let model: PlayerModel
     var action: (() -> Void)?
@@ -840,7 +866,7 @@ private struct FormatBadge: View {
     #endif
 
     var body: some View {
-        if let action, !model.qualityOptions.isEmpty || text != nil {
+        if let action {
             Button(action: action) {
                 // Whole, never cut short: where the bar has no room for all of it, the picture
                 // size alone, and then the panel's symbol.

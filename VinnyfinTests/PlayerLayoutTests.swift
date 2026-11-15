@@ -251,6 +251,41 @@ struct PlayerRotationHoldTests {
         #expect(turns2)
     }
 }
+struct PlayerRotationHeldTests {
+    @Test func gravityAlongTheScreenSaysWhichWayIsUp() {
+        #expect(PlayerRotation.Held.toward(x: 0, y: -1) == .portrait)
+        #expect(PlayerRotation.Held.toward(x: 0, y: 1) == .portraitUpsideDown)
+        // Its left side down, the interface is turned right, as the device's own orientation says.
+        #expect(PlayerRotation.Held.toward(x: -1, y: 0) == .landscapeRight)
+        #expect(PlayerRotation.Held.toward(x: 1, y: 0) == .landscapeLeft)
+    }
+
+    @Test func nearFlatOrHalfwayItIsntTurnedAnyWay() {
+        // Lying on a table.
+        #expect(PlayerRotation.Held.toward(x: 0.1, y: -0.3) == nil)
+        // Halfway round.
+        #expect(PlayerRotation.Held.toward(x: -0.6, y: -0.6) == nil)
+        // Tipped back, but upright.
+        #expect(PlayerRotation.Held.toward(x: 0.1, y: -0.6) == .portrait)
+    }
+
+    @Test func aWaySettlesOnceThePhoneStaysTurnedThatWay() {
+        var held = PlayerRotation.Held()
+        #expect(held.felt(x: 0, y: -1, at: 0) == nil)
+        #expect(held.felt(x: 0, y: -1, at: 0.2) == nil)
+        #expect(held.felt(x: 0, y: -1, at: 0.4) == .portrait)
+        #expect(held.orientation == .portrait)
+        // A jolt sideways and back doesn't turn it.
+        #expect(held.felt(x: -1, y: 0, at: 1) == nil)
+        #expect(held.felt(x: 0, y: -1, at: 1.1) == nil)
+        #expect(held.felt(x: -1, y: 0, at: 1.5) == nil)
+        // Passing halfway on its way round, it's still turning toward landscape.
+        #expect(held.felt(x: -0.6, y: -0.6, at: 1.7) == nil)
+        #expect(held.felt(x: -1, y: 0, at: 2) == .landscapeRight)
+        #expect(held.orientation == .landscapeRight)
+    }
+}
+
 #endif
 
 struct PointerOnControlsTests {

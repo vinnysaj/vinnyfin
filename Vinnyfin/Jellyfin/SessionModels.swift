@@ -1,21 +1,15 @@
 import Foundation
 
-/// One signed-in app on one device, as `GET /Sessions` and the socket's `Sessions` message list
-/// it: what it can be asked to do and what it's playing.
+/// One signed-in app on one device, as `GET /Sessions` lists it: what it can be asked to do and
+/// what it's playing.
 nonisolated struct RemoteSession: Decodable, Identifiable, Equatable, Sendable {
     struct PlayState: Decodable, Equatable, Sendable {
         var positionTicks: Int64?
         var isPaused = false
         var canSeek = false
-        var audioStreamIndex: Int?
-        /// -1, or nil, when subtitles are off.
-        var subtitleStreamIndex: Int?
-        var mediaSourceId: String?
 
         enum CodingKeys: String, CodingKey {
             case positionTicks = "PositionTicks", isPaused = "IsPaused", canSeek = "CanSeek"
-            case audioStreamIndex = "AudioStreamIndex", subtitleStreamIndex = "SubtitleStreamIndex"
-            case mediaSourceId = "MediaSourceId"
         }
 
         init() {}
@@ -25,9 +19,6 @@ nonisolated struct RemoteSession: Decodable, Identifiable, Equatable, Sendable {
             positionTicks = try container.decodeIfPresent(Int64.self, forKey: .positionTicks)
             isPaused = try container.decodeIfPresent(Bool.self, forKey: .isPaused) ?? false
             canSeek = try container.decodeIfPresent(Bool.self, forKey: .canSeek) ?? false
-            audioStreamIndex = try container.decodeIfPresent(Int.self, forKey: .audioStreamIndex)
-            subtitleStreamIndex = try container.decodeIfPresent(Int.self, forKey: .subtitleStreamIndex)
-            mediaSourceId = try container.decodeIfPresent(String.self, forKey: .mediaSourceId)
         }
     }
 
@@ -35,37 +26,26 @@ nonisolated struct RemoteSession: Decodable, Identifiable, Equatable, Sendable {
     var client: String
     var deviceName: String
     var deviceId: String
-    var userName: String?
     var supportsRemoteControl: Bool
-    var playableMediaTypes: [String]
     /// `GeneralCommandType` names, such as "SetSubtitleStreamIndex".
     var supportedCommands: [String]
     var nowPlayingItem: JellyfinItem?
-    /// The streams of the version playing, which the server puts on the item it reports.
-    var nowPlayingStreams: [MediaStream]
     var playState: PlayState
 
     enum CodingKeys: String, CodingKey {
-        case id = "Id", client = "Client", deviceName = "DeviceName", deviceId = "DeviceId", userName = "UserName"
-        case supportsRemoteControl = "SupportsRemoteControl", playableMediaTypes = "PlayableMediaTypes"
+        case id = "Id", client = "Client", deviceName = "DeviceName", deviceId = "DeviceId"
+        case supportsRemoteControl = "SupportsRemoteControl"
         case supportedCommands = "SupportedCommands", nowPlayingItem = "NowPlayingItem", playState = "PlayState"
     }
 
-    private struct Streams: Decodable {
-        var mediaStreams: [MediaStream]?
-        enum CodingKeys: String, CodingKey { case mediaStreams = "MediaStreams" }
-    }
-
     init(id: String, client: String, deviceName: String, deviceId: String, supportsRemoteControl: Bool = true,
-         playableMediaTypes: [String] = ["Video"], supportedCommands: [String] = []) {
+         supportedCommands: [String] = []) {
         self.id = id
         self.client = client
         self.deviceName = deviceName
         self.deviceId = deviceId
         self.supportsRemoteControl = supportsRemoteControl
-        self.playableMediaTypes = playableMediaTypes
         self.supportedCommands = supportedCommands
-        nowPlayingStreams = []
         playState = PlayState()
     }
 
@@ -75,12 +55,9 @@ nonisolated struct RemoteSession: Decodable, Identifiable, Equatable, Sendable {
         client = try container.decodeIfPresent(String.self, forKey: .client) ?? ""
         deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName) ?? ""
         deviceId = try container.decodeIfPresent(String.self, forKey: .deviceId) ?? ""
-        userName = try container.decodeIfPresent(String.self, forKey: .userName)
         supportsRemoteControl = try container.decodeIfPresent(Bool.self, forKey: .supportsRemoteControl) ?? false
-        playableMediaTypes = try container.decodeIfPresent([String].self, forKey: .playableMediaTypes) ?? []
         supportedCommands = try container.decodeIfPresent([String].self, forKey: .supportedCommands) ?? []
         nowPlayingItem = try container.decodeIfPresent(JellyfinItem.self, forKey: .nowPlayingItem)
-        nowPlayingStreams = try container.decodeIfPresent(Streams.self, forKey: .nowPlayingItem)?.mediaStreams ?? []
         playState = try container.decodeIfPresent(PlayState.self, forKey: .playState) ?? PlayState()
     }
 
@@ -317,7 +294,6 @@ nonisolated enum SocketMessage: Equatable, Sendable {
     case play(PlayRequest)
     case playstate(PlaystateRequest)
     case generalCommand(GeneralCommand)
-    case sessions([RemoteSession])
     case other(String)
 
     private struct Envelope: Decodable {
@@ -339,26 +315,18 @@ nonisolated enum SocketMessage: Equatable, Sendable {
         case "Play": self = .play(try decoder.decode(Payload<PlayRequest>.self, from: json).data)
         case "Playstate": self = .playstate(try decoder.decode(Payload<PlaystateRequest>.self, from: json).data)
         case "GeneralCommand": self = .generalCommand(try decoder.decode(Payload<GeneralCommand>.self, from: json).data)
-        case "Sessions": self = .sessions(try decoder.decode(Payload<[RemoteSession]>.self, from: json).data)
         default: self = .other(type)
         }
     }
 
-    /// What this app sends over the socket: keep-alives, and asking for the sessions as they change.
+    /// What this app sends over the socket: keep-alives.
     enum Outbound: Equatable, Sendable {
         case keepAlive
-        /// Updates at most every `interval` seconds, the first after `delay`.
-        case sessionsStart(delay: Double, interval: Double)
-        case sessionsStop
 
         var json: String {
             switch self {
             case .keepAlive:
                 #"{"MessageType":"KeepAlive"}"#
-            case .sessionsStart(let delay, let interval):
-                #"{"MessageType":"SessionsStart","Data":"\#(Int(delay * 1000)),\#(Int(interval * 1000))"}"#
-            case .sessionsStop:
-                #"{"MessageType":"SessionsStop"}"#
             }
         }
     }
@@ -423,19 +391,18 @@ nonisolated enum RemoteCommand: Equatable, Sendable {
             case .setSubtitleStreamIndex: self = .subtitleStream(index < 0 ? nil : index)
             default: return nil
             }
-        case .forceKeepAlive, .keepAlive, .sessions, .other:
+        case .forceKeepAlive, .keepAlive, .other:
             return nil
         }
     }
 }
 
-/// A session this app can send a playback to, named and placed for the Play On list.
+/// A session this app can be the remote for, named and given a symbol for the remote's list of TVs.
 nonisolated struct PlayTarget: Identifiable, Equatable, Sendable {
     let session: RemoteSession
 
     var id: String { session.id }
     var name: String { session.deviceName.isEmpty ? session.client : session.deviceName }
-    var isAppleTV: Bool { session.client == JellyfinClient.clientName(for: .tvOS) }
 
     /// The device's symbol: vinnyfin says what it runs on, and the web app is a browser.
     var symbol: String {
@@ -447,36 +414,6 @@ nonisolated struct PlayTarget: Identifiable, Equatable, Sendable {
         case let client where client.localizedCaseInsensitiveContains("web"): "globe"
         default: "tv"
         }
-    }
-
-    /// The app, and whose it is when that isn't the person asking.
-    func detail(signedInAs userName: String?) -> String {
-        var parts = [session.isVinnyfin ? "vinnyfin" : session.client]
-        if let owner = session.userName, let userName, owner.caseInsensitiveCompare(userName) != .orderedSame {
-            parts.append(owner)
-        }
-        if let playing = session.nowPlayingItem {
-            parts.append("Playing \(playing.isEpisode ? (playing.seriesName ?? playing.name) : playing.name)")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    /// The sessions that can take a video now, other than this device's: vinnyfin on Apple TV
-    /// first, then vinnyfin elsewhere, then other apps, each by name. The server lists a session
-    /// as controllable only while its app holds the socket open.
-    static func targets(from sessions: [RemoteSession], excludingDeviceId deviceId: String) -> [PlayTarget] {
-        sessions
-            .filter { $0.deviceId != deviceId && $0.supportsRemoteControl && $0.playableMediaTypes.contains("Video") }
-            .map(PlayTarget.init)
-            .sorted { lhs, rhs in
-                if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
-                let order = lhs.name.localizedStandardCompare(rhs.name)
-                return order == .orderedSame ? lhs.id < rhs.id : order == .orderedAscending
-            }
-    }
-
-    private var rank: Int {
-        if isAppleTV { 0 } else if session.isVinnyfin { 1 } else { 2 }
     }
 }
 
@@ -508,36 +445,4 @@ extension PlayTarget {
 
     /// The TV can be put to sleep from the remote: vinnyfin's, which is a Mac, can.
     var sleeps: Bool { session.isVinnyfin }
-}
-
-/// A vinnyfin device the Play On list has shown before. While the app there is closed the server
-/// doesn't list it, so the list names it as one to open first.
-nonisolated struct KnownDevice: Codable, Equatable, Identifiable, Sendable {
-    let deviceId: String
-    var name: String
-    var isAppleTV: Bool
-    var symbol: String
-
-    var id: String { deviceId }
-
-    /// `known` with every vinnyfin device among `targets` in it, under the name it has now; Apple
-    /// TVs first, then by name.
-    static func remembering(_ targets: [PlayTarget], in known: [KnownDevice]) -> [KnownDevice] {
-        var byId = Dictionary(known.map { ($0.deviceId, $0) }) { first, _ in first }
-        for target in targets where target.session.isVinnyfin {
-            byId[target.session.deviceId] = KnownDevice(deviceId: target.session.deviceId, name: target.name,
-                                                       isAppleTV: target.isAppleTV, symbol: target.symbol)
-        }
-        return byId.values.sorted { lhs, rhs in
-            if lhs.isAppleTV != rhs.isAppleTV { return lhs.isAppleTV }
-            let order = lhs.name.localizedStandardCompare(rhs.name)
-            return order == .orderedSame ? lhs.deviceId < rhs.deviceId : order == .orderedAscending
-        }
-    }
-
-    /// The known devices that aren't among `targets`.
-    static func absent(from targets: [PlayTarget], in known: [KnownDevice]) -> [KnownDevice] {
-        let present = Set(targets.map(\.session.deviceId))
-        return known.filter { !present.contains($0.deviceId) }
-    }
 }

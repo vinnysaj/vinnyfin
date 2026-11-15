@@ -30,29 +30,12 @@ final class ScreenshotTests: XCTestCase {
         tap(tab("Movies", in: app))
         tap(app.buttons["poster.The Quiet Meridian"])
         try await snap("03-movie", once: app.buttons["detail.play"])
-        try await snapRemote(app)
         tap(tab("Search", in: app))
         let field = app.searchFields.firstMatch
         tap(field)
         field.typeText("the\n")
         try await snap("05-search", once: app.buttons["poster.The Quiet Meridian"])
         try await snapDownloads(app, name: "04-downloads")
-    }
-
-    /// Plays the title whose page is open on the living room's Apple TV, and shows the remote.
-    @MainActor
-    private func snapRemote(_ app: XCUIApplication) async throws {
-        let livingRoom = LivingRoomTV(server: server, username: Self.username)
-        try await livingRoom.open()
-        tap(app.buttons["playOn"])
-        // By name: any other device signed in to the server, such as a simulator still running
-        // an earlier test's app, is a target too.
-        tap(app.buttons.matching(identifier: "playOn.target").matching(NSPredicate(format: "label BEGINSWITH %@", "Living Room")).firstMatch)
-        let playing = app.descendants(matching: .any)["remote.playing"]
-        XCTAssertTrue(playing.waitForExistence(timeout: uiTimeout), "The remote never showed the living room playing")
-        try await snap("06-remote", once: app.descendants(matching: .any)["remote.title"])
-        tap(app.buttons["remote.stop"])
-        try await livingRoom.close()
     }
 
     @MainActor
@@ -116,11 +99,15 @@ final class ScreenshotTests: XCTestCase {
         let film = app.buttons["card.The Quiet Meridian"]
         XCTAssertTrue(film.waitForExistence(timeout: uiTimeout), "Continue Watching never loaded")
         // From the sidebar, where focus starts, into the banner, down to Continue Watching, and
-        // along it to the film partway through, whose card resumes it.
+        // along it to the film partway through, whose card opens its page, focus on Resume.
         XCUIRemote.shared.press(.right)
         XCUIRemote.shared.press(.down)
         focus(film, in: app, moving: [.right, .left])
         try await snapHome(app)
+        XCUIRemote.shared.press(.select)
+        let resume = app.buttons["detail.play"]
+        XCTAssertTrue(resume.waitForExistence(timeout: uiTimeout), "The film's page never opened")
+        XCTAssertTrue(resume.wait(for: \.hasFocus, toEqual: true, timeout: uiTimeout), "Focus didn't start on Resume")
         XCUIRemote.shared.press(.select)
         let timeline = app.descendants(matching: .any)["player.timeline"]
         XCTAssertTrue(timeline.waitForExistence(timeout: uiTimeout), "The player never opened")
@@ -459,13 +446,6 @@ private struct ShowcaseAPI: Sendable {
         return data
     }
 
-    /// The server's socket, signed in with `token`.
-    func socketRequest(token: String) throws -> URLRequest {
-        var request = URLRequest(url: try XCTUnwrap(URL(string: server.replacingOccurrences(of: "http", with: "ws", options: .anchored) + "/socket")))
-        request.setValue(authorization(token: token), forHTTPHeaderField: "Authorization")
-        return request
-    }
-
     private func authorization(token: String?) -> String {
         #"MediaBrowser \#(client), Version="1""# + (token.map { #", Token="\#($0)""# } ?? "")
     }
@@ -474,130 +454,3 @@ private struct ShowcaseAPI: Sendable {
         try JSONSerialization.data(withJSONObject: object)
     }
 }
-
-#if os(iOS)
-/// vinnyfin on the living room's Apple TV, as the server sees it, for the remote's screenshot.
-/// It holds the server's socket open, which lists it among the devices to play on, and plays
-/// what it's sent by telling the server it plays it, as the app there would.
-private actor LivingRoomTV {
-    private static let deviceId = "vinnyfin-screenshots-living-room"
-    private let username: String
-    private let api: ShowcaseAPI
-    private var token = ""
-    private var socket: URLSessionWebSocketTask?
-    private var listening: Task<Void, Never>?
-    private var keepingAlive: Task<Void, Never>?
-    /// What it plays, and from where, as the server's playback reports put it.
-    private var playing: [String: Any]?
-    private var isClosing = false
-    /// What went wrong while it was open.
-    private var failure: (any Error)?
-
-    init(server: String, username: String) {
-        self.username = username
-        api = ShowcaseAPI(server: server, client: #"Client="vinnyfin tvOS", Device="Living Room", DeviceId="\#(Self.deviceId)""#)
-    }
-
-    func open() async throws {
-        token = try await api.signIn(username).token
-        try await api.send("POST", "/Sessions/Capabilities/Full", token: token, body: try ShowcaseAPI.json([
-            "PlayableMediaTypes": ["Video"], "SupportedCommands": [String](), "SupportsMediaControl": true,
-        ]))
-        let socket = URLSession.shared.webSocketTask(with: try api.socketRequest(token: token))
-        socket.resume()
-        self.socket = socket
-        listening = Task { await listen(to: socket) }
-        try await waitUntilListed()
-    }
-
-    private struct Session: Decodable {
-        let supportsRemoteControl: Bool
-        enum CodingKeys: String, CodingKey { case supportsRemoteControl = "SupportsRemoteControl" }
-    }
-
-    /// Waits for the server to take the socket, after which it lists the TV as a device to play on.
-    private func waitUntilListed() async throws {
-        let deadline = Date.now.addingTimeInterval(uiTimeout)
-        while Date.now < deadline {
-            let sessions = try JSONDecoder().decode([Session].self, from: try await api.send(
-                "GET", "/Sessions?deviceId=\(Self.deviceId)", token: token))
-            if sessions.contains(where: \.supportsRemoteControl) { return }
-            if let failure { throw failure }
-            try await Task.sleep(for: .seconds(0.5))
-        }
-        throw URLError(.timedOut, userInfo: [NSLocalizedDescriptionKey: "The server never listed the living room as a device to play on"])
-    }
-
-    /// Stops what it plays and closes the socket, and throws what went wrong while it was open.
-    func close() async throws {
-        isClosing = true
-        keepingAlive?.cancel()
-        socket?.cancel(with: .goingAway, reason: nil)
-        await listening?.value
-        if let playing { try await report("Stopped", playing) }
-        playing = nil
-        if let failure { throw failure }
-    }
-
-    private func listen(to socket: URLSessionWebSocketTask) async {
-        do {
-            while true {
-                guard case .string(let text) = try await socket.receive(),
-                      let message = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { continue }
-                try await handle(message, from: socket)
-            }
-        } catch {
-            if !isClosing { failure = error }
-        }
-    }
-
-    private func handle(_ message: [String: Any], from socket: URLSessionWebSocketTask) async throws {
-        switch message["MessageType"] as? String {
-        case "ForceKeepAlive":
-            // Word at least this often, in seconds, or the server closes the socket.
-            let seconds = message["Data"] as? Double ?? 60
-            keepingAlive?.cancel()
-            keepingAlive = Task {
-                do {
-                    while true {
-                        try await socket.send(.string(#"{"MessageType":"KeepAlive"}"#))
-                        try await Task.sleep(for: .seconds(seconds / 2))
-                    }
-                } catch {
-                    if !isClosing, !(error is CancellationError) { failure = error }
-                }
-            }
-        case "Play":
-            let data = message["Data"] as? [String: Any] ?? [:]
-            guard let itemId = (data["ItemIds"] as? [String])?.first else { return }
-            var started: [String: Any] = ["ItemId": itemId, "PositionTicks": data["StartPositionTicks"] ?? 0,
-                                          "IsPaused": false, "CanSeek": true, "PlayMethod": "DirectPlay"]
-            started["MediaSourceId"] = data["MediaSourceId"]
-            playing = started
-            try await report(nil, started)
-        case "Playstate":
-            let data = message["Data"] as? [String: Any] ?? [:]
-            guard var progress = playing else { return }
-            switch data["Command"] as? String {
-            case "Pause": progress["IsPaused"] = true
-            case "Unpause": progress["IsPaused"] = false
-            case "Seek": progress["PositionTicks"] = data["SeekPositionTicks"] ?? progress["PositionTicks"]
-            case "Stop":
-                playing = nil
-                try await report("Stopped", progress)
-                return
-            default: return
-            }
-            playing = progress
-            try await report("Progress", progress)
-        default:
-            return
-        }
-    }
-
-    /// Tells the server a playback started (`event` nil), went on or stopped.
-    private func report(_ event: String?, _ playback: [String: Any]) async throws {
-        try await api.send("POST", "/Sessions/Playing" + (event.map { "/\($0)" } ?? ""), token: token, body: try ShowcaseAPI.json(playback))
-    }
-}
-#endif

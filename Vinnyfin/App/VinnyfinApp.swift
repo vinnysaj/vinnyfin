@@ -135,7 +135,6 @@ extension View {
             #endif
             #if os(iOS) || os(macOS)
             .environment(app.widgetDownloads)
-            .environment(app.remote)
             #endif
             #if os(macOS)
             .environment(app.portableTV)
@@ -180,11 +179,10 @@ final class AppDelegate: NSObject {
     private(set) lazy var backgroundDownloads = BackgroundDownloads(downloads: downloads, smartDownloads: smartDownloads)
     let diagnostics = AppDiagnostics()
     #endif
-    /// Jellyfin's remote control: other devices play to this one, and this one to them.
+    /// Jellyfin's remote control: other devices play to this one and control what it plays.
     let socket = SessionSocket()
     private(set) lazy var sharePlay = SharePlay(accounts: accounts, player: player)
     #if os(iOS) || os(macOS)
-    private(set) lazy var remote = RemoteControl(accounts: accounts, socket: socket, player: player)
     private(set) lazy var widgetDownloads = WidgetDownloads(downloads: downloads, history: history)
     #endif
     #if os(macOS)

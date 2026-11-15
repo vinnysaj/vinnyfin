@@ -125,7 +125,7 @@ nonisolated struct JellyfinClient: Sendable {
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "server")
 
     /// The app's name to the server, with the platform's, as Jellyfin's own apps give theirs:
-    /// "vinnyfin tvOS". Other devices tell vinnyfin on Apple TV apart by it.
+    /// "vinnyfin tvOS". Other devices tell what a vinnyfin runs on by it.
     static func clientName(for platform: Device.Platform) -> String {
         "\(clientName) \(platform.rawValue)"
     }
@@ -716,20 +716,9 @@ nonisolated struct JellyfinClient: Sendable {
         try await send("Sessions/Capabilities/Full", method: "POST", body: capabilities)
     }
 
-    /// The sessions the user can play to and control: those whose apps hold a socket open.
+    /// The sessions the user can control: those whose apps hold a socket open.
     func controllableSessions(userId: String) async throws -> [RemoteSession] {
         try await get("Sessions", query: ["controllableByUserId": userId])
-    }
-
-    /// Asks a session to play an item now, from `start` seconds, in a version and with streams
-    /// when given; -1 for the subtitles turns them off.
-    func play(itemId: String, onSession sessionId: String, start: Double, mediaSourceId: String?,
-              audioStreamIndex: Int?, subtitleStreamIndex: Int?) async throws {
-        var query = ["playCommand": "PlayNow", "itemIds": itemId, "startPositionTicks": String(Int64(max(0, start) * 10_000_000))]
-        if let mediaSourceId { query["mediaSourceId"] = mediaSourceId }
-        if let audioStreamIndex { query["audioStreamIndex"] = String(audioStreamIndex) }
-        if let subtitleStreamIndex { query["subtitleStreamIndex"] = String(subtitleStreamIndex) }
-        try await send("Sessions/\(sessionId)/Playing", method: "POST", query: query)
     }
 
     func send(_ command: PlaystateCommand, toSession sessionId: String, seekTo seconds: Double? = nil) async throws {

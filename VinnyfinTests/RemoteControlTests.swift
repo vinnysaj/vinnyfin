@@ -33,34 +33,27 @@ struct SocketMessageTests {
         #expect(throws: DecodingError.self) { try message(#"{"Data":60}"#) }
     }
 
-    @Test func readsTheSessionsAsTheyChange() throws {
-        // vinnyfin on Apple TV playing a movie with English subtitles on, as the server reported it.
-        guard case .sessions(let sessions) = try SocketMessage(json: Samples.fixture("sessions-message")),
-              let session = sessions.first else {
-            Issue.record("Not a sessions message")
-            return
+    @Test func readsASession() throws {
+        // vinnyfin on Apple TV playing a movie, in the socket's Sessions message, whose sessions
+        // are the ones `GET /Sessions` lists.
+        struct Message: Decodable {
+            let sessions: [RemoteSession]
+            enum CodingKeys: String, CodingKey { case sessions = "Data" }
         }
+        let session = try #require(try JSONDecoder().decode(Message.self, from: Samples.fixture("sessions-message")).sessions.first)
         #expect(session.id == "58cd291dfd5f1dfc9c47086b7393af9d")
         #expect(session.client == "vinnyfin tvOS")
         #expect(session.isVinnyfin)
         #expect(session.deviceName == "vinnyfin together: Apple TV")
-        #expect(session.userName == "together")
         #expect(session.supportsRemoteControl)
         #expect(session.supports(.setSubtitleStreamIndex))
         #expect(session.position == 148.4983668)
         #expect(!session.playState.isPaused)
-        #expect(session.playState.audioStreamIndex == 1)
-        #expect(session.playState.subtitleStreamIndex == 3)
-        #expect(session.playState.mediaSourceId == "52a65ce4341d99dc85453902a8c17b9a")
         #expect(session.nowPlayingItem?.name == "Sync Movie (2024)")
         #expect(session.nowPlayingItem?.runtimeSeconds == 300.023)
-        #expect(session.nowPlayingStreams.map(\.type) == ["Video", "Audio", "Audio", "Subtitle", "Subtitle"])
-        #expect(session.nowPlayingStreams.map(\.index) == [0, 1, 2, 3, 4])
     }
 
-    @Test func asksForTheSessionsInMilliseconds() {
-        #expect(SocketMessage.Outbound.sessionsStart(delay: 0, interval: 1).json == #"{"MessageType":"SessionsStart","Data":"0,1000"}"#)
-        #expect(SocketMessage.Outbound.sessionsStop.json == #"{"MessageType":"SessionsStop"}"#)
+    @Test func sendsAKeepAlive() {
         #expect(SocketMessage.Outbound.keepAlive.json == #"{"MessageType":"KeepAlive"}"#)
     }
 
@@ -136,55 +129,14 @@ struct RemoteCommandTests {
     }
 }
 
-private func session(_ id: String, client: String, name: String, deviceId: String? = nil, remote: Bool = true,
-                     types: [String] = ["Video"]) -> RemoteSession {
-    RemoteSession(id: id, client: client, deviceName: name, deviceId: deviceId ?? "device-\(id)", supportsRemoteControl: remote,
-                  playableMediaTypes: types)
+private func session(_ id: String, client: String, name: String) -> RemoteSession {
+    RemoteSession(id: id, client: client, deviceName: name, deviceId: "device-\(id)")
 }
 
 struct PlayTargetTests {
-    @Test func putsVinnyfinOnAppleTVFirstThenVinnyfinThenOthers() {
-        let sessions = [
-            session("1", client: "Jellyfin Web", name: "Firefox"),
-            session("2", client: "vinnyfin iOS", name: "Vinny's iPad"),
-            session("3", client: "vinnyfin tvOS", name: "Living Room"),
-            session("4", client: "Jellyfin Android TV", name: "Bedroom"),
-            session("5", client: "vinnyfin tvOS", name: "Bedroom"),
-        ]
-        let targets = PlayTarget.targets(from: sessions, excludingDeviceId: "mine")
-        #expect(targets.map(\.id) == ["5", "3", "2", "4", "1"])
-        #expect(targets.map(\.isAppleTV) == [true, true, false, false, false])
-    }
-
-    @Test func leavesOutThisDeviceAndSessionsThatCantTakeAVideo() {
-        let sessions = [
-            session("1", client: "vinnyfin iOS", name: "This iPhone", deviceId: "mine"),
-            session("2", client: "Jellyfin Web", name: "Chrome", remote: false),
-            session("3", client: "Finamp", name: "Phone", types: ["Audio"]),
-            session("4", client: "vinnyfin tvOS", name: "Den"),
-        ]
-        #expect(PlayTarget.targets(from: sessions, excludingDeviceId: "mine").map(\.id) == ["4"])
-    }
-
-    @Test func ordersSameNamesTheSameWayEveryTime() {
-        let sessions = [session("b", client: "vinnyfin tvOS", name: "Apple TV"), session("a", client: "vinnyfin tvOS", name: "Apple TV")]
-        #expect(PlayTarget.targets(from: sessions, excludingDeviceId: "mine").map(\.id) == ["a", "b"])
-    }
-
     @Test func namesTheDeviceOrElseTheApp() {
         #expect(PlayTarget(session: session("1", client: "vinnyfin tvOS", name: "Living Room")).name == "Living Room")
         #expect(PlayTarget(session: session("1", client: "Jellyfin Web", name: "")).name == "Jellyfin Web")
-    }
-
-    @Test func saysWhoseItIsAndWhatsPlaying() {
-        var shared = session("1", client: "Jellyfin Web", name: "Chrome")
-        shared.userName = "alice"
-        #expect(PlayTarget(session: shared).detail(signedInAs: "together") == "Jellyfin Web · alice")
-        var own = session("2", client: "vinnyfin tvOS", name: "Den")
-        own.userName = "Together"
-        own.nowPlayingItem = JellyfinItem(id: "e", name: "Pilot", type: "Episode")
-        own.nowPlayingItem?.seriesName = "Test Show"
-        #expect(PlayTarget(session: own).detail(signedInAs: "together") == "vinnyfin · Playing Test Show")
     }
 
     @Test func picksASymbolForTheDevice() {
@@ -200,73 +152,6 @@ struct PlayTargetTests {
         #expect(JellyfinClient.clientName(for: .iOS) == "vinnyfin iOS")
     }
 }
-
-struct KnownDeviceTests {
-    private let livingRoom = PlayTarget(session: session("1", client: "vinnyfin tvOS", name: "Living Room", deviceId: "tv-1"))
-    private let ipad = PlayTarget(session: session("2", client: "vinnyfin iOS", name: "iPad", deviceId: "ipad-1"))
-    private let web = PlayTarget(session: session("3", client: "Jellyfin Web", name: "Chrome", deviceId: "web-1"))
-
-    @Test func remembersOnlyVinnyfinDevicesAppleTVsFirst() {
-        let known = KnownDevice.remembering([web, ipad, livingRoom], in: [])
-        #expect(known.map(\.deviceId) == ["tv-1", "ipad-1"])
-        #expect(known.first?.symbol == "appletv")
-    }
-
-    @Test func keepsTheNameADeviceHasNow() {
-        let old = KnownDevice(deviceId: "tv-1", name: "Apple TV", isAppleTV: true, symbol: "appletv")
-        #expect(KnownDevice.remembering([livingRoom], in: [old]).map(\.name) == ["Living Room"])
-    }
-
-    @Test func listsTheKnownDevicesThatArentOpen() {
-        let known = KnownDevice.remembering([livingRoom, ipad], in: [])
-        #expect(KnownDevice.absent(from: [ipad], in: known).map(\.deviceId) == ["tv-1"])
-        #expect(KnownDevice.absent(from: [ipad, livingRoom], in: known).isEmpty)
-    }
-}
-
-// Apple TV is played to, and is no other device's remote.
-#if os(iOS) || os(macOS)
-struct RemotePhaseTests {
-    private let start = Date(timeIntervalSinceReferenceDate: 0)
-
-    private func playing(_ itemId: String?) -> RemoteSession {
-        var session = session("tv", client: "vinnyfin tvOS", name: "Living Room")
-        session.nowPlayingItem = itemId.map { JellyfinItem(id: $0, name: "Title", type: "Movie") }
-        return session
-    }
-
-    @Test func startsOnceTheDevicePlaysWhatWasSent() {
-        let phase = RemotePhase.starting(itemId: "movie", since: start)
-        #expect(phase.next(session: playing("movie"), targetName: "Living Room", now: start + 3) == .playing(lastSeen: start + 3))
-    }
-
-    @Test func whatItPlayedBeforeDoesntCount() {
-        let phase = RemotePhase.starting(itemId: "movie", since: start)
-        #expect(phase.next(session: playing("other"), targetName: "Living Room", now: start + 3) == phase)
-    }
-
-    @Test func givesUpOnADeviceThatNeverStarts() {
-        let phase = RemotePhase.starting(itemId: "movie", since: start)
-        guard case .lost(let reason) = phase.next(session: playing(nil), targetName: "Living Room", now: start + RemotePhase.startTimeout + 1)
-        else {
-            Issue.record("Still starting")
-            return
-        }
-        #expect(reason.contains("Living Room didn't start playing"))
-    }
-
-    @Test func waitsBetweenEpisodesThenStops() {
-        let phase = RemotePhase.playing(lastSeen: start)
-        #expect(phase.next(session: playing(nil), targetName: "Den", now: start + 2) == phase)
-        #expect(phase.next(session: playing(nil), targetName: "Den", now: start + RemotePhase.idleTimeout + 1) == .lost("Den stopped playing."))
-        #expect(phase.next(session: playing("next"), targetName: "Den", now: start + 4) == .playing(lastSeen: start + 4))
-    }
-
-    @Test func losesADeviceTheServerNoLongerLists() {
-        #expect(RemotePhase.playing(lastSeen: start).next(session: nil, targetName: "Den", now: start) == .lost("Den isn't connected anymore."))
-    }
-}
-#endif
 
 struct StreamIndexMapTests {
     private func stream(_ type: String, _ index: Int, language: String? = nil, external: Bool = false) -> MediaStream {

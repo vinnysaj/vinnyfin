@@ -1,14 +1,11 @@
 import SwiftUI
 
 /// The long-press menu for a title: play, its show for an episode, watched, favourite and, off
-/// Apple TV, download. A show's plays its next episode, or shuffles its episodes. For a card that
-/// plays on a tap, it leads with the title's page instead. While the server is out of reach, what
-/// needs it is off: playing what isn't downloaded, and marking watched or favourite.
+/// Apple TV, download. A show's plays its next episode, or shuffles its episodes. While the server
+/// is out of reach, what needs it is off: playing what isn't downloaded, and marking watched or
+/// favourite.
 struct ItemContextMenu: View {
     let item: JellyfinItem
-    /// The card plays the title on a tap, as Continue Watching's do, so the menu leads with
-    /// Details, Go to Show and Start Over rather than playing it again.
-    var playsOnTap = false
     /// Gets the item with its new watch state, to update the list it came from.
     var onChange: (JellyfinItem) -> Void = { _ in }
 
@@ -23,23 +20,15 @@ struct ItemContextMenu: View {
     #endif
 
     var body: some View {
-        if playsOnTap {
-            if let openTitle {
-                Button("Details", systemImage: "info.circle") { openTitle(item) }
+        if item.isPlayable {
+            Button(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill") {
+                player.play(.item(item))
             }
-            goToShow
-            startOver
-        } else {
-            if item.isPlayable {
-                Button(item.resumeSeconds != nil ? "Resume" : "Play", systemImage: "play.fill") {
-                    player.play(.item(item))
-                }
-                .playableOffline(item)
-            }
-            if item.isSeries { showPlayback }
-            startOver
-            goToShow
+            .playableOffline(item)
         }
+        if item.isSeries { showPlayback }
+        startOver
+        goToShow
         // As the title's page has it.
         Button(item.isPlayed ? "Mark as Unwatched" : "Mark as Watched",
                systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle") {

@@ -217,7 +217,7 @@ private struct TVNowPlaying: View {
             }
             .accessibilityElement(children: .combine)
             if remote.duration > 0 {
-                // The player's timeline bar, as the Play On remote has: a Slider's drag never ends in a sheet.
+                // The player's timeline bar, rather than a Slider: a Slider's drag never ends in a sheet.
                 TimelineView(.periodic(from: .now, by: 0.5)) { context in
                     let time = remote.position(at: context.date)
                     let position = scrubPosition ?? time

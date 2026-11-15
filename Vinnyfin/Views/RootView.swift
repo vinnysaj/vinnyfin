@@ -12,9 +12,6 @@ struct RootView: View {
     @Environment(IncomingLinks.self) private var links
     @Environment(SessionSocket.self) private var socket
     @Environment(\.scenePhase) private var scenePhase
-    #if os(iOS) || os(macOS)
-    @Environment(RemoteControl.self) private var remote
-    #endif
     #if os(macOS)
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
@@ -32,10 +29,6 @@ struct RootView: View {
     @State private var linkedItem: JellyfinItem?
     /// What Spotlight or Siri asked to search for, for the Search tab.
     @State private var linkedSearch: String?
-    #if os(iOS)
-    /// The full-screen player is up, until it has finished going away.
-    @State private var playerCovers = false
-    #endif
 
     private var session: ServerSession? { accounts.session }
 
@@ -68,16 +61,9 @@ struct RootView: View {
         }
         #else
         // Away while its playback plays in Picture in Picture (`PlayerCoordinator.isInPictureInPicture`).
-        .fullScreenCover(item: $player.coverModel) {
-            #if os(iOS)
-            playerCovers = false
-            #endif
-        } content: { model in
+        .fullScreenCover(item: $player.coverModel) { model in
             PlayerView(model: model) { Task { await player.dismiss() } }
                 .environment(\.session, session)
-                #if os(iOS)
-                .onAppear { playerCovers = true }
-                #endif
         }
         #endif
         .alert("Something Went Wrong", isPresented: Binding(get: { messages.current != nil }, set: { if !$0 { messages.current = nil } })) {
@@ -121,12 +107,6 @@ struct RootView: View {
             Button("Cancel", role: .cancel) {}
         } message: { proposal in
             Text(proposal.message)
-        }
-        #endif
-        #if os(iOS) || os(macOS)
-        .sheet(isPresented: showsRemoteScreen) {
-            RemoteScreen()
-                .environment(\.session, session)
         }
         #endif
         // Others can play to this device while it's open, or while it plays in the background.
@@ -194,23 +174,6 @@ struct RootView: View {
             #endif
         }
     }
-
-    #if os(iOS) || os(macOS)
-    /// The remote's screen. On iPhone and iPad it waits for the player that handed its playback
-    /// over to be gone: a sheet presented over the full-screen player keeps it from closing, and
-    /// one presented while it goes takes on its dark appearance on a light sheet.
-    private var showsRemoteScreen: Binding<Bool> {
-        Binding {
-            #if os(iOS)
-            remote.showsScreen && !playerCovers
-            #else
-            remote.showsScreen
-            #endif
-        } set: {
-            remote.showsScreen = $0
-        }
-    }
-    #endif
 
     /// The sign-in the socket is open for; nil while it's closed: signed out, or in the background
     /// with nothing playing, when the server then stops listing this device to play to. On the
@@ -297,35 +260,21 @@ struct MainTabs: View {
     /// The Go menu's Search commands so far, each of which puts the cursor in the search field.
     @State private var searchFieldRequests = 0
     #endif
-    #if os(iOS) || os(macOS)
-    @Environment(RemoteControl.self) private var remote
-    #endif
 
     var body: some View {
         tabs
             #if os(iOS)
-            // The remote's mini player while it plays elsewhere, or else the offline banner.
-            .tabViewBottomAccessory(isEnabled: remote.isActive || reachability.isOutOfReach) {
-                if remote.isActive {
-                    RemoteMiniPlayer()
-                } else {
-                    OfflineBanner().padding(.horizontal, 16)
-                }
+            .tabViewBottomAccessory(isEnabled: reachability.isOutOfReach) {
+                OfflineBanner().padding(.horizontal, 16)
             }
             #elseif os(macOS)
             .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 0) {
-                    if reachability.isOutOfReach {
-                        OfflineBanner()
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                    }
-                    if remote.isActive {
-                        RemoteMiniPlayer()
-                            .padding(.vertical, 10)
-                    }
+                if reachability.isOutOfReach {
+                    OfflineBanner()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.bar)
                 }
-                .background(.bar)
             }
             #elseif os(visionOS)
             .ornament(visibility: reachability.isOutOfReach ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {

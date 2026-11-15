@@ -327,11 +327,11 @@ final class PlayerCoordinator {
         return model
     }
 
-    /// Asks the server for the watch state of what was played, here or on a device this one was
-    /// the remote for. A title it can't be asked about keeps the state its cards show until they
-    /// load again. The Up Next widgets ask the server for theirs again. `startedFrom` is the item
-    /// the player opened on, and `last` the one it played last.
-    func endPlayback(of titleIds: Set<String>, startedFrom startedItemId: String? = nil, last lastItem: JellyfinItem? = nil) async {
+    /// Asks the server for the watch state of what was played. A title it can't be asked about
+    /// keeps the state its cards show until they load again. The Up Next widgets ask the server
+    /// for theirs again. `startedFrom` is the item the player opened on, and `last` the one it
+    /// played last.
+    private func endPlayback(of titleIds: Set<String>, startedFrom startedItemId: String?, last lastItem: JellyfinItem?) async {
         #if os(iOS) || os(macOS)
         if !titleIds.isEmpty { UpNextWidgets.reload() }
         #endif

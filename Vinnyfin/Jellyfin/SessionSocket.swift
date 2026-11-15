@@ -3,11 +3,11 @@ import Observation
 import OSLog
 
 /// Jellyfin's socket, held open while the app runs in front, signed in. Over it the server
-/// passes on what other devices ask this one to play and do, and, while this device is a remote
-/// for another, how that one's session is going. While the socket is open, with the
+/// passes on what other devices ask this one to play and do. While the socket is open, with the
 /// capabilities reported, the server lists this device as one others can play to; when it
 /// closes, the server drops the session at once, so a device that has gone to the background
-/// leaves every Play On list. The server can't wake an app that isn't running.
+/// drops out of the other devices' lists of where to play. The server can't wake an app that
+/// isn't running.
 ///
 /// Each window that takes commands holds it open (`hold(client:)`): on the Mac, Portable TV's
 /// window as well as the library's, so closing one leaves the other's remote working.
@@ -42,15 +42,6 @@ final class SessionSocket {
 
     /// Commands from other devices.
     @ObservationIgnored var onCommand: ((RemoteCommand) -> Void)?
-    /// The sessions as they change, while `followsSessions` is on.
-    @ObservationIgnored var onSessions: (([RemoteSession]) -> Void)?
-    /// Asks the server for the sessions as they change, at most once a second.
-    var followsSessions = false {
-        didSet {
-            guard followsSessions != oldValue, state == .open else { return }
-            send(followsSessions ? .sessionsStart(delay: 0, interval: 1) : .sessionsStop)
-        }
-    }
 
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
     /// The sign-in of the open socket, for capabilities that change while it's open.
@@ -142,7 +133,6 @@ final class SessionSocket {
         setState(.open)
         // They changed while the first report was out.
         if capabilities != reported { report(capabilities, to: client) }
-        if followsSessions { send(.sessionsStart(delay: 0, interval: 1)) }
         let keepAlive = Task { await keepAlive(socket) }
         defer { keepAlive.cancel() }
         while !Task.isCancelled {
@@ -185,8 +175,6 @@ final class SessionSocket {
         case .forceKeepAlive(let seconds):
             keepAliveInterval = max(5, Double(seconds) / 2)
             send(.keepAlive)
-        case .sessions(let sessions):
-            onSessions?(sessions)
         case .keepAlive, .other:
             break
         case .play, .playstate, .generalCommand:
@@ -199,7 +187,8 @@ final class SessionSocket {
         }
     }
 
-    /// Off the main actor: the sessions a remote follows arrive every second.
+    /// Off the main actor: some of the server's messages are long, as its lists of changed library
+    /// items are.
     @concurrent
     private nonisolated static func decode(_ data: Data) async throws -> SocketMessage {
         try SocketMessage(json: data)

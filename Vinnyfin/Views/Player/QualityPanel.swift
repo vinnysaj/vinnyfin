@@ -3,9 +3,9 @@ import SwiftUI
 import UIKit
 #endif
 
-/// What plays and why ("Converted to 720p, the connection slowed"), and the ways to play the
-/// title: Auto, each version as it is, and each size the server can convert the version playing
-/// to. The way picked is checked. A download or a file has only what plays.
+/// What plays and why ("Converted to 720p, the connection slowed"), the speed, and the ways to
+/// play the title: Auto, each version as it is, and each size the server can convert the version
+/// playing to. The way picked is checked. A download or a file has only what plays.
 struct QualityPanel: View {
     let model: PlayerModel
     /// The height there's room for. The panel is as tall as its rows, up to that or its own limit.
@@ -78,16 +78,20 @@ struct QualityPanel: View {
             .padding([.horizontal, .top])
             status
                 .padding(.horizontal)
+            speed
                 .padding(.bottom, sections.isEmpty ? 16 : 4)
             if !sections.isEmpty { list }
         }
         .frame(width: Self.width)
         .frame(maxHeight: min(Self.maxHeight, room))
-        .fixedSize(horizontal: false, vertical: true)
+        // As tall as its rows; a popover, short of room, scrolls them instead.
+        .fixedSize(horizontal: false, vertical: !PlayerPanel.quality.opensInPopover)
         .panelGlass(in: .rect(cornerRadius: 24), for: .quality)
         #if os(tvOS)
         .focusSection()
-        .onAppear { focusedRow = sections.flatMap(\.rows).first { $0.option == chosen }?.id }
+        .onAppear {
+            focusedRow = sections.flatMap(\.rows).first { $0.option == chosen }?.id ?? SpeedChips.focusID(model.rate)
+        }
         #endif
         .accessibilityElement(children: .contain)
         // VoiceOver's two-finger scrub, and Escape, close it.
@@ -109,21 +113,38 @@ struct QualityPanel: View {
         .accessibilityIdentifier("quality.status")
     }
 
+    private var speed: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionTitle("Speed")
+            #if os(tvOS)
+            SpeedChips(model: model, onChoose: onClose, focus: $focusedRow)
+                .padding(.horizontal, Self.rowInset)
+            #else
+            SpeedChips(model: model, onChoose: onClose)
+            #endif
+        }
+        .padding(.horizontal)
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.top, 8)
+            .accessibilityAddTraits(.isHeader)
+    }
+
     private var list: some View {
         ScrollViewReader { scroller in
             ScrollView {
                 VStack(alignment: .leading, spacing: Self.rowSpacing) {
                     ForEach(sections) { section in
                         if let title = section.title {
-                            Text(title)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
+                            sectionTitle(title)
                                 .padding(.horizontal)
                                 #if os(tvOS)
                                 .padding(.horizontal, Self.rowInset)
                                 #endif
-                                .padding(.top, 8)
-                                .accessibilityAddTraits(.isHeader)
                         }
                         ForEach(section.rows) { row in
                             rowButton(row)
@@ -194,11 +215,12 @@ struct QualityPanel: View {
         return line.isEmpty ? nil : line
     }
 
+    /// Every speed fits across it.
     private static var width: CGFloat {
         #if os(tvOS)
-        620
+        780
         #else
-        340
+        360
         #endif
     }
 

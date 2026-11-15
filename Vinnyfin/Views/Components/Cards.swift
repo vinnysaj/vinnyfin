@@ -296,19 +296,13 @@ struct ProgressBar: View {
 /// A 16:9 card for Continue Watching and Next Up: the episode's still, its show and number.
 /// Leading with the episode, as a search does that found it by its name, the episode's name
 /// comes first, over its show's and its number: "The Night Ferry" over "Port Ellery · S1, E1".
-/// A movie's backdrop, which has no words on it, carries its logo; a card that plays on a tap
-/// has a play symbol on its picture, on Apple TV while it has focus.
+/// A movie's backdrop, which has no words on it, carries its logo.
 struct LandscapeCard: View {
     let item: JellyfinItem
     var leadsWithEpisode = false
-    /// A tap plays the title, as in Continue Watching, rather than opening its page.
-    var playsOnTap = false
     @State private var artworkHeight: CGFloat = 0
     @Environment(\.session) private var session
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    #if os(tvOS)
-    @Environment(\.isFocused) private var isFocused
-    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -319,9 +313,6 @@ struct LandscapeCard: View {
                     }
                 }
                 .overlay { NotYetAvailableOverlay(item: item) }
-                .overlay {
-                    if showsPlaySymbol { PlaySymbol() }
-                }
                 .overlay(alignment: .bottom) {
                     if let progress = item.progress {
                         ProgressBar(fraction: progress).padding(Metrics.overlayInset)
@@ -348,15 +339,6 @@ struct LandscapeCard: View {
             .compactMap { $0?.isEmpty == false ? $0 : nil }
             .joined(separator: ", "))
         .accessibilityIdentifier("card.\(item.name)")
-    }
-
-    private var showsPlaySymbol: Bool {
-        guard playsOnTap, !item.isNotYetAvailable() else { return false }
-        #if os(tvOS)
-        return isFocused
-        #else
-        return true
-        #endif
     }
 
     /// A movie's logo, when its card's picture is a backdrop, without the title a thumb carries.
@@ -417,31 +399,6 @@ private struct CardLogo: View {
         .clipShape(.rect(cornerRadius: Metrics.cardRadius))
         .allowsHitTesting(false)
         .accessibilityHidden(true)
-    }
-}
-
-/// The play symbol on the picture of a card that plays on a tap.
-private struct PlaySymbol: View {
-    var body: some View {
-        Image(systemName: "play.fill")
-            .font(.system(size: size * 0.4, weight: .bold))
-            .foregroundStyle(.white)
-            .offset(x: size * 0.03)
-            .frame(width: size, height: size)
-            .background(.black.opacity(0.3), in: .circle)
-            .background(.ultraThinMaterial, in: .circle)
-            .environment(\.colorScheme, .dark)
-            .shadow(color: .black.opacity(0.25), radius: 6)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-    }
-
-    private var size: CGFloat {
-        #if os(tvOS)
-        64
-        #else
-        40
-        #endif
     }
 }
 

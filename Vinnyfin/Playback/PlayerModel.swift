@@ -1667,12 +1667,6 @@ final class PlayerModel: Identifiable {
         if case .item(let id, _) = request.source { id } else { nil }
     }
 
-    /// Where another device the playback moves to starts: where it got to, or the beginning
-    /// once it has ended.
-    var handOverPosition: Double {
-        status == .ended ? 0 : clock.time
-    }
-
     /// Plays at `rate`, or pauses at 0, as the group watching together asks.
     func applyRate(_ newRate: Float) {
         guard newRate != 0 else {

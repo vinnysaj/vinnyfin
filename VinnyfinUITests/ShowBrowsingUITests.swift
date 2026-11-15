@@ -167,15 +167,9 @@ final class ShowBrowsingUITests: XCTestCase {
         let play = app.buttons["detail.play"]
 
         // Resume joins Start Over to the row as the episode's details come, which mustn't take focus off it.
-        // Select on a Continue Watching card resumes it; its page is the card's menu's Details.
+        // Select on a Continue Watching card opens the episode's page.
         if let resumed = try await account.resumedEpisode() {
             focusAlongItsRow(app.buttons["card.\(resumed)"], in: app)
-            XCUIRemote.shared.press(.select, forDuration: 1.2)
-            // A menu's commands are rows with their names in them, which take focus themselves.
-            let details = app.cells.containing(.any, identifier: "Details").firstMatch
-            XCTAssertTrue(details.waitForExistence(timeout: uiTimeout), "The card's menu has no Details")
-            for _ in 0..<4 where !details.hasFocus { XCUIRemote.shared.press(.up) }
-            XCTAssertTrue(details.hasFocus, "Details never took focus")
             XCUIRemote.shared.press(.select)
             XCTAssertTrue(play.waitForExistence(timeout: uiTimeout), "The episode's page never opened")
             XCTAssertTrue(play.wait(for: \.hasFocus, toEqual: true, timeout: uiTimeout), "Focus didn't start on Resume")

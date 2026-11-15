@@ -62,7 +62,6 @@ let captions = [
     "player": "Jump to any chapter",
     "downloads": "Download whole seasons",
     "search": "Search your whole library",
-    "remote": "Control your TV from your phone",
 ]
 
 let headerPhrase = "For your Jellyfin server"

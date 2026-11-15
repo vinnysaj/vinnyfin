@@ -256,7 +256,7 @@ private struct AccountSection: View {
             } header: {
                 Text("Server")
             } footer: {
-                Text("While vinnyfin is open, your other devices and Jellyfin apps can play to this \(Device.name), as \(Device.ownName), and control what plays.")
+                Text("While vinnyfin is open, other Jellyfin apps can play to this \(Device.name), as \(Device.ownName), and control what plays.")
             }
         }
     }

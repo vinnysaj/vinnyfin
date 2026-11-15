@@ -1272,9 +1272,8 @@ struct PlaybackEdgeTests {
     @Test func movingBackAfterTheEndPlaysAgainFromThere() async throws {
         let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
-        // The title stays on screen for the controls, and plays from the start on another device.
+        // The title stays on screen for the controls.
         #expect(model.current != nil)
-        #expect(model.handOverPosition == 0)
 
         model.seek(to: 3)
         try await waitUntil { model.status == .playing && model.clock.time > 3.2 }

@@ -653,7 +653,7 @@ struct WatchedButton: View {
                 Text("Watched")
             } icon: {
                 Image(systemName: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
-                    .foregroundStyle(item.isPlayed ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .modifier(StateSymbol(isOn: item.isPlayed))
                     .contentTransition(.symbolEffect(.replace))
             }
         }
@@ -687,6 +687,20 @@ struct WatchedButton: View {
     }
 }
 
+/// The symbol of a round action that shows a state, as Watched and Favorite do: in the accent while
+/// the state is on. Its color is its own, so it doesn't fade with the button's when the button is
+/// turned off, as the other actions' symbols do: it fades here instead.
+private struct StateSymbol: ViewModifier {
+    let isOn: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
 /// Adds a title to the favorites or takes it out. Off while the server is out of reach.
 struct FavoriteButton: View {
     let item: JellyfinItem
@@ -703,7 +717,7 @@ struct FavoriteButton: View {
                 Text("Favorite")
             } icon: {
                 Image(systemName: item.isFavorite ? "heart.fill" : "heart")
-                    .foregroundStyle(item.isFavorite ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .modifier(StateSymbol(isOn: item.isFavorite))
                     .contentTransition(.symbolEffect(.replace))
                     .symbolEffect(.bounce, value: additions)
             }

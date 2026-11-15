@@ -79,6 +79,10 @@ struct PlayerView: View {
     #if os(macOS)
     @State private var pointerIsOver = false
     #endif
+    #if os(iOS)
+    /// An iPad's pointer rests on the controls' bars, which keeps them up.
+    @State private var pointerIsOnControls = false
+    #endif
     #if os(tvOS)
     @FocusState private var focus: PlayerFocus?
     /// Try Again over a playback that failed, which takes focus from the controls as it appears.
@@ -355,6 +359,19 @@ struct PlayerView: View {
         .onDisappear { orientationLock.stop() }
         .onChange(of: pictureShape) { _, shape in
             if let shape { orientationLock.pictureShaped(shape) }
+        }
+        // An iPad's pointer brings the controls up as it moves over the picture, and keeps them up
+        // while it rests on their bars.
+        .onContinuousHover(coordinateSpace: .global) { phase in
+            switch phase {
+            case .active(let location):
+                pointerIsOnControls = controlsVisible
+                    && PlayerLayout.isOnBars(y: location.y, topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
+                showControls(autoHide: !pointerIsOnControls)
+            case .ended:
+                pointerIsOnControls = false
+                scheduleHide()
+            }
         }
         #endif
         #if os(macOS)
@@ -1450,10 +1467,14 @@ struct PlayerView: View {
     }
 
     /// Hides the controls in a few seconds, unless they're held or VoiceOver or Switch Control is
-    /// on: those move through the controls one at a time, which takes longer.
+    /// on: those move through the controls one at a time, which takes longer. On iPad the controls
+    /// stay while the pointer is on them.
     private func scheduleHide() {
         hideTask?.cancel()
         guard !holdsControls, !voiceOverEnabled, !switchControlEnabled else { return }
+        #if os(iOS)
+        guard !pointerIsOnControls else { return }
+        #endif
         hideTask = Task {
             try? await Task.sleep(for: .seconds(4))
             if !Task.isCancelled { hideControls() }

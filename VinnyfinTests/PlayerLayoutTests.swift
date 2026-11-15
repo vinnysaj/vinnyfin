@@ -242,6 +242,16 @@ struct PlayerOrientationRuleTests {
 }
 #endif
 
+struct PointerOnControlsTests {
+    @Test func thePointerIsOnTheControlsOnEitherBar() {
+        #expect(PlayerLayout.isOnBars(y: 40, topBarBottom: 80, bottomBarTop: 900))
+        #expect(PlayerLayout.isOnBars(y: 950, topBarBottom: 80, bottomBarTop: 900))
+        #expect(!PlayerLayout.isOnBars(y: 500, topBarBottom: 80, bottomBarTop: 900))
+        // Bars not laid out yet hold nothing.
+        #expect(!PlayerLayout.isOnBars(y: 40, topBarBottom: nil, bottomBarTop: nil))
+    }
+}
+
 struct PictureTapsTests {
     @Test func theThirdsOfThePicture() {
         #expect(PictureTaps.zone(x: 10, width: 300) == .back)

@@ -137,8 +137,9 @@ struct PlayerControls: View {
                 topBar
                     .opacity(showsOnlyTimeline ? 0 : 1)
                     .accessibilityHidden(showsOnlyTimeline)
-                    #if os(macOS)
-                    // The window's own buttons keep the corner, beside the bar.
+                    #if os(macOS) || os(iOS)
+                    // The window's own buttons keep the corner, beside the bar: the Mac's, and an
+                    // iPad window's, which take a tap there even while they're hidden.
                     .containerCornerOffset(.leading, sizeToFit: true)
                     #endif
                 Spacer()

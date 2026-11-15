@@ -869,6 +869,11 @@ struct Scrubber: View {
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     #endif
+    #if os(iOS) || os(macOS)
+    /// Where a click would jump to, while a pointer is over the timeline, for the preview to show.
+    @State private var hoverPosition: Double?
+    @State private var width: CGFloat = 0
+    #endif
 
     var body: some View {
         @Bindable var scrubbing = model.scrubbing
@@ -879,7 +884,7 @@ struct Scrubber: View {
             TimelineBar(time: model.clock.time, buffered: model.clock.buffered, duration: duration, color: .white,
                         height: barHeight, marks: model.chapters.map(\.start), showsHead: showsHead,
                         position: $scrubbing.position, onSeek: nil)
-                .overlay { overBar(position: position, duration: duration) }
+                .overlay { overBar(position: previewPosition(position), duration: duration) }
             #if os(visionOS)
             // Tall enough to look at and pinch, and lit under the eyes as a slider is.
             .frame(height: 44)
@@ -900,6 +905,18 @@ struct Scrubber: View {
         .sensoryFeedback(Self.landmarkFeedback,
                          trigger: ScrubLandmark.at(position, duration: duration, chapters: model.chapters)) { old, new in
             ScrubLandmark.ticks(from: old, to: new)
+        }
+        #endif
+        #if os(iOS) || os(macOS)
+        // A pointer over it, or an Apple Pencil above it, previews where a click would jump to.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let point):
+                hoverPosition = width > 0 ? TimelineDrag.tapPosition(x: point.x, width: width, duration: duration) : nil
+            case .ended:
+                hoverPosition = nil
+            }
         }
         #endif
         #if os(tvOS)
@@ -965,7 +982,18 @@ struct Scrubber: View {
         #endif
     }
 
-    /// Over the bar: the preview while the timeline moves, and on Apple TV the run of skips.
+    /// What the preview over the bar shows: where the timeline is moved to, else where a pointer
+    /// over it would jump to.
+    private func previewPosition(_ position: Double?) -> Double? {
+        #if os(iOS) || os(macOS)
+        position ?? hoverPosition
+        #else
+        position
+        #endif
+    }
+
+    /// Over the bar: the preview while the timeline moves or a pointer is over it, and on Apple
+    /// TV the run of skips.
     private func overBar(position: Double?, duration: Double) -> some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -1075,10 +1103,10 @@ enum TimeLabel {
     }
 }
 
-/// Over the timeline while it moves: the picture at that point, when the server made scrub
-/// previews, with the chapter, the time, and how far that is from where playback is. On Apple
-/// TV, also the speed of a held side scanning; on a touchscreen, how finely a finger slid up
-/// from the bar is placing it.
+/// Over the timeline while it moves, or while a pointer is over it: the picture at that point,
+/// when the server made scrub previews, with the chapter, the time, and how far that is from where
+/// playback is. On Apple TV, also the speed of a held side scanning; on a touchscreen, how finely
+/// a finger slid up from the bar is placing it.
 private struct ScrubPreview: View {
     let model: PlayerModel
     let time: Double

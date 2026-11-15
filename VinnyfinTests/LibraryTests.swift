@@ -508,7 +508,6 @@ struct LibraryTitleTests {
 
     @Test func keepsTheTitleOfAListPickedByWhatsInIt() {
         #expect(LibraryGridView.title(of: HomeRows.favorites.list, sortedBy: "DateCreated") == "Favorites")
-        #expect(LibraryGridView.title(of: .titles(with: Person(id: "p", name: "Ada Vale")), sortedBy: "SortName") == "Ada Vale")
         let found = BrowseList(title: SearchView.seeAllTitle("Movies", term: "ferry"),
                                source: .items(JellyfinClient.ItemQuery(types: ["Movie"], searchTerm: "ferry")))
         #expect(LibraryGridView.title(of: found, sortedBy: "DateCreated") == "Movies Matching \u{201C}ferry\u{201D}")

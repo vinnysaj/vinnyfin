@@ -158,7 +158,7 @@ struct SearchView: View {
         case .episodes: stills("Episodes", types: ["Episode"], results.episodes)
         case .people:
             Shelf(title: "People", items: results.people, cardWidth: PersonCard.width) { person in
-                NavigationLink(value: BrowseList.titles(with: person)) { PersonCard(person: person) }
+                NavigationLink(value: person) { PersonCard(person: person) }
                     .buttonStyle(.artwork)
                     .foregroundStyle(.primary)
             }

@@ -147,7 +147,7 @@ nonisolated struct JellyfinClient: Sendable {
     /// leave out overviews, the bulk of a list's bytes.
     static let cardFields = ""
     /// Everything a detail screen shows.
-    static let detailFields = "Overview,Genres,People,Taglines,MediaSources,MediaStreams,Chapters,Trickplay,SortName,ChildCount,PrimaryImageAspectRatio"
+    static let detailFields = "Overview,Genres,People,Taglines,MediaSources,MediaStreams,Chapters,Trickplay,SortName,ChildCount,PrimaryImageAspectRatio,Studios,RemoteTrailers,LocalTrailerCount,SpecialFeatureCount"
 
     // MARK: Server and sign-in
 
@@ -548,6 +548,31 @@ nonisolated struct JellyfinClient: Sendable {
             "userId": userId, "limit": String(limit), "fields": Self.listFields,
         ])
         return page.items
+    }
+
+    // MARK: Around a title
+
+    /// The trailers the server keeps beside a title's file, each an item that plays.
+    func localTrailers(itemId: String, userId: String) async throws -> [JellyfinItem] {
+        try await get("Items/\(itemId)/LocalTrailers", query: ["userId": userId])
+    }
+
+    /// A title's extras the server keeps beside its file, but its trailers: behind the scenes,
+    /// deleted scenes, featurettes, interviews and the like, each an item that plays.
+    func specialFeatures(itemId: String, userId: String) async throws -> [JellyfinItem] {
+        try await get("Items/\(itemId)/SpecialFeatures", query: ["userId": userId])
+    }
+
+    /// The collections a title is in. A server without the lookup answers 404, as it does for a
+    /// title it doesn't have.
+    func collections(containing itemId: String, userId: String) async throws -> [JellyfinItem] {
+        let page: ItemsPage = try await get("Items/\(itemId)/Collections", query: ["userId": userId, "fields": Self.cardFields])
+        return page.items
+    }
+
+    /// A person, with their biography, birthplace, and birth and death dates.
+    func person(id: String, userId: String) async throws -> JellyfinItem {
+        try await get("Items/\(id)", query: ["userId": userId, "fields": "Overview,ProductionLocations"])
     }
 
     /// The genres of items of `types`, by name; with counts, each says how many movies and

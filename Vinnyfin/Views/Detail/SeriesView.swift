@@ -39,7 +39,8 @@ struct SeriesView: View {
     @State private var firstEpisode: JellyfinItem?
     /// The first episode was looked for, found or not, since nothing came next.
     @State private var firstEpisodeLoaded = false
-    @State private var similar: [JellyfinItem] = []
+    /// Shows like it, its genres and its collections.
+    @State private var related = RelatedTitles()
     @State private var loadError: LoadFailure?
     /// The server answered that it doesn't have the show, which asking again won't change.
     @State private var isGone = false
@@ -108,6 +109,9 @@ struct SeriesView: View {
                             .padding(.horizontal, Metrics.edge)
                     }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
+                    if detail != nil {
+                        TitleLinks(genres: related.genres(of: shown), collections: related.collections)
+                    }
                     if !isGone {
                         VStack(alignment: .leading, spacing: 12) {
                             // Also over a single season's episodes, which have no chips.
@@ -119,8 +123,12 @@ struct SeriesView: View {
                             episodeList
                         }
                     }
-                    if let people = detail?.people { CastShelf(people: people) }
-                    if !similar.isEmpty { MoreLikeThisShelf(title: shown, titles: $similar) }
+                    if let detail {
+                        CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
+                        TitleExtrasShelf(item: detail)
+                    }
+                    if !related.similar.isEmpty { MoreLikeThisShelf(related: $related) }
+                    if !isGone { TitleInformation(item: shown, source: nil, credits: Credits(people: detail?.people ?? [])) }
                 }
                 .padding(.bottom, Metrics.edge)
             }
@@ -170,7 +178,7 @@ struct SeriesView: View {
         .task(id: series.id) { await load() }
         .task(id: seasonId) { await loadEpisodes() }
         .onChange(of: player.endedPlayback) {
-            similar = player.endedPlayback.applied(to: similar)
+            related.similar = player.endedPlayback.applied(to: related.similar)
             Task { await reloadWatchState() }
         }
         .onAppear { isOnScreen = true }
@@ -473,10 +481,11 @@ struct SeriesView: View {
             loadError = LoadFailure("Couldn't Load the Show", error: error)
         }
         do {
-            similar = try await session.client.similar(to: series.id, userId: session.userId, limit: MoreLikeThisShelf.length)
+            related = try await RelatedTitles.load(for: detail ?? series, client: session.client, userId: session.userId,
+                                                   length: MoreLikeThisShelf.length)
         } catch {
             guard !error.isCancellation else { return }
-            similar = []
+            related = RelatedTitles()
             loadError = loadError ?? LoadFailure("Couldn't Load Shows Like This", error: error)
         }
     }

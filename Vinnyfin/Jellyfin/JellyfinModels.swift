@@ -50,6 +50,18 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
     var chapters: [Chapter]?
     /// The scrub previews the server made, by version and then by width in pixels.
     var trickplay: [String: [String: TrickplayInfo]]?
+    /// A show's last air date; a person's death.
+    var endDate: String?
+    var studios: [NamedItem]?
+    /// Trailers on the web, such as YouTube's.
+    var remoteTrailers: [RemoteTrailer]?
+    /// How many trailers and extras the server keeps beside the title's file.
+    var localTrailerCount: Int?
+    var specialFeatureCount: Int?
+    /// A person's birthplace.
+    var productionLocations: [String]?
+    /// What an extra is: "Trailer", "BehindTheScenes", "DeletedScene", "Featurette", "Interview".
+    var extraType: String?
 
     enum CodingKeys: String, CodingKey {
         case id = "Id", name = "Name", type = "Type", sortName = "SortName", overview = "Overview"
@@ -68,6 +80,9 @@ nonisolated struct JellyfinItem: Codable, Identifiable, Hashable, Sendable {
         case primaryImageAspectRatio = "PrimaryImageAspectRatio", userData = "UserData"
         case mediaSources = "MediaSources", mediaSourceCount = "MediaSourceCount", people = "People", chapters = "Chapters"
         case trickplay = "Trickplay"
+        case endDate = "EndDate", studios = "Studios", remoteTrailers = "RemoteTrailers"
+        case localTrailerCount = "LocalTrailerCount", specialFeatureCount = "SpecialFeatureCount"
+        case productionLocations = "ProductionLocations", extraType = "ExtraType"
     }
 
     init(id: String, name: String, type: String) {
@@ -323,6 +338,26 @@ nonisolated struct ImageInfo: Codable, Hashable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case imageType = "ImageType", width = "Width", height = "Height"
+    }
+}
+
+/// Something the server names by its name and id, such as a studio.
+nonisolated struct NamedItem: Codable, Hashable, Sendable {
+    let name: String
+    var id: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name = "Name", id = "Id"
+    }
+}
+
+/// A trailer on the web, with the page it plays on.
+nonisolated struct RemoteTrailer: Codable, Hashable, Sendable {
+    let url: String
+    var name: String?
+
+    enum CodingKeys: String, CodingKey {
+        case url = "Url", name = "Name"
     }
 }
 
@@ -594,5 +629,13 @@ nonisolated enum JellyfinDate {
 
     static func format(_ date: Date) -> String {
         date.formatted(.iso8601)
+    }
+
+    /// "May 14, 2025", for a date that's a day, as a premiere or a birthday, which the server
+    /// gives as midnight in UTC.
+    static func day(_ date: Date) -> String {
+        var style = Date.FormatStyle.dateTime.month(.wide).day().year()
+        style.timeZone = .gmt
+        return date.formatted(style)
     }
 }

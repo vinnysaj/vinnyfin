@@ -891,6 +891,13 @@ final class PlayerModel: Identifiable {
             .store(in: &subscriptions)
         engine.$audioShapingState.receive(on: RunLoop.main).sink { [weak self] state in self?.soundShapingState = state }
             .store(in: &subscriptions)
+        #if os(iOS)
+        // A screen plugged in, or Screen Mirroring, plays the video full screen, as AirPlay does,
+        // rather than showing the phone's screen with the player on it. AVPlayer's default is the
+        // mirror; the engine's wired-screen route and `PictureOutside.externalPlayback` expect this.
+        engine.$currentAVPlayer.sink { player in player?.usesExternalPlaybackWhileExternalScreenIsActive = true }
+            .store(in: &subscriptions)
+        #endif
         #if os(iOS) || os(macOS)
         // AirPlay, or a screen plugged in, shows the picture where the overlay can't go.
         engine.$currentAVPlayer

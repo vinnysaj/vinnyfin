@@ -321,7 +321,7 @@ struct PlayerWindow: View {
         }
         .environment(\.session, accounts.session)
         #if os(macOS)
-        .frame(minWidth: 480, minHeight: 270)
+        .frame(minWidth: minimumSize.width, minHeight: minimumSize.height)
         #else
         // Shaped like the picture, which then fills it edge to edge, at any size it's pulled to.
         .aspectRatio(pictureAspectRatio, contentMode: .fit)
@@ -346,11 +346,17 @@ struct PlayerWindow: View {
         }
     }
 
+    #if os(macOS)
+    /// The smallest window of the picture's shape: the window takes the shape (`PlayerWindowShape`).
+    private var minimumSize: CGSize {
+        PlayerWindowFrame.minimumSize(aspect: PlayerWindowFrame.aspect(of: model?.videoSize))
+    }
+    #endif
+
     #if os(visionOS)
     /// 16:9 until the video says otherwise.
     private var pictureAspectRatio: CGFloat {
-        guard let size = model?.videoSize, size.width > 0, size.height > 0 else { return 16.0 / 9.0 }
-        return size.width / size.height
+        PlayerWindowFrame.aspect(of: model?.videoSize)
     }
     #endif
 }

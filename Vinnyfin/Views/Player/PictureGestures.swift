@@ -258,6 +258,54 @@ struct PlayerFlash: View {
 }
 #endif
 
+/// The Mac's player window, shaped like its picture: how small it goes, and how it takes the shape
+/// of a new picture without leaving the screen. Sizes are the window's content, in points.
+nonisolated enum PlayerWindowFrame {
+    /// Along the picture's long side and its short side, the least the controls fit in.
+    static let longSide: CGFloat = 480
+    static let shortSide: CGFloat = 270
+
+    /// The width over the height of a picture `size` big; 16:9 until it's known.
+    static func aspect(of size: CGSize?) -> CGFloat {
+        guard let size, size.width > 0, size.height > 0 else { return 16.0 / 9.0 }
+        return size.width / size.height
+    }
+
+    /// The smallest window of a picture `aspect` wide for its height: at least `longSide` along
+    /// its long side and `shortSide` along its short one. Small enough for any Mac's screen
+    /// whatever the shape, which a minimum width alone isn't for a tall picture.
+    static func minimumSize(aspect: CGFloat) -> CGSize {
+        if aspect >= 1 {
+            let width = max(longSide, shortSide * aspect)
+            return CGSize(width: width, height: width / aspect)
+        }
+        let height = max(longSide, shortSide / aspect)
+        return CGSize(width: height * aspect, height: height)
+    }
+
+    /// The window's frame for a picture `aspect` wide for its height, from its frame `current`,
+    /// on a screen whose area for windows is `visible`. `chrome` is how much bigger the frame is
+    /// than the content, which has the picture's shape. The window keeps its width, unless the
+    /// picture's height at that width is more than the screen has room for: then it's as tall
+    /// as there's room, as wide as the shape makes that, and never smaller than `minimumSize`
+    /// but where the screen is smaller still. Its top stays where it was, and then it moves
+    /// onto the screen where it's off it.
+    static func frame(from current: CGRect, aspect: CGFloat, chrome: CGSize = .zero, on visible: CGRect) -> CGRect {
+        guard aspect > 0 else { return current }
+        let room = CGSize(width: max(1, visible.width - chrome.width), height: max(1, visible.height - chrome.height))
+        let minimum = minimumSize(aspect: aspect)
+        var width = max(current.width - chrome.width, minimum.width)
+        width = min(width, room.width, room.height * aspect)
+        let content = CGSize(width: width.rounded(), height: (width / aspect).rounded())
+        let size = CGSize(width: content.width + chrome.width, height: content.height + chrome.height)
+        let top = current.maxY
+        var origin = CGPoint(x: current.minX, y: top - size.height)
+        origin.x = min(max(origin.x, visible.minX), visible.maxX - size.width)
+        origin.y = min(max(origin.y, visible.minY), visible.maxY - size.height)
+        return CGRect(origin: origin, size: size)
+    }
+}
+
 #if os(macOS)
 extension EnvironmentValues {
     /// The player's window is in full screen.
@@ -265,7 +313,8 @@ extension EnvironmentValues {
 }
 
 /// The player window: kept to the picture's shape as it's resized, and turned to the shape of
-/// each new picture, and followed in and out of full screen.
+/// each new picture within its screen (`PlayerWindowFrame`), and followed in and out of full
+/// screen.
 struct PlayerWindowShape: NSViewRepresentable {
     /// The picture's shape; nil until it's known.
     let videoSize: CGSize?
@@ -283,7 +332,12 @@ struct PlayerWindowShape: NSViewRepresentable {
     final class ShapeView: NSView {
         var onFullScreenChange: (Bool) -> Void = { _ in }
         var videoSize: CGSize? {
-            didSet { if videoSize != oldValue { applyShape() } }
+            didSet {
+                guard videoSize != oldValue else { return }
+                // Once SwiftUI has given the window the new shape's minimum size
+                // (`PlayerWindow`): a frame below the old one's would be pushed back out to it.
+                DispatchQueue.main.async { [weak self] in self?.applyShape() }
+            }
         }
         private var observers: [any NSObjectProtocol] = []
 
@@ -301,19 +355,20 @@ struct PlayerWindowShape: NSViewRepresentable {
             applyShape()
         }
 
-        /// Keeps the window's width and gives it the picture's shape; in full screen the system
+        /// Gives the window the picture's shape on its screen; in full screen the system
         /// letterboxes it instead.
         private func applyShape() {
             guard let window, let videoSize, videoSize.width > 0, videoSize.height > 0 else { return }
             window.contentAspectRatio = videoSize
-            guard !window.styleMask.contains(.fullScreen) else { return }
-            var frame = window.contentRect(forFrameRect: window.frame)
-            let height = (frame.width * videoSize.height / videoSize.width).rounded()
-            guard abs(height - frame.height) > 1 else { return }
-            // Its top stays where it was.
-            frame.origin.y += frame.height - height
-            frame.size.height = height
-            window.setFrame(window.frameRect(forContentRect: frame), display: true, animate: true)
+            guard !window.styleMask.contains(.fullScreen), let screen = window.screen ?? NSScreen.main else { return }
+            let content = window.contentRect(forFrameRect: window.frame)
+            let chrome = CGSize(width: window.frame.width - content.width, height: window.frame.height - content.height)
+            let frame = PlayerWindowFrame.frame(from: window.frame, aspect: PlayerWindowFrame.aspect(of: videoSize),
+                                                chrome: chrome, on: screen.visibleFrame)
+            let current = window.frame
+            guard abs(frame.minX - current.minX) > 1 || abs(frame.maxY - current.maxY) > 1
+                    || abs(frame.width - current.width) > 1 || abs(frame.height - current.height) > 1 else { return }
+            window.setFrame(frame, display: true, animate: true)
         }
     }
 }

@@ -24,6 +24,9 @@ struct VinnyfinApp: App {
         WindowGroup {
             RootView()
                 .withAppEnvironment(appDelegate)
+                #if os(macOS)
+                .background(DockMenuWindows(dockMenu: appDelegate.dockMenu))
+                #endif
         }
         #if os(macOS)
         .defaultSize(width: 1200, height: 800)
@@ -35,6 +38,7 @@ struct VinnyfinApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open File…") { appDelegate.openFilePanel() }
                     .keyboardShortcut("o")
+                OpenRecentMenu(library: appDelegate.localLibrary, player: appDelegate.player)
             }
             #endif
             SidebarCommands()
@@ -59,6 +63,9 @@ struct VinnyfinApp: App {
         .windowResizability(.contentSize)
         #endif
         .restorationBehavior(.disabled)
+        // A player window opens for a playback only: File › New Player Window would open one
+        // with nothing to play.
+        .commandsRemoved()
         #endif
 
         #if os(visionOS)
@@ -68,6 +75,8 @@ struct VinnyfinApp: App {
         }
         // The Digital Crown brings the room back in around the theater.
         .immersionStyle(selection: $cinemaImmersion, in: .progressive)
+        // A dark theater: the system shows the picture as bright as it would in a dark room.
+        .immersiveContentBrightness(.dark)
         #endif
 
         #if os(macOS)
@@ -176,6 +185,9 @@ final class AppDelegate: NSObject {
     #endif
     #if os(macOS)
     private(set) lazy var portableTV = PortableTV(accounts: accounts, player: player, socket: socket)
+    private(set) lazy var dockMenu = DockMenu(accounts: accounts, downloads: downloads, links: links) { [unowned self] in
+        openFilePanel()
+    }
     #elseif os(iOS)
     private(set) lazy var tvRemote = TVRemote(accounts: accounts)
     #endif
@@ -234,6 +246,11 @@ final class AppDelegate: NSObject {
         AppDependencyManager.shared.add(dependency: widgetDownloads as any DownloadsRunning)
         Task { await widgetDownloads.run() }
         #endif
+        #if os(macOS)
+        let dockMenu = dockMenu
+        Task { await dockMenu.followDownloads() }
+        Task { await dockMenu.refreshTitles() }
+        #endif
         #if os(iOS) || os(visionOS)
         backgroundDownloads.registerLaunchHandlers()
         let backgroundDownloads = backgroundDownloads
@@ -260,9 +277,16 @@ extension AppDelegate: NSApplicationDelegate {
         launched()
     }
 
-    /// The desktop's widgets come into view as another app takes over.
+    /// The desktop's widgets come into view as another app takes over, and the Dock's menu is
+    /// in reach.
     func applicationDidResignActive(_ notification: Notification) {
         UpNextWidgets.reload()
+        let dockMenu = dockMenu
+        Task { await dockMenu.refreshTitles() }
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        dockMenu.menu()
     }
 }
 #else
@@ -321,11 +345,13 @@ struct PlayerWindow: View {
         }
         .environment(\.session, accounts.session)
         #if os(macOS)
-        .frame(minWidth: 480, minHeight: 270)
+        .frame(minWidth: minimumSize.width, minHeight: minimumSize.height)
         #else
         // Shaped like the picture, which then fills it edge to edge, at any size it's pulled to.
         .aspectRatio(pictureAspectRatio, contentMode: .fit)
-        .frame(minWidth: 640, idealWidth: 1280, maxWidth: 3200)
+        .frame(minWidth: PlayerWindowFrame.visionWidths.lowerBound, idealWidth: 1280,
+               maxWidth: PlayerWindowFrame.visionWidths.upperBound)
+        .background(PlayerWindowShape(aspect: pictureAspectRatio))
         // Watching together, the Spatial Personas gather around this window.
         .groupActivityAssociation(.primary(PlayerWindow.id))
         #endif
@@ -338,7 +364,11 @@ struct PlayerWindow: View {
         .onDisappear {
             let closing = model
             model = nil
+            #if os(macOS)
+            if let closing { player.playerWindowClosed(closing) }
+            #else
             if player.presented === closing { player.presented = nil }
+            #endif
             #if os(visionOS)
             if player.isInCinema { Task { await dismissImmersiveSpace() } }
             #endif
@@ -346,11 +376,17 @@ struct PlayerWindow: View {
         }
     }
 
+    #if os(macOS)
+    /// The smallest window of the picture's shape: the window takes the shape (`PlayerWindowShape`).
+    private var minimumSize: CGSize {
+        PlayerWindowFrame.minimumSize(aspect: PlayerWindowFrame.aspect(of: model?.videoSize))
+    }
+    #endif
+
     #if os(visionOS)
     /// 16:9 until the video says otherwise.
     private var pictureAspectRatio: CGFloat {
-        guard let size = model?.videoSize, size.width > 0, size.height > 0 else { return 16.0 / 9.0 }
-        return size.width / size.height
+        PlayerWindowFrame.aspect(of: model?.videoSize)
     }
     #endif
 }

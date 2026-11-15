@@ -258,6 +258,66 @@ struct PlayerFlash: View {
 }
 #endif
 
+/// The player window on the Mac and Vision Pro, shaped like its picture: how small it goes, and
+/// how it takes the shape of a new picture, on the Mac without leaving the screen. Sizes are the
+/// window's content, in points.
+nonisolated enum PlayerWindowFrame {
+    /// Along the picture's long side and its short side, the least the controls fit in.
+    static let longSide: CGFloat = 480
+    static let shortSide: CGFloat = 270
+
+    /// The width over the height of a picture `size` big; 16:9 until it's known.
+    static func aspect(of size: CGSize?) -> CGFloat {
+        guard let size, size.width > 0, size.height > 0 else { return 16.0 / 9.0 }
+        return size.width / size.height
+    }
+
+    /// The smallest window of a picture `aspect` wide for its height: at least `longSide` along
+    /// its long side and `shortSide` along its short one. Small enough for any Mac's screen
+    /// whatever the shape, which a minimum width alone isn't for a tall picture.
+    static func minimumSize(aspect: CGFloat) -> CGSize {
+        if aspect >= 1 {
+            let width = max(longSide, shortSide * aspect)
+            return CGSize(width: width, height: width / aspect)
+        }
+        let height = max(longSide, shortSide / aspect)
+        return CGSize(width: height * aspect, height: height)
+    }
+
+    /// The window's frame for a picture `aspect` wide for its height, from its frame `current`,
+    /// on a screen whose area for windows is `visible`. `chrome` is how much bigger the frame is
+    /// than the content, which has the picture's shape. The window keeps its width, unless the
+    /// picture's height at that width is more than the screen has room for: then it's as tall
+    /// as there's room, as wide as the shape makes that, and never smaller than `minimumSize`
+    /// but where the screen is smaller still. Its top stays where it was, and then it moves
+    /// onto the screen where it's off it.
+    static func frame(from current: CGRect, aspect: CGFloat, chrome: CGSize = .zero, on visible: CGRect) -> CGRect {
+        guard aspect > 0 else { return current }
+        let room = CGSize(width: max(1, visible.width - chrome.width), height: max(1, visible.height - chrome.height))
+        let minimum = minimumSize(aspect: aspect)
+        var width = max(current.width - chrome.width, minimum.width)
+        width = min(width, room.width, room.height * aspect)
+        let content = CGSize(width: width.rounded(), height: (width / aspect).rounded())
+        let size = CGSize(width: content.width + chrome.width, height: content.height + chrome.height)
+        let top = current.maxY
+        var origin = CGPoint(x: current.minX, y: top - size.height)
+        origin.x = min(max(origin.x, visible.minX), visible.maxX - size.width)
+        origin.y = min(max(origin.y, visible.minY), visible.maxY - size.height)
+        return CGRect(origin: origin, size: size)
+    }
+
+    /// On Vision Pro, how wide the player window goes, in points.
+    static let visionWidths: ClosedRange<CGFloat> = 640...3200
+
+    /// On Vision Pro, the player window's size for a picture `aspect` wide for its height, from
+    /// its size `current`: as wide as it was, within `visionWidths`, and the picture's shape.
+    static func visionSize(from current: CGSize, aspect: CGFloat) -> CGSize {
+        guard aspect > 0 else { return current }
+        let width = min(max(current.width, visionWidths.lowerBound), visionWidths.upperBound).rounded()
+        return CGSize(width: width, height: (width / aspect).rounded())
+    }
+}
+
 #if os(macOS)
 extension EnvironmentValues {
     /// The player's window is in full screen.
@@ -265,10 +325,14 @@ extension EnvironmentValues {
 }
 
 /// The player window: kept to the picture's shape as it's resized, and turned to the shape of
-/// each new picture, and followed in and out of full screen.
+/// each new picture within its screen (`PlayerWindowFrame`), floated above other windows when
+/// asked, and followed in and out of full screen.
 struct PlayerWindowShape: NSViewRepresentable {
     /// The picture's shape; nil until it's known.
     let videoSize: CGSize?
+    var floatsOnTop = false
+    /// Given the window as the player moves into it, and nil as it leaves.
+    var onWindow: (NSWindow?) -> Void = { _ in }
     let onFullScreenChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> ShapeView {
@@ -277,13 +341,24 @@ struct PlayerWindowShape: NSViewRepresentable {
 
     func updateNSView(_ view: ShapeView, context: Context) {
         view.onFullScreenChange = onFullScreenChange
+        view.onWindow = onWindow
+        view.floatsOnTop = floatsOnTop
         view.videoSize = videoSize
     }
 
     final class ShapeView: NSView {
         var onFullScreenChange: (Bool) -> Void = { _ in }
+        var onWindow: (NSWindow?) -> Void = { _ in }
+        var floatsOnTop = false {
+            didSet { if floatsOnTop != oldValue { applyLevel() } }
+        }
         var videoSize: CGSize? {
-            didSet { if videoSize != oldValue { applyShape() } }
+            didSet {
+                guard videoSize != oldValue else { return }
+                // Once SwiftUI has given the window the new shape's minimum size
+                // (`PlayerWindow`): a frame below the old one's would be pushed back out to it.
+                DispatchQueue.main.async { [weak self] in self?.applyShape() }
+            }
         }
         private var observers: [any NSObjectProtocol] = []
 
@@ -291,7 +366,9 @@ struct PlayerWindowShape: NSViewRepresentable {
             super.viewDidMoveToWindow()
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
+            onWindow(window)
             guard let window else { return }
+            applyLevel()
             for (name, isFullScreen) in [(NSWindow.didEnterFullScreenNotification, true), (NSWindow.didExitFullScreenNotification, false)] {
                 observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.onFullScreenChange(isFullScreen) }
@@ -301,19 +378,57 @@ struct PlayerWindowShape: NSViewRepresentable {
             applyShape()
         }
 
-        /// Keeps the window's width and gives it the picture's shape; in full screen the system
+        private func applyLevel() {
+            window?.level = floatsOnTop ? .floating : .normal
+        }
+
+        /// Gives the window the picture's shape on its screen; in full screen the system
         /// letterboxes it instead.
         private func applyShape() {
             guard let window, let videoSize, videoSize.width > 0, videoSize.height > 0 else { return }
             window.contentAspectRatio = videoSize
-            guard !window.styleMask.contains(.fullScreen) else { return }
-            var frame = window.contentRect(forFrameRect: window.frame)
-            let height = (frame.width * videoSize.height / videoSize.width).rounded()
-            guard abs(height - frame.height) > 1 else { return }
-            // Its top stays where it was.
-            frame.origin.y += frame.height - height
-            frame.size.height = height
-            window.setFrame(window.frameRect(forContentRect: frame), display: true, animate: true)
+            guard !window.styleMask.contains(.fullScreen), let screen = window.screen ?? NSScreen.main else { return }
+            let content = window.contentRect(forFrameRect: window.frame)
+            let chrome = CGSize(width: window.frame.width - content.width, height: window.frame.height - content.height)
+            let frame = PlayerWindowFrame.frame(from: window.frame, aspect: PlayerWindowFrame.aspect(of: videoSize),
+                                                chrome: chrome, on: screen.visibleFrame)
+            let current = window.frame
+            guard abs(frame.minX - current.minX) > 1 || abs(frame.maxY - current.maxY) > 1
+                    || abs(frame.width - current.width) > 1 || abs(frame.height - current.height) > 1 else { return }
+            window.setFrame(frame, display: true, animate: true)
+        }
+    }
+}
+#endif
+
+#if os(visionOS)
+/// The player window on Vision Pro, which the picture fills edge to edge: it takes the shape of
+/// each new picture, and pulled to another size it keeps that shape. Pulled freely, it would show
+/// clear bands beside the picture and leave the controls' ornament off the picture's bottom edge.
+struct PlayerWindowShape: UIViewRepresentable {
+    /// The width over the height of the picture.
+    let aspect: CGFloat
+
+    func makeUIView(context: Context) -> ShapeView { ShapeView() }
+
+    func updateUIView(_ view: ShapeView, context: Context) {
+        view.aspect = aspect
+    }
+
+    final class ShapeView: UIView {
+        var aspect: CGFloat = 16.0 / 9.0 {
+            didSet { if aspect != oldValue { applyShape() } }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            applyShape()
+        }
+
+        private func applyShape() {
+            guard let window, let scene = window.windowScene else { return }
+            let size = PlayerWindowFrame.visionSize(from: window.bounds.size, aspect: aspect)
+            scene.requestGeometryUpdate(.Vision(size: size, resizingRestrictions: .uniform))
         }
     }
 }

@@ -56,6 +56,28 @@ enum PlayerPanel: Identifiable {
     /// Picking a choice closes it; the audio and subtitles panel, with more to set beside the
     /// choice, stays.
     var closesOnChoice: Bool { self != .audioAndSubtitles }
+
+    /// It opens in a popover from its button rather than over the picture: on Vision Pro, whose
+    /// buttons are in an ornament below the window, out of the picture's coordinates, so a panel
+    /// over the picture could neither find its button nor keep off the picture.
+    var opensInPopover: Bool {
+        #if os(visionOS)
+        !isTab
+        #else
+        false
+        #endif
+    }
+}
+
+extension View {
+    /// A panel's glass, but in a popover, which is glass already.
+    @ViewBuilder func panelGlass(in shape: some InsettableShape, for panel: PlayerPanel) -> some View {
+        if panel.opensInPopover {
+            self
+        } else {
+            platformGlass(in: shape)
+        }
+    }
 }
 
 /// Where each panel's button is, in global coordinates, for the panel to open above it.
@@ -206,7 +228,7 @@ struct TrackPanel: View {
         .frame(width: panel == .speed ? nil : Self.width)
         .frame(maxHeight: min(Self.maxHeight, room))
         .fixedSize(horizontal: panel == .speed, vertical: true)
-        .platformGlass(in: .rect(cornerRadius: 24))
+        .panelGlass(in: .rect(cornerRadius: 24), for: panel)
         #if os(tvOS)
         .focusSection()
         .onAppear { focusedRow = currentRow }

@@ -488,3 +488,30 @@ struct PlayableOfflineTests {
         #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: false, downloaded: true) == true)
     }
 }
+
+/// The offline banner's words: "Offline" on its own line, so the rest never cuts it short.
+@MainActor
+struct OfflineBannerWordsTests {
+    @Test func saysWhatShowsAndWhyUnderOffline() {
+        let words = OfflineBanner.Words(showsDownloads: true, absence: .noAnswer, server: "Showcase")
+        #expect(words.title == "Offline")
+        #expect(words.detail == "Showing your downloads · Can't reach Showcase.")
+        #expect(words.shortDetail == "Showing your downloads")
+        #expect(words.spoken == "Offline: showing your downloads. Can't reach Showcase.")
+    }
+
+    @Test func withoutDownloadsSaysWhy() {
+        let words = OfflineBanner.Words(showsDownloads: false, absence: .noAnswer, server: "The Family Media Server")
+        #expect(words.detail == "Can't reach The Family Media Server.")
+        #expect(words.shortDetail == "Can't reach the server.")
+        #expect(words.spoken == "Offline. Can't reach The Family Media Server.")
+    }
+
+    @Test func saysWhenTheDeviceItselfIsOffline() {
+        let words = OfflineBanner.Words(showsDownloads: true, absence: .deviceOffline, server: "Showcase")
+        #expect(words.detail.hasPrefix("Showing your downloads · This "))
+        #expect(words.detail.hasSuffix(" isn't connected to the internet."))
+        #expect(OfflineBanner.Words(showsDownloads: false, absence: .deviceOffline, server: "Showcase").shortDetail
+                == "No internet connection.")
+    }
+}

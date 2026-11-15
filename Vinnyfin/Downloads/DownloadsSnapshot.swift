@@ -20,14 +20,16 @@ nonisolated struct DownloadsSnapshot: Codable, Equatable, Sendable {
         let subtitle: String?
         /// Its picture is in `artworkFolder`.
         var hasArtwork = false
+        /// The sign-in that downloaded it, under which its links open while it's kept here.
+        var owner: AppLink.Owner?
 
         var id: String { itemId }
 
         var item: JellyfinItem { JellyfinItem(id: itemId, name: name, type: type) }
         /// Opens the title's page.
-        var openLink: URL { AppLink(.open, item).url }
+        var openLink: URL { AppLink(.open, item, owner: owner).url }
         /// Plays it, from the download.
-        var playLink: URL { AppLink(.play, item).url }
+        var playLink: URL { AppLink(.play, item, owner: owner).url }
     }
 
     struct Download: Codable, Equatable, Sendable, Identifiable {

@@ -11,7 +11,6 @@ struct RootView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(IncomingLinks.self) private var links
     @Environment(SessionSocket.self) private var socket
-    @Environment(SharePlay.self) private var sharePlay
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS) || os(macOS)
     @Environment(RemoteControl.self) private var remote
@@ -26,14 +25,13 @@ struct RootView: View {
     @Environment(SmartDownloads.self) private var smartDownloads
     @Environment(DownloadManager.self) private var downloads
     @Environment(SpotlightTitles.self) private var spotlight
-    /// A title handed off from a sign-in this device doesn't have, until it has it.
-    @State private var handoff: Handoff?
-    @State private var showingHandoffMismatch = false
-    /// The sign-in screen, for the server a handed-off title is from.
-    @State private var handoffSignIn: ServerSignIn?
     #endif
+    /// A title a link or another device asked to open, which may be from another sign-in.
+    @State private var titleFromSignIn: TitleFromSignIn?
     /// A title a link asked to open, for the tab on screen to show.
     @State private var linkedItem: JellyfinItem?
+    /// What Spotlight or Siri asked to search for, for the Search tab.
+    @State private var linkedSearch: String?
     #if os(iOS)
     /// The full-screen player is up, until it has finished going away.
     @State private var playerCovers = false
@@ -46,7 +44,7 @@ struct RootView: View {
         @Bindable var messages = messages
         Group {
             if let session {
-                MainTabs(linkedItem: $linkedItem)
+                MainTabs(linkedItem: $linkedItem, linkedSearch: $linkedSearch)
                     // Each server and user gets fresh browsing state.
                     .id(session.account.serverId + session.account.userId)
             } else {
@@ -110,11 +108,7 @@ struct RootView: View {
         } message: {
             Text(player.problem ?? "")
         }
-        .alert("Can't Watch Together", isPresented: Binding(get: { sharePlay.problem != nil }, set: { if !$0 { sharePlay.problem = nil } })) {
-            Button("OK") { sharePlay.problem = nil }
-        } message: {
-            Text(sharePlay.problem ?? "")
-        }
+        .watchTogetherAlerts()
         #if !os(tvOS)
         .alert("Download a Transcode?", isPresented: Binding(get: { downloads.transcodes.proposal != nil },
                                                              set: { if !$0 { downloads.transcodes.proposal = nil } }),
@@ -155,26 +149,8 @@ struct RootView: View {
             }
             links.open(handoff)
         }
-        .alert(handoffMismatch.map(Handoff.title) ?? "", isPresented: $showingHandoffMismatch, presenting: handoff) { handoff in
-            if let mismatch = handoffMismatch {
-                Button(handoff.signInTitle(for: mismatch)) { signIn(for: handoff) }
-            }
-            Button("Cancel", role: .cancel) { self.handoff = nil }
-        } message: { handoff in
-            Text(handoffMismatch.map { handoff.explanation(for: $0, on: Device.name) } ?? "")
-        }
-        .sheet(item: $handoffSignIn, onDismiss: {
-            if handoff?.signIn.isSignedIn(as: accounts.account) != true { handoff = nil }
-        }) { signIn in
-            LoginView(offer: signIn)
-        }
-        // Once signed in where the handed-off title is from, it opens.
-        .onChange(of: accounts.account) { _, account in
-            guard let handoff, handoff.signIn.isSignedIn(as: account) else { return }
-            self.handoff = nil
-            open(handoff.link)
-        }
         #endif
+        .opensTitlesUnderTheirSignIn($titleFromSignIn) { link in open(link) }
         #if os(macOS)
         // Links and handed-off titles open in the window that's open, rather than in a new one.
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
@@ -261,8 +237,13 @@ struct RootView: View {
     }
 
     /// Plays the title, or shows its page on the tab on screen. A player covering the tabs closes
-    /// for it; one in Picture in Picture, or in a window of its own, plays on.
+    /// for it; one in Picture in Picture, or in a window of its own, plays on. A title from
+    /// another sign-in opens under its own (`opensTitlesUnderTheirSignIn`).
     private func open(_ link: AppLink) {
+        if let owner = link.owner, !owner.isSignedIn(as: accounts.account) {
+            titleFromSignIn = .link(link)
+            return
+        }
         switch link.action {
         case .play:
             player.play(.item(link.item, continuingFrom: link.position))
@@ -282,36 +263,21 @@ struct RootView: View {
         switch incoming {
         case .link(let url):
             open(url)
+        case .search(let term):
+            guard session != nil else {
+                messages.show("Sign in to search for \(term).")
+                return
+            }
+            if player.coversScreens {
+                Task { await player.dismiss() }
+            }
+            linkedSearch = term
         #if !os(tvOS)
         case .handoff(let handoff):
-            continueHandoff(handoff)
+            titleFromSignIn = .handoff(handoff)
         #endif
         }
     }
-
-    #if !os(tvOS)
-    /// Opens a title handed off from another of the person's devices, when this one is signed in
-    /// where it's from; otherwise says where it's signed in, and offers to sign in there.
-    private func continueHandoff(_ handoff: Handoff) {
-        if handoff.mismatch(with: accounts.account) == nil {
-            open(handoff.link)
-        } else {
-            self.handoff = handoff
-            showingHandoffMismatch = true
-        }
-    }
-
-    private var handoffMismatch: Handoff.Mismatch? {
-        handoff?.mismatch(with: accounts.account)
-    }
-
-    /// Signs out of where this device is signed in, as Settings does, and opens the sign-in for
-    /// where the title is from.
-    private func signIn(for handoff: Handoff) {
-        if accounts.account != nil { accounts.signOut(cancelling: downloads) }
-        handoffSignIn = handoff.signIn
-    }
-    #endif
 }
 
 struct MainTabs: View {
@@ -321,6 +287,8 @@ struct MainTabs: View {
 
     /// A title a link asked to open, shown on the tab on screen as the page after the one it shows.
     @Binding var linkedItem: JellyfinItem?
+    /// What Spotlight or Siri asked to search for, which the Search tab searches for.
+    @Binding var linkedSearch: String?
     @State private var navigation = TabNavigation()
     @Environment(ServerReachability.self) private var reachability
     #if !os(tvOS)
@@ -430,9 +398,9 @@ struct MainTabs: View {
             Tab(value: .search, role: .search) {
                 Group {
                     #if os(tvOS)
-                    SearchView(path: $navigation.search)
+                    SearchView(request: navigation.searchRequest, path: $navigation.search)
                     #else
-                    SearchView(fieldRequests: searchFieldRequests, path: $navigation.search)
+                    SearchView(fieldRequests: searchFieldRequests, request: navigation.searchRequest, path: $navigation.search)
                     #endif
                 }
                 .undoToasts()
@@ -451,6 +419,11 @@ struct MainTabs: View {
             guard let linkedItem else { return }
             navigation.open(linkedItem)
             self.linkedItem = nil
+        }
+        .onChange(of: linkedSearch, initial: true) {
+            guard let linkedSearch else { return }
+            navigation.search(for: linkedSearch)
+            self.linkedSearch = nil
         }
     }
 
@@ -497,6 +470,16 @@ struct TabNavigation {
     var shows = NavigationPath()
     var downloads = NavigationPath()
     var search = NavigationPath()
+    /// The last search asked for from outside the app, which the Search tab shows.
+    private(set) var searchRequest: SearchRequest?
+
+    /// Shows the Search tab searching for `term`, as Spotlight and Siri ask, back on its results
+    /// from any page open over them.
+    mutating func search(for term: String) {
+        selection = .search
+        search = NavigationPath()
+        searchRequest = SearchRequest(term: term)
+    }
 
     /// Opens a title a link asked for as the next page of the tab on screen, so what that tab
     /// showed stays a page back. A tab with no pages of titles, Sounds or Settings, gives way to
@@ -513,6 +496,13 @@ struct TabNavigation {
             home.append(item)
         }
     }
+}
+
+/// A search asked for from outside the app. Each is new, so asking for the same term again
+/// searches for it again.
+struct SearchRequest: Equatable {
+    let term: String
+    let id = UUID()
 }
 
 extension AppSettings.Appearance {

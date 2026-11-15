@@ -1,9 +1,10 @@
 import AppIntents
 
 /// The intents as App Shortcuts, which work from Siri and Spotlight without setting anything up.
-/// An app has at most ten; Apple TV, without downloads, has the first five. A phrase with a title
-/// in it matches the titles the title's query suggests, which `updateAppShortcutParameters()`
-/// hands the system.
+/// An app has at most ten, which these are; Apple TV, without downloads, has the first six. A
+/// phrase with a title in it matches the titles the title's query suggests, which
+/// `updateAppShortcutParameters()` hands the system. Pausing and resuming downloads share one,
+/// whose phrase says which.
 nonisolated struct VinnyfinShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: ContinueWatchingIntent(), phrases: [
@@ -34,6 +35,11 @@ nonisolated struct VinnyfinShortcuts: AppShortcutsProvider {
             "Show me the movie \(\.$target) in \(.applicationName)",
             "Open a movie in \(.applicationName)",
         ], shortTitle: "Open Movie", systemImageName: "film")
+        AppShortcut(intent: SearchTitlesIntent(), phrases: [
+            "Search \(.applicationName)",
+            "Search in \(.applicationName)",
+            "Find something in \(.applicationName)",
+        ], shortTitle: "Search", systemImageName: "magnifyingglass")
         #if !os(tvOS)
         AppShortcut(intent: DownloadNextEpisodesIntent(), phrases: [
             "Download the next episodes of \(\.$show) in \(.applicationName)",
@@ -44,14 +50,11 @@ nonisolated struct VinnyfinShortcuts: AppShortcutsProvider {
             "Download the movie \(\.$movie) in \(.applicationName)",
             "Download a movie in \(.applicationName)",
         ], shortTitle: "Download Movie", systemImageName: "arrow.down.to.line")
-        AppShortcut(intent: PauseAllDownloadsIntent(), phrases: [
-            "Pause downloads in \(.applicationName)",
-            "Pause my \(.applicationName) downloads",
-        ], shortTitle: "Pause Downloads", systemImageName: "pause.circle")
-        AppShortcut(intent: ResumeAllDownloadsIntent(), phrases: [
-            "Resume downloads in \(.applicationName)",
-            "Resume my \(.applicationName) downloads",
-        ], shortTitle: "Resume Downloads", systemImageName: "play.circle")
+        AppShortcut(intent: PauseOrResumeDownloadsIntent(), phrases: [
+            "\(\.$action) downloads in \(.applicationName)",
+            "\(\.$action) my \(.applicationName) downloads",
+            "Pause or resume downloads in \(.applicationName)",
+        ], shortTitle: "Pause or Resume Downloads", systemImageName: "playpause.circle")
         AppShortcut(intent: DownloadStatusIntent(), phrases: [
             "What's downloading in \(.applicationName)",
             "Check my \(.applicationName) downloads",

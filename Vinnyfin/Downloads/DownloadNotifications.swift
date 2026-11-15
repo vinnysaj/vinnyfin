@@ -21,15 +21,14 @@ import UIKit
 /// (`beginBackgroundTask`), so it works from a background launch: the session's wake, the
 /// catch-up and continued-processing tasks.
 ///
-/// Tapping one opens its title through `IncomingLinks`, which the root view follows like any
-/// vinnyfin:// link.
+/// A title that's ready shows with its poster, and offers Play and Open. Tapping one, or Open,
+/// opens its title through `IncomingLinks`, which the root view follows like any vinnyfin://
+/// link, under the sign-in that downloaded it; Play plays it.
 @Observable
 final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
     /// How long to wait for more downloads finishing together before posting.
     static let gathering: Duration = .seconds(1)
     private static let attentionIdentifier = "attention"
-    private nonisolated static let linkKey = "link"
-    private static let itemsKey = "items"
     private static let toldKey = "downloads.notifiedAttention"
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "notifications")
 
@@ -43,6 +42,8 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
     @ObservationIgnored private let links: IncomingLinks
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var pendingReady: [DownloadJob] = []
+    /// The posters of `pendingReady`'s titles, by item.
+    @ObservationIgnored private var pendingPosters: [String: URL] = [:]
     /// What needs attention, to post once gathering is over.
     @ObservationIgnored private var pendingAttention: AttentionNotice?
     @ObservationIgnored private var isAttentionResolved = false
@@ -65,7 +66,9 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
     /// Takes the notifications' responses from here on. Has to run before the app finishes
     /// launching, to hear about the tap that launched it.
     func start() {
-        UNUserNotificationCenter.current().delegate = self
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.setNotificationCategories([ReadyNotice.category])
         Task { await refreshAuthorization() }
     }
 
@@ -92,9 +95,10 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// A download has been published.
-    func ready(_ job: DownloadJob) {
+    /// A download has been published, with the poster saved for it, which its notification shows.
+    func ready(_ job: DownloadJob, poster: URL? = nil) {
         pendingReady.append(job)
+        if let poster { pendingPosters[job.itemId] = poster }
         postSoon()
     }
 
@@ -150,9 +154,11 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
 
     private func post() async {
         let ready = pendingReady
+        let posters = pendingPosters
         let attention = pendingAttention
         let isResolved = isAttentionResolved
         pendingReady = []
+        pendingPosters = [:]
         pendingAttention = nil
         isAttentionResolved = false
         let center = UNUserNotificationCenter.current()
@@ -165,29 +171,16 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
             var delivered: [String: [String]] = [:]
             for notification in await center.deliveredNotifications() {
                 let request = notification.request
-                if let items = request.content.userInfo[Self.itemsKey] as? [String] { delivered[request.identifier] = items }
+                if let items = request.content.userInfo[ReadyNotice.itemsKey] as? [String] { delivered[request.identifier] = items }
             }
-            for notice in ReadyNotice.notices(for: ready, delivered: delivered) {
-                let content = UNMutableNotificationContent()
-                content.body = notice.body
-                content.threadIdentifier = notice.identifier
-                content.userInfo = [Self.linkKey: notice.link.absoluteString, Self.itemsKey: notice.itemIds]
-                if notice.isUpdate {
-                    content.interruptionLevel = .passive
-                } else {
-                    content.sound = .default
-                }
+            for notice in ReadyNotice.notices(for: ready, delivered: delivered, posters: posters) {
+                let content = notice.content(attachments: notice.poster.flatMap(Self.attachment).map { [$0] } ?? [])
                 requests.append(UNNotificationRequest(identifier: notice.identifier, content: content, trigger: nil))
             }
         }
         if let attention {
-            let content = UNMutableNotificationContent()
-            content.title = attention.title
-            content.body = attention.body
-            content.sound = .default
-            content.threadIdentifier = Self.attentionIdentifier
-            if let link = attention.link { content.userInfo = [Self.linkKey: link.absoluteString] }
-            requests.append(UNNotificationRequest(identifier: Self.attentionIdentifier, content: content, trigger: nil))
+            requests.append(UNNotificationRequest(identifier: Self.attentionIdentifier,
+                                                  content: attention.content(thread: Self.attentionIdentifier), trigger: nil))
         }
         for request in requests {
             do {
@@ -207,9 +200,14 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
         []
     }
 
+    /// A tap, or Open, opens the title's page; Play plays it.
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-              let link = (response.notification.request.content.userInfo[Self.linkKey] as? String).flatMap(URL.init(string:))
+        let key = switch response.actionIdentifier {
+        case UNNotificationDefaultActionIdentifier, ReadyNotice.openAction: ReadyNotice.linkKey
+        case ReadyNotice.playAction: ReadyNotice.playLinkKey
+        default: String?.none
+        }
+        guard let key, let link = (response.notification.request.content.userInfo[key] as? String).flatMap(URL.init(string:))
         else { return }
         await open(link)
     }
@@ -217,26 +215,72 @@ final class DownloadNotifications: NSObject, UNUserNotificationCenterDelegate {
     private func open(_ link: URL) {
         links.open(link)
     }
+
+    /// A copy of the poster for a notification to show, which the system takes the file of;
+    /// nil when it can't be had.
+    private static func attachment(of poster: URL) -> UNNotificationAttachment? {
+        let copy = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).\(poster.pathExtension.isEmpty ? "jpg" : poster.pathExtension)")
+        do {
+            try FileManager.default.copyItem(at: poster, to: copy)
+            return try UNNotificationAttachment(identifier: "poster", url: copy)
+        } catch {
+            log.error("Couldn't attach the poster to a notification: \(error.localizedDescription, privacy: .public)")
+            try? FileManager.default.removeItem(at: copy)
+            return nil
+        }
+    }
 }
 
 // MARK: Content
 
-/// A notification that downloads are ready: one per film, one per show for its episodes.
+/// A notification that downloads are ready: one per film, one per show for its episodes, and
+/// one per sign-in, whose downloads it's about and under which it opens them.
 nonisolated struct ReadyNotice: Equatable, Sendable {
     let identifier: String
+    /// The film's name, or the show's.
+    let title: String
     let body: String
+    /// Opens the title's page, or the show's.
     let link: URL
+    /// Plays the title, or the show's earliest episode among those just ready.
+    let playLink: URL
     /// Every item it covers, those of the notification it replaces included.
     let itemIds: [String]
     /// It replaces one still showing, so it comes in quietly.
     let isUpdate: Bool
+    /// The poster saved for the title, which it shows.
+    var poster: URL?
+
+    /// The notification's actions, beside the tap that opens the title.
+    static let categoryIdentifier = "download.ready"
+    static let playAction = "play"
+    static let openAction = "open"
+    static var category: UNNotificationCategory {
+        UNNotificationCategory(identifier: categoryIdentifier, actions: [
+            UNNotificationAction(identifier: playAction, title: "Play", options: [.foreground],
+                                 icon: UNNotificationActionIcon(systemImageName: "play.fill")),
+            UNNotificationAction(identifier: openAction, title: "Open", options: [.foreground],
+                                 icon: UNNotificationActionIcon(systemImageName: "info.circle")),
+        ], intentIdentifiers: [])
+    }
+
+    /// Where its links and items are, in the notification's user info.
+    static let linkKey = "link"
+    static let playLinkKey = "playLink"
+    static let itemsKey = "items"
+    /// How much it matters beside the app's others, for the system's summaries: more than what
+    /// needs attention, which waits for the person to look.
+    static let relevance = 0.9
 
     /// The notices for downloads just published, counting on from those still showing:
-    /// `delivered` is the items each notification showing covers, by its identifier.
-    static func notices(for jobs: [DownloadJob], delivered: [String: [String]]) -> [ReadyNotice] {
+    /// `delivered` is the items each notification showing covers, by its identifier, and
+    /// `posters` the poster saved for each item.
+    static func notices(for jobs: [DownloadJob], delivered: [String: [String]], posters: [String: URL] = [:]) -> [ReadyNotice] {
         var groups: [(key: String, jobs: [DownloadJob])] = []
         for job in jobs {
-            let key = job.isEpisode ? "ready.series.\(job.seriesId ?? job.item?.seriesName ?? job.itemId)" : "ready.item.\(job.itemId)"
+            var key = job.isEpisode ? "ready.series.\(job.seriesId ?? job.item?.seriesName ?? job.itemId)" : "ready.item.\(job.itemId)"
+            // Two people downloading one show each hear of their own episodes.
+            if let owner = job.owner { key += "@\(owner.tokenKey)" }
             if let index = groups.firstIndex(where: { $0.key == key }) {
                 groups[index].jobs.append(job)
             } else {
@@ -248,20 +292,59 @@ nonisolated struct ReadyNotice: Equatable, Sendable {
             var itemIds = earlier
             for job in jobs where !itemIds.contains(job.itemId) { itemIds.append(job.itemId) }
             let last = jobs[jobs.count - 1]
+            let owner = last.owner.map(AppLink.Owner.init)
+            let title: String
             let body: String
             let link: URL
+            var played = last
             if itemIds.count > 1, last.isEpisode, let seriesId = last.seriesId {
-                let series = last.item?.seriesName ?? "a show"
-                body = "\(itemIds.count) episodes of \(series) are ready to watch offline."
-                link = AppLink(.open, JellyfinItem(id: seriesId, name: series, type: "Series")).url
+                title = last.item?.seriesName ?? "A Show"
+                body = "\(itemIds.count) episodes are ready to watch offline."
+                link = AppLink(.open, JellyfinItem(id: seriesId, name: title, type: "Series"), owner: owner).url
+                played = jobs.min { episodeOrder($0).lexicographicallyPrecedes(episodeOrder($1)) } ?? last
+            } else if last.isEpisode, let item = last.item {
+                title = item.seriesName ?? last.title
+                body = "\([item.name, item.episodeCode.map { "(\($0))" }].compactMap(\.self).joined(separator: " ")) is ready to watch offline."
+                link = AppLink(.open, item, owner: owner).url
             } else {
-                body = "\(last.shortName) is ready to watch offline."
-                link = AppLink(.open, last.item ?? JellyfinItem(id: last.itemId, name: last.title, type: last.isEpisode ? "Episode" : "Movie")).url
+                title = last.title
+                body = "Ready to watch offline."
+                link = AppLink(.open, item(of: last), owner: owner).url
             }
-            return ReadyNotice(identifier: key, body: body, link: link, itemIds: itemIds, isUpdate: delivered[key] != nil)
+            return ReadyNotice(identifier: key, title: title, body: body, link: link,
+                               playLink: AppLink(.play, item(of: played), owner: owner).url, itemIds: itemIds,
+                               isUpdate: delivered[key] != nil, poster: posters[last.itemId])
         }
     }
+
+    /// The notification's content, showing `attachments`.
+    func content(attachments: [UNNotificationAttachment] = []) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.threadIdentifier = identifier
+        content.categoryIdentifier = Self.categoryIdentifier
+        content.userInfo = [Self.linkKey: link.absoluteString, Self.playLinkKey: playLink.absoluteString, Self.itemsKey: itemIds]
+        content.relevanceScore = Self.relevance
+        content.attachments = attachments
+        if isUpdate {
+            content.interruptionLevel = .passive
+        } else {
+            content.sound = .default
+        }
+        return content
+    }
+
+    private static func item(of job: DownloadJob) -> JellyfinItem {
+        job.item ?? JellyfinItem(id: job.itemId, name: job.title, type: job.isEpisode ? "Episode" : "Movie")
+    }
+
+    /// Where an episode comes in its show, for the earliest of several.
+    private static func episodeOrder(_ job: DownloadJob) -> [Int] {
+        [job.item?.parentIndexNumber ?? .max, job.item?.indexNumber ?? .max]
+    }
 }
+
 
 /// Something about the downloads the user has to act on.
 nonisolated enum DownloadAttention: Hashable, Sendable {
@@ -351,7 +434,26 @@ nonisolated struct AttentionNotice: Equatable, Sendable {
         }
         body = sentences.joined(separator: " ")
         let only = failed.count + short.count == 1 ? (failed.first ?? short.first?.job) : nil
-        link = only.map { job in AppLink(.open, job.item ?? JellyfinItem(id: job.itemId, name: job.title, type: job.isEpisode ? "Episode" : "Movie")).url }
+        link = only.map { job in
+            AppLink(.open, job.item ?? JellyfinItem(id: job.itemId, name: job.title, type: job.isEpisode ? "Episode" : "Movie"),
+                    owner: job.owner.map(AppLink.Owner.init)).url
+        }
+    }
+
+    /// How much it matters beside the app's others, for the system's summaries: less than a
+    /// title that's ready to watch.
+    static let relevance = 0.5
+
+    /// The notification's content, in `thread`.
+    func content(thread: String) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.threadIdentifier = thread
+        content.relevanceScore = Self.relevance
+        if let link { content.userInfo = [ReadyNotice.linkKey: link.absoluteString] }
+        return content
     }
 }
 #endif

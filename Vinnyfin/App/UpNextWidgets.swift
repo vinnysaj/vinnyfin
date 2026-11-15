@@ -5,10 +5,12 @@ import WidgetKit
 /// The widgets of titles on iPhone, iPad and the Mac: Continue Watching, the first titles of
 /// Home's row of that name, each playing from where it was left; Recently Added, the newest
 /// movies and shows together; and Favorites, as Home's row of that name lists them, A to Z, each
-/// of the last two opening its title's page. The widget extension asks the signed-in server for
-/// them, with their pictures, each time a widget's timeline reloads; the app has them reload as a
-/// playback stops and as the app leaves the foreground, since what was watched and who is signed
-/// in may have changed.
+/// of the last two opening its title's page. Continue Watching fills the room its titles leave
+/// with what's new on the server. The widget extension asks the signed-in server for them, with
+/// their pictures, each time a widget's timeline reloads; the app has them reload as a playback
+/// stops, as the app leaves the foreground and as the sign-in in use changes, since what was
+/// watched and who is signed in may have changed. Each title links under the sign-in it's from,
+/// so one followed after a switch opens under its own.
 nonisolated enum UpNextWidgets {
     /// Which list of titles a widget shows.
     enum Row: String, CaseIterable, Sendable {
@@ -78,11 +80,15 @@ nonisolated enum UpNextWidgets {
         }
     }
 
-    /// Has the system ask the widgets for their titles again.
+    /// The Continue Watching control's kind, which names the title it plays.
+    static let controlKind = "net.vinnysaj.vinnyfin.continueWatching.control"
+
+    /// Has the system ask the widgets, and the Continue Watching control, for their titles again.
     static func reload() {
         for row in Row.allCases {
             WidgetCenter.shared.reloadTimelines(ofKind: row.kind)
         }
+        ControlCenter.shared.reloadControls(ofKind: controlKind)
     }
 
     /// A title as a widget shows it, with where a tap on it goes.
@@ -90,24 +96,27 @@ nonisolated enum UpNextWidgets {
         let itemId: String
         /// Its show, or the film's name.
         let title: String
-        /// As a landscape card says it (`JellyfinItem.cardDetail`).
+        /// As a landscape card says it (`JellyfinItem.cardDetail`), or why it's there.
         let detail: String
         /// How far through it playback got, 0...1.
         let progress: Double?
-        /// Plays it from where it was left, as the app's Resume does, or opens its page, as the
-        /// row has it (`Row.plays`).
+        /// A tap plays it from where it was left, as the app's Resume does, rather than opening
+        /// its page.
+        let plays: Bool
+        /// Where a tap goes, under the sign-in the widget showed it for.
         let link: URL
         /// Its picture as a small JPEG, at the size the widget draws it. Nil without one.
         var artwork: Data?
 
         var id: String { itemId }
 
-        init(_ item: JellyfinItem, plays: Bool = true) {
+        init(_ item: JellyfinItem, plays: Bool = true, owner: AppLink.Owner? = nil, detail: String? = nil) {
             itemId = item.id
             title = item.titleName
-            detail = item.cardDetail
+            self.detail = detail ?? item.cardDetail
             progress = item.progress
-            link = AppLink(plays ? .play : .open, item).url
+            self.plays = plays
+            link = AppLink(plays ? .play : .open, item, owner: owner).url
         }
     }
 
@@ -126,8 +135,24 @@ nonisolated enum UpNextWidgets {
     }
 
     /// The first `limit` of the row's titles: for a row whose tiles play them, those that play.
-    static func tiles(from items: [JellyfinItem], limit: Int, for row: Row = .continueWatching) -> [Tile] {
-        items.filter { !row.plays || $0.isPlayable }.prefix(limit).map { Tile($0, plays: row.plays) }
+    /// Each links under `owner`, the sign-in they're from.
+    static func tiles(from items: [JellyfinItem], limit: Int, for row: Row = .continueWatching,
+                      owner: AppLink.Owner? = nil) -> [Tile] {
+        items.filter { !row.plays || $0.isPlayable }.prefix(limit).map { Tile($0, plays: row.plays, owner: owner) }
+    }
+
+    /// Whether the row fills the room its titles leave with the server's newest, as Continue
+    /// Watching does: with little or nothing to continue, what's new is what there is to watch.
+    static func fills(_ row: Row) -> Bool { row == .continueWatching }
+
+    /// `tiles`, then as many of `newest` as there's room for among `limit`, of those not shown
+    /// already, each opening its page and saying it's new on `server`.
+    static func filling(_ tiles: [Tile], from newest: [JellyfinItem], limit: Int, server: String,
+                        owner: AppLink.Owner?) -> [Tile] {
+        var shown = Set(tiles.map(\.itemId))
+        let filler = newest.filter { shown.insert($0.id).inserted }.prefix(max(0, limit - tiles.count))
+            .map { Tile($0, plays: false, owner: owner, detail: "New on \(server)") }
+        return tiles + filler
     }
 
     /// What a widget shows when asking the server failed.

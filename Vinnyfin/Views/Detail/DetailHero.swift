@@ -78,7 +78,7 @@ struct DetailHero<Actions: View>: View {
     private var isStacked: Bool { dynamicTypeSize.isAccessibilitySize }
 
     @ViewBuilder private var facts: some View {
-        FactsLine(item: item)
+        FactsLine(item: item, showsEnd: true)
         if let badgesSource { MediaBadges(source: badgesSource) }
     }
 
@@ -215,14 +215,16 @@ struct DetailHero<Actions: View>: View {
     }
 
     /// `FactsLine`'s facts as VoiceOver should say them: "Season 1, Episode 2, 2024, rated PG-13,
-    /// 2 hours, 9 minutes, rated 7.8 out of 10, Action, Drama".
-    static func spokenFacts(for item: JellyfinItem) -> String {
+    /// 2 hours, 9 minutes, ends at 9:50 PM, rated 7.8 out of 10, Action, Drama". When it would end
+    /// is said with `now`.
+    static func spokenFacts(for item: JellyfinItem, now: Date? = nil) -> String {
         var parts: [String] = []
         if item.isEpisode, let code = item.spokenEpisodeCode { parts.append(code) }
         if let year = item.productionYear { parts.append(String(year)) }
         if let rating = item.officialRating { parts.append("rated \(rating)") }
         if item.isSeries, let count = item.childCount { parts.append(count == 1 ? "1 season" : "\(count) seasons") }
         if !item.isSeries, let runtime = item.spokenRuntime { parts.append(runtime) }
+        if let end = now.flatMap({ EndTime.end(of: item, now: $0) }) { parts.append("ends at \(EndTime.text(end))") }
         if let score = item.communityRating {
             parts.append("rated \(score.formatted(.number.precision(.fractionLength(1)))) out of 10")
         }
@@ -391,11 +393,23 @@ struct HeroBackdrop: View {
 /// line breaks no dot or comma at either end of it. On a narrow screen, only the first genre.
 struct FactsLine: View {
     let item: JellyfinItem
+    /// Says when the title would end if played now, after how long it runs: "Ends at 9:50 PM".
+    var showsEnd = false
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        let facts = Self.facts(for: item, genres: sizeClass == .compact ? 1 : 3)
-        FactsLayout {
+        if showsEnd {
+            // Each minute, for when the title would end.
+            TimelineView(.everyMinute) { context in line(now: context.date) }
+        } else {
+            line(now: nil)
+        }
+    }
+
+    /// With `now`, when the title would end if played then.
+    private func line(now: Date?) -> some View {
+        let facts = Self.facts(for: item, genres: sizeClass == .compact ? 1 : 3, now: now)
+        return FactsLayout {
             ForEach(facts.indices, id: \.self) { index in
                 if index > 0 {
                     Group {
@@ -414,7 +428,7 @@ struct FactsLine: View {
         .foregroundStyle(.secondary)
         .clipped()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(DetailHero<EmptyView>.spokenFacts(for: item))
+        .accessibilityLabel(DetailHero<EmptyView>.spokenFacts(for: item, now: now))
     }
 
     struct Fact: Equatable {
@@ -422,14 +436,16 @@ struct FactsLine: View {
         var isGenre = false
     }
 
-    /// The facts, in order, with up to `genres` genres last.
-    static func facts(for item: JellyfinItem, genres: Int) -> [Fact] {
+    /// The facts, in order, with up to `genres` genres last; with `now`, when the title would end
+    /// if played then, after how long it runs.
+    static func facts(for item: JellyfinItem, genres: Int, now: Date? = nil) -> [Fact] {
         var facts: [Fact] = []
         if item.isEpisode, let code = item.episodeCode { facts.append(Fact(text: code)) }
         if let year = item.productionYear { facts.append(Fact(text: String(year))) }
         if let rating = item.officialRating { facts.append(Fact(text: rating)) }
         if item.isSeries, let count = item.childCount { facts.append(Fact(text: count == 1 ? "1 Season" : "\(count) Seasons")) }
         if !item.isSeries, let runtime = item.runtimeText { facts.append(Fact(text: runtime)) }
+        if let end = now.flatMap({ EndTime.end(of: item, now: $0) }) { facts.append(Fact(text: "Ends at \(EndTime.text(end))")) }
         if let score = item.communityRating { facts.append(Fact(text: "★ \(score.formatted(.number.precision(.fractionLength(1))))")) }
         for genre in (item.genres ?? []).prefix(genres) { facts.append(Fact(text: genre, isGenre: true)) }
         return facts

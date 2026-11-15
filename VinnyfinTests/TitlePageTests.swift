@@ -292,4 +292,23 @@ struct TitlePageTests {
         #expect(!DetailHero<EmptyView>.usesStill(width: 640))
         #expect(!DetailHero<EmptyView>.usesStill(width: nil))
     }
+
+    // MARK: When it would end
+
+    @MainActor
+    @Test func theHerosFactsSayWhenTheTitleWouldEndAfterHowLongItRuns() {
+        var movie = JellyfinItem(id: "m", name: "The Quiet Meridian", type: "Movie")
+        movie.productionYear = 2025
+        movie.runTimeTicks = 128 * 60 * 10_000_000
+        movie.communityRating = 8.4
+        let end = EndTime.text(Self.now.addingTimeInterval(128 * 60))
+        #expect(FactsLine.facts(for: movie, genres: 1, now: Self.now).map(\.text) == ["2025", "2h 8m", "Ends at \(end)", "★ 8.4"])
+        #expect(DetailHero<EmptyView>.spokenFacts(for: movie, now: Self.now).contains("ends at \(end)"))
+        // Resumed, from just before where it was left.
+        movie.userData = UserItemData(playbackPositionTicks: 60 * 60 * 10_000_000)
+        let resumedEnd = EndTime.text(Self.now.addingTimeInterval(68 * 60 + PlaybackRequest.resumeLeadIn))
+        #expect(FactsLine.facts(for: movie, genres: 1, now: Self.now).map(\.text).contains("Ends at \(resumedEnd)"))
+        // Home's banner, without a time, says nothing of it.
+        #expect(FactsLine.facts(for: movie, genres: 1).map(\.text) == ["2025", "2h 8m", "★ 8.4"])
+    }
 }

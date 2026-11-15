@@ -246,14 +246,14 @@ final class PlayerCoordinator {
         #if os(tvOS)
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { _, _ in nil }
         let model = PlayerModel(request: request, engine: engine, lease: lease, resolver: resolver, accounts: accounts,
-                                history: history, settings: settings) { _ in nil }
+                                history: history, settings: settings) { _, _ in nil }
         #else
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { [downloads] itemId, mediaSourceId in
             downloads.playableFile(itemId: itemId, mediaSourceId: mediaSourceId)
         }
         let model = PlayerModel(request: request, engine: engine, lease: lease, resolver: resolver, accounts: accounts,
-                                history: history, settings: settings) { [downloads] episode in
-            downloads.downloadedEpisode(after: episode)
+                                history: history, settings: settings) { [downloads] episode, order in
+            downloads.downloadedEpisode(after: episode, in: order)
         }
         // Downloads wait while something plays, and smart downloads while the player is open.
         let id = model.id

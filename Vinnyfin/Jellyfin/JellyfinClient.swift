@@ -147,7 +147,7 @@ nonisolated struct JellyfinClient: Sendable {
     /// leave out overviews, the bulk of a list's bytes.
     static let cardFields = ""
     /// Everything a detail screen shows.
-    static let detailFields = "Overview,Genres,People,Taglines,MediaSources,MediaStreams,Chapters,Trickplay,SortName,ChildCount,PrimaryImageAspectRatio"
+    static let detailFields = "Overview,Genres,People,Taglines,MediaSources,MediaStreams,Chapters,Trickplay,SortName,ChildCount,PrimaryImageAspectRatio,Studios,RemoteTrailers,LocalTrailerCount,SpecialFeatureCount"
 
     // MARK: Server and sign-in
 
@@ -550,6 +550,31 @@ nonisolated struct JellyfinClient: Sendable {
         return page.items
     }
 
+    // MARK: Around a title
+
+    /// The trailers the server keeps beside a title's file, each an item that plays.
+    func localTrailers(itemId: String, userId: String) async throws -> [JellyfinItem] {
+        try await get("Items/\(itemId)/LocalTrailers", query: ["userId": userId])
+    }
+
+    /// A title's extras the server keeps beside its file, but its trailers: behind the scenes,
+    /// deleted scenes, featurettes, interviews and the like, each an item that plays.
+    func specialFeatures(itemId: String, userId: String) async throws -> [JellyfinItem] {
+        try await get("Items/\(itemId)/SpecialFeatures", query: ["userId": userId])
+    }
+
+    /// The collections a title is in. A server without the lookup answers 404, as it does for a
+    /// title it doesn't have.
+    func collections(containing itemId: String, userId: String) async throws -> [JellyfinItem] {
+        let page: ItemsPage = try await get("Items/\(itemId)/Collections", query: ["userId": userId, "fields": Self.cardFields])
+        return page.items
+    }
+
+    /// A person, with their biography, birthplace, and birth and death dates.
+    func person(id: String, userId: String) async throws -> JellyfinItem {
+        try await get("Items/\(id)", query: ["userId": userId, "fields": "Overview,ProductionLocations"])
+    }
+
     /// The genres of items of `types`, by name; with counts, each says how many movies and
     /// shows have it.
     func genres(userId: String, types: [String], withCounts: Bool = false) async throws -> [JellyfinItem] {
@@ -567,10 +592,14 @@ nonisolated struct JellyfinClient: Sendable {
         return page.items
     }
 
-    /// One season's episodes, or every episode of the show in order when `seasonId` is nil.
-    func episodes(seriesId: String, seasonId: String?, userId: String, fields: String = "Overview,MediaSources,MediaStreams") async throws -> [JellyfinItem] {
+    /// One season's episodes, or every episode of the show in order when `seasonId` is nil. Without
+    /// `missing`, only those the library has, leaving out those the server lists from its metadata
+    /// alone.
+    func episodes(seriesId: String, seasonId: String?, userId: String, fields: String = "Overview,MediaSources,MediaStreams",
+                  missing: Bool = true) async throws -> [JellyfinItem] {
         var query = ["userId": userId, "fields": fields, "enableUserData": "true"]
         if let seasonId { query["seasonId"] = seasonId }
+        if !missing { query["isMissing"] = "false" }
         let page: ItemsPage = try await get("Shows/\(seriesId)/Episodes", query: query)
         return page.items
     }
@@ -729,6 +758,11 @@ nonisolated struct JellyfinClient: Sendable {
 
     enum ImageKind: String, Sendable {
         case primary = "Primary", backdrop = "Backdrop", logo = "Logo", thumb = "Thumb"
+    }
+
+    /// The pictures the server keeps of an item, with their sizes.
+    func images(itemId: String) async throws -> [ImageInfo] {
+        try await get("Items/\(itemId)/Images")
     }
 
     func imageURL(itemId: String, kind: ImageKind = .primary, tag: String?, maxWidth: Int) -> URL {
@@ -945,15 +979,25 @@ nonisolated struct PlaybackReport: Encodable, Sendable {
 }
 
 /// A change to an item's user data. The server writes what's given and leaves the rest as it is.
-nonisolated struct UserDataUpdate: Encodable, Sendable {
+nonisolated struct UserDataUpdate: Encodable, Equatable, Sendable {
     let PlaybackPositionTicks: Int64
     var Played: Bool?
     var LastPlayedDate: String?
+    var PlayCount: Int?
 
     init(positionTicks: Int64, played: Bool?, lastPlayed: Date?) {
         PlaybackPositionTicks = positionTicks
         Played = played
         LastPlayedDate = lastPlayed.map(JellyfinDate.format)
+    }
+
+    /// Everything of an item's watch state as `data` has it: whether it was watched, where it was
+    /// left, how many times it was played, and when last, as the server gave them.
+    init(restoring data: UserItemData) {
+        PlaybackPositionTicks = data.playbackPositionTicks ?? 0
+        Played = data.played ?? false
+        LastPlayedDate = data.lastPlayedDate
+        PlayCount = data.playCount ?? 0
     }
 
     /// An item's share of what the server keeps for one of its versions, just reported: that

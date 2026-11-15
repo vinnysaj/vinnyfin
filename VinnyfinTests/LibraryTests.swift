@@ -508,7 +508,6 @@ struct LibraryTitleTests {
 
     @Test func keepsTheTitleOfAListPickedByWhatsInIt() {
         #expect(LibraryGridView.title(of: HomeRows.favorites.list, sortedBy: "DateCreated") == "Favorites")
-        #expect(LibraryGridView.title(of: .titles(with: Person(id: "p", name: "Ada Vale")), sortedBy: "SortName") == "Ada Vale")
         let found = BrowseList(title: SearchView.seeAllTitle("Movies", term: "ferry"),
                                source: .items(JellyfinClient.ItemQuery(types: ["Movie"], searchTerm: "ferry")))
         #expect(LibraryGridView.title(of: found, sortedBy: "DateCreated") == "Movies Matching \u{201C}ferry\u{201D}")
@@ -547,11 +546,13 @@ struct SearchTests {
     }
 
     @Test func numbersAnEpisodeShortForItsSearchCard() {
-        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#))
+        #expect(Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#).shortEpisodeCode
             == "S1, E1")
-        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#))
+        #expect(Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#).shortEpisodeCode
             == "S2, E2–3")
-        #expect(LandscapeCard.shortCode(of: Samples.movie) == nil)
+        #expect(Samples.item(#"{"Id":"e","Name":"Behind the Scenes","Type":"Episode","ParentIndexNumber":0,"IndexNumber":1}"#).shortEpisodeCode
+            == "Specials, E1")
+        #expect(Samples.movie.shortEpisodeCode == nil)
     }
 
     // MARK: Hints

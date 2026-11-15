@@ -1,13 +1,19 @@
+import NukeUI
 import SwiftUI
 
 /// The top of a detail screen: the backdrop full width, fading into the page, with the title
 /// (as its logo when there is one), the facts line and the actions over it, or at the
-/// accessibility sizes, the title over it and the rest under it.
+/// accessibility sizes, the title over it and the rest under it. An episode's backdrop is its
+/// own still where that's sharp enough for it (`usesStill(width:)`), else its show's, and
+/// another episode shown fades in over the last. Its show's logo, over its name, leads to the
+/// show; without a logo, the show's name over the episode's does.
 struct DetailHero<Actions: View>: View {
     let item: JellyfinItem
+    /// The name over the title, such as an episode's show's, which its show's logo stands in for.
     var eyebrow: String?
-    /// Where the eyebrow leads, such as an episode's show.
-    var eyebrowLink: JellyfinItem?
+    /// Where an episode's show's logo or name leads: its show. On Apple TV the page's buttons lead
+    /// there instead, as a logo that took focus would be a stray stop above Play.
+    var showLink: JellyfinItem?
     var badgesSource: MediaSource?
     @ViewBuilder let actions: () -> Actions
 
@@ -20,37 +26,23 @@ struct DetailHero<Actions: View>: View {
     #endif
     /// The height of the scroll view the page is in, which the hero takes at most a share of.
     @State private var visibleHeight: CGFloat = 0
+    /// How wide each episode's still is, by the episode, once the server has said.
+    @State private var stillWidths: [String: Int] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 10) {
-                    if let eyebrow {
-                        if let eyebrowLink {
-                            NavigationLink(value: eyebrowLink) {
-                                HStack(spacing: 4) {
-                                    Text(eyebrow)
-                                    Image(systemName: "chevron.right").imageScale(.small)
-                                }
-                                .font(.subheadline.weight(.semibold))
-                            }
-                            // Glass reads on any artwork, and looks like the button it is.
-                            .buttonStyle(.platformGlass)
-                            .controlSize(.small)
-                            .accessibilityHint("Opens \(eyebrow)")
-                            .accessibilityIdentifier("detail.eyebrow")
-                        } else {
-                            Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                        }
-                    }
+                    if let eyebrow, !showsShowLogo { eyebrowView(eyebrow) }
                     title
                     if !isStacked { facts }
                 }
                 // The words go on the dark of the fade in either appearance.
                 .environment(\.colorScheme, .dark)
                 // The actions keep the page's appearance: the sheets and menus they open would
-                // take the dark with them. Their glass takes on the dark behind it by itself.
-                if !isStacked { actions().padding(.top, 4) }
+                // take the dark with them. Their glass takes on the dark behind it by itself, and
+                // their captions go on it in the dark's colors.
+                if !isStacked { actions().environment(\.actionsOverArtwork, true).padding(.top, 4) }
             }
             .heroWords()
             .padding(.horizontal, Metrics.edge)
@@ -62,8 +54,12 @@ struct DetailHero<Actions: View>: View {
             .padding(.top, topBarsHeight > 0 ? topBarsHeight + Self.clearance : 0)
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(Self.fullHeight, visible: visibleHeight), alignment: .bottomLeading)
             .background {
-                HeroBackdrop(url: backdropURL, placeholder: item.isSeries ? "tv" : "film", from: 0.35, middle: 0.75, at: 0.7)
+                HeroBackdrop(url: backdropURL, placeholder: isMeasuringStill ? nil : item.isSeries ? "tv" : "film",
+                             from: 0.35, middle: 0.75, at: 0.7)
             }
+            // Again once the details come with the still, for a page opened from a link that
+            // names only the episode.
+            .task(id: [item.id, item.primaryImageTag]) { await measureStill() }
             if isStacked {
                 VStack(alignment: .leading, spacing: 10) {
                     facts
@@ -82,7 +78,7 @@ struct DetailHero<Actions: View>: View {
     private var isStacked: Bool { dynamicTypeSize.isAccessibilitySize }
 
     @ViewBuilder private var facts: some View {
-        FactsLine(item: item)
+        FactsLine(item: item, showsEnd: true)
         if let badgesSource { MediaBadges(source: badgesSource) }
     }
 
@@ -110,13 +106,72 @@ struct DetailHero<Actions: View>: View {
         #endif
     }
 
+    /// The narrowest an episode's still can be to fill the hero, in pixels: narrower, it's soft
+    /// at the hero's size, and the show's backdrop stands in.
+    static var heroStillWidth: Int { 1280 }
+
+    /// Whether an episode's still `width` pixels wide fills the hero; nil until the server says.
+    static func usesStill(width: Int?) -> Bool {
+        (width ?? 0) >= heroStillWidth
+    }
+
     private var backdropURL: URL? {
         #if !os(tvOS)
         if let saved = downloads.artworkURL(itemId: item.id, kind: .backdrop), session == nil || !downloads.isNetworkReachable {
             return saved
         }
         #endif
+        if item.isEpisode, let tag = item.primaryImageTag, let session {
+            // Until it's known whether the still will do, nothing new: the last episode's stays.
+            guard let width = stillWidths[item.id] else { return nil }
+            if Self.usesStill(width: width) {
+                return session.client.imageURL(itemId: item.id, tag: tag, maxWidth: 1920)
+            }
+        }
         return session?.backdrop(item) ?? session?.landscape(item)
+    }
+
+    /// It isn't known yet whether the episode's still will do for the backdrop.
+    private var isMeasuringStill: Bool {
+        item.isEpisode && item.primaryImageTag != nil && session != nil && stillWidths[item.id] == nil
+    }
+
+    /// How wide the episode's still is, which decides whether it's the backdrop. Without an
+    /// answer, it's taken as too narrow.
+    private func measureStill() async {
+        guard item.isEpisode, item.primaryImageTag != nil, stillWidths[item.id] == nil, let session else { return }
+        let id = item.id
+        let width = try? await session.client.images(itemId: id).first { $0.imageType == "Primary" }?.width
+        guard !Task.isCancelled else { return }
+        stillWidths[id] = width ?? 0
+    }
+
+    /// The episode's show has a logo, which stands for its name over the episode's.
+    private var showsShowLogo: Bool {
+        item.isEpisode && logoURL != nil
+    }
+
+    @ViewBuilder private func eyebrowView(_ eyebrow: String) -> some View {
+        #if os(tvOS)
+        Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+        #else
+        if let showLink {
+            NavigationLink(value: showLink) {
+                HStack(spacing: 4) {
+                    Text(eyebrow)
+                    Image(systemName: "chevron.right").imageScale(.small)
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+            // Glass reads on any artwork, and looks like the button it is.
+            .buttonStyle(.platformGlass)
+            .controlSize(.small)
+            .accessibilityHint("Opens \(eyebrow)")
+            .accessibilityIdentifier("detail.eyebrow")
+        } else {
+            Text(eyebrow).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+        }
+        #endif
     }
 
     /// The server's, or offline the one saved with a download.
@@ -131,7 +186,7 @@ struct DetailHero<Actions: View>: View {
 
     @ViewBuilder private var title: some View {
         if item.isEpisode, let logo = logoURL {
-            TitleLogo(url: logo, name: item.seriesName ?? item.name)
+            showLogo(logo)
             Text(item.name).font(.title2.weight(.bold))
                 .accessibilityAddTraits(.isHeader)
         } else {
@@ -140,15 +195,36 @@ struct DetailHero<Actions: View>: View {
         }
     }
 
+    /// An episode's show's logo, which leads to the show off Apple TV.
+    @ViewBuilder private func showLogo(_ logo: URL) -> some View {
+        let name = item.seriesName ?? item.name
+        #if os(tvOS)
+        TitleLogo(url: logo, name: name)
+        #else
+        if let showLink {
+            NavigationLink(value: showLink) {
+                TitleLogo(url: logo, name: name, leadsOn: true)
+            }
+            .buttonStyle(.artwork)
+            .accessibilityHint("Opens \(name)")
+            .accessibilityIdentifier("detail.eyebrow")
+        } else {
+            TitleLogo(url: logo, name: name)
+        }
+        #endif
+    }
+
     /// `FactsLine`'s facts as VoiceOver should say them: "Season 1, Episode 2, 2024, rated PG-13,
-    /// 2 hours, 9 minutes, rated 7.8 out of 10, Action, Drama".
-    static func spokenFacts(for item: JellyfinItem) -> String {
+    /// 2 hours, 9 minutes, ends at 9:50 PM, rated 7.8 out of 10, Action, Drama". When it would end
+    /// is said with `now`.
+    static func spokenFacts(for item: JellyfinItem, now: Date? = nil) -> String {
         var parts: [String] = []
         if item.isEpisode, let code = item.spokenEpisodeCode { parts.append(code) }
         if let year = item.productionYear { parts.append(String(year)) }
         if let rating = item.officialRating { parts.append("rated \(rating)") }
         if item.isSeries, let count = item.childCount { parts.append(count == 1 ? "1 season" : "\(count) seasons") }
         if !item.isSeries, let runtime = item.spokenRuntime { parts.append(runtime) }
+        if let end = now.flatMap({ EndTime.end(of: item, now: $0) }) { parts.append("ends at \(EndTime.text(end))") }
         if let score = item.communityRating {
             parts.append("rated \(score.formatted(.number.precision(.fractionLength(1)))) out of 10")
         }
@@ -157,12 +233,52 @@ struct DetailHero<Actions: View>: View {
     }
 }
 
+/// A picture that, given another, keeps the one before up until the next is in, and fades the next
+/// in over it, rather than going blank between them. One that can't load goes, for the placeholder.
+private struct CrossfadingPicture: View {
+    let url: URL?
+    let placeholder: String?
+    /// The last picture that loaded, under the one asked for. The same one under itself once it's
+    /// in, so nothing shows through it as it fades in.
+    @State private var under: URL?
+
+    var body: some View {
+        Color.clear
+            .overlay {
+                if let under {
+                    Artwork(url: under, aspectRatio: nil, cornerRadius: 0, placeholder: nil)
+                }
+            }
+            .overlay {
+                ServerImage(url: url) { state in
+                    if let image = state.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else if under == nil, let placeholder {
+                        Rectangle().fill(.quaternary)
+                            .overlay {
+                                if !state.isLoading {
+                                    Image(systemName: placeholder).font(.title2).foregroundStyle(.tertiary)
+                                }
+                            }
+                    }
+                } onCompletion: { result in
+                    switch result {
+                    case .success: under = url
+                    case .failure: under = nil
+                    }
+                }
+            }
+            .accessibilityIgnoresInvertColors()
+            .accessibilityHidden(true)
+    }
+}
+
 /// A hero's picture, the page's width and the hero's height, under a fade that keeps the words
 /// over it legible in either appearance: down into the dark the page has in dark appearance,
 /// behind the title, facts and buttons. In light appearance that dark meets the page's own color
 /// at the hero's foot, under the words, in the `blendHeight(in:)` the hero leaves there. On Vision
 /// Pro the picture fades into the window's glass instead. Pulled down past the top of the page,
-/// the picture stretches up from its foot to fill the space.
+/// the picture stretches up from its foot to fill the space. Another picture fades in over it.
 struct HeroBackdrop: View {
     let url: URL?
     var placeholder: String? = "film"
@@ -184,7 +300,7 @@ struct HeroBackdrop: View {
     }
 
     var body: some View {
-        Artwork(url: url, aspectRatio: nil, cornerRadius: 0, placeholder: placeholder)
+        CrossfadingPicture(url: url, placeholder: placeholder)
             .clipped()
             #if os(visionOS)
             .mask { fade(Color.black).environment(\.colorScheme, .dark) }
@@ -277,11 +393,23 @@ struct HeroBackdrop: View {
 /// line breaks no dot or comma at either end of it. On a narrow screen, only the first genre.
 struct FactsLine: View {
     let item: JellyfinItem
+    /// Says when the title would end if played now, after how long it runs: "Ends at 9:50 PM".
+    var showsEnd = false
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        let facts = Self.facts(for: item, genres: sizeClass == .compact ? 1 : 3)
-        FactsLayout {
+        if showsEnd {
+            // Each minute, for when the title would end.
+            TimelineView(.everyMinute) { context in line(now: context.date) }
+        } else {
+            line(now: nil)
+        }
+    }
+
+    /// With `now`, when the title would end if played then.
+    private func line(now: Date?) -> some View {
+        let facts = Self.facts(for: item, genres: sizeClass == .compact ? 1 : 3, now: now)
+        return FactsLayout {
             ForEach(facts.indices, id: \.self) { index in
                 if index > 0 {
                     Group {
@@ -300,7 +428,7 @@ struct FactsLine: View {
         .foregroundStyle(.secondary)
         .clipped()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(DetailHero<EmptyView>.spokenFacts(for: item))
+        .accessibilityLabel(DetailHero<EmptyView>.spokenFacts(for: item, now: now))
     }
 
     struct Fact: Equatable {
@@ -308,14 +436,16 @@ struct FactsLine: View {
         var isGenre = false
     }
 
-    /// The facts, in order, with up to `genres` genres last.
-    static func facts(for item: JellyfinItem, genres: Int) -> [Fact] {
+    /// The facts, in order, with up to `genres` genres last; with `now`, when the title would end
+    /// if played then, after how long it runs.
+    static func facts(for item: JellyfinItem, genres: Int, now: Date? = nil) -> [Fact] {
         var facts: [Fact] = []
         if item.isEpisode, let code = item.episodeCode { facts.append(Fact(text: code)) }
         if let year = item.productionYear { facts.append(Fact(text: String(year))) }
         if let rating = item.officialRating { facts.append(Fact(text: rating)) }
         if item.isSeries, let count = item.childCount { facts.append(Fact(text: count == 1 ? "1 Season" : "\(count) Seasons")) }
         if !item.isSeries, let runtime = item.runtimeText { facts.append(Fact(text: runtime)) }
+        if let end = now.flatMap({ EndTime.end(of: item, now: $0) }) { facts.append(Fact(text: "Ends at \(EndTime.text(end))")) }
         if let score = item.communityRating { facts.append(Fact(text: "★ \(score.formatted(.number.precision(.fractionLength(1))))")) }
         for genre in (item.genres ?? []).prefix(genres) { facts.append(Fact(text: genre, isGenre: true)) }
         return facts
@@ -552,61 +682,8 @@ private struct FullOverview: View {
 }
 #endif
 
-/// The cast, with their pictures, each leading to the movies and shows they're in.
-struct CastShelf: View {
-    let people: [Person]
-
-    var body: some View {
-        let cast = people.filter { $0.type == "Actor" || $0.type == "GuestStar" }.prefix(20)
-        if !cast.isEmpty {
-            Shelf(title: "Cast", items: Array(cast), cardWidth: CastCard.width) { person in
-                NavigationLink(value: BrowseList.titles(with: person)) {
-                    CastCard(person: person)
-                }
-                .buttonStyle(.artwork)
-                .foregroundStyle(.primary)
-                .accessibilityElement(children: .combine)
-                .accessibilityHint("Shows the movies and shows they're in")
-                .accessibilityIdentifier("cast.\(person.name)")
-            }
-        }
-    }
-}
-
-/// A cast member's picture in a circle, as wide as the card at any text size, with their name
-/// and role under it, which on Apple TV move out of the way of the picture as focus lifts it.
-private struct CastCard: View {
-    let person: Person
-    @State private var artworkHeight: CGFloat = 0
-    @Environment(\.session) private var session
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    static var width: CGFloat {
-        #if os(tvOS)
-        160
-        #else
-        88
-        #endif
-    }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Artwork(url: session?.person(person), aspectRatio: 1, cornerRadius: 0, placeholder: "person.fill")
-                .clipShape(.circle)
-                #if os(tvOS)
-                .contentShape(.hoverEffect, .circle)
-                #endif
-                .liftsUnderFocus()
-                .measuresCardArtwork($artworkHeight)
-            VStack(spacing: 6) {
-                Text(person.name).font(.caption.weight(.medium)).lineLimit(dynamicTypeSize.lineLimit(1))
-                if let role = person.role, !role.isEmpty {
-                    Text(role).font(.caption2).foregroundStyle(.secondary).lineLimit(dynamicTypeSize.lineLimit(1))
-                }
-            }
-            .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
-        }
-        .multilineTextAlignment(.center)
-        .contentShape(.rect)
-    }
+extension EnvironmentValues {
+    /// The title's buttons are over its hero's artwork, which is dark behind them in either
+    /// appearance, rather than under it on the page.
+    @Entry var actionsOverArtwork = false
 }

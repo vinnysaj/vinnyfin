@@ -62,46 +62,8 @@ struct TopResultCard: View {
         case "MusicVideo": "Music Video"
         default: item.type
         }
-        let rest = item.isEpisode ? [item.seriesName, LandscapeCard.shortCode(of: item)] : [item.premiereYearText]
+        let rest = item.isEpisode ? [item.seriesName, item.shortEpisodeCode] : [item.premiereYearText]
         return ([kind] + rest.compactMap(\.self)).joined(separator: " · ")
-    }
-}
-
-/// Someone a search found: their picture in a circle and their name, leading to what they're in.
-struct PersonCard: View {
-    let person: Person
-    @State private var artworkHeight: CGFloat = 0
-    @Environment(\.session) private var session
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    static var width: CGFloat {
-        #if os(tvOS)
-        160
-        #else
-        88
-        #endif
-    }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Artwork(url: session?.person(person), aspectRatio: 1, cornerRadius: 0, placeholder: "person.fill")
-                .clipShape(.circle)
-                #if os(tvOS)
-                .contentShape(.hoverEffect, .circle)
-                #endif
-                .liftsUnderFocus()
-                .measuresCardArtwork($artworkHeight)
-            Text(person.name)
-                .font(.caption.weight(.medium))
-                .lineLimit(dynamicTypeSize.lineLimit(2))
-                .modifier(CardCaptionStyle(artworkHeight: artworkHeight))
-        }
-        .multilineTextAlignment(.center)
-        .contentShape(.rect)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(person.name)
-        .accessibilityHint("Shows the movies and shows they're in")
-        .accessibilityIdentifier("person.\(person.name)")
     }
 }
 

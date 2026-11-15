@@ -31,6 +31,7 @@ extension View {
     func itemDestinations() -> some View {
         navigationDestination(for: JellyfinItem.self) { ItemDestination(item: $0) }
             .navigationDestination(for: BrowseList.self) { LibraryGridView(list: $0) }
+            .navigationDestination(for: Person.self) { PersonView(person: $0).id($0.id) }
     }
 
     /// Lets the stack's pages open a title as its next page where a link can't be, such as from
@@ -72,9 +73,8 @@ struct ItemDetailView: View {
     /// Another episode of the show, picked on the page, that it shows in place of `item`.
     @State private var picked: JellyfinItem?
     @State private var detail: JellyfinItem?
-    @State private var similar: [JellyfinItem] = []
-    /// The title `similar` is like: an episode's show.
-    @State private var similarTitleId: String?
+    /// Titles like it, its genres and its collections: an episode's show's.
+    @State private var related = RelatedTitles()
     @State private var loadError: LoadFailure?
     /// The server answered that it doesn't have the title, which asking again won't change.
     @State private var isGone = false
@@ -125,7 +125,7 @@ struct ItemDetailView: View {
     var body: some View {
         EdgeToEdgeScrollView(underTopBars: true) {
             VStack(alignment: .leading, spacing: 28) {
-                DetailHero(item: shown, eyebrow: shown.isEpisode ? shown.seriesName : nil, eyebrowLink: series,
+                DetailHero(item: shown, eyebrow: shown.isEpisode ? shown.seriesName : nil, showLink: series,
                            badgesSource: playbackSource) {
                     actions
                 }
@@ -142,7 +142,12 @@ struct ItemDetailView: View {
                     }
                     if !isGone, shown.isNotYetAvailable() { notYetAvailableNote }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
-                    if sources.count > 1 { versions }
+                    if detail != nil {
+                        TitleLinks(genres: related.genres(of: shown), collections: related.collections)
+                            #if os(tvOS)
+                            .pageRow("links", in: rowLayout)
+                            #endif
+                    }
                     if page.isEpisode, !isGone {
                         SeasonBrowser(episode: shown, reloads: reloads) { showEpisode($0) } onChange: { apply($0) }
                             #if os(tvOS)
@@ -151,17 +156,31 @@ struct ItemDetailView: View {
                             .pageRow("episodes", in: rowLayout)
                             #endif
                     }
-                    if let people = detail?.people {
-                        CastShelf(people: people)
+                    ScenesShelf(item: shown, pickedSourceId: pickedSourceId, streamingSource: playbackSource)
+                        #if os(tvOS)
+                        .pageRow("scenes", in: rowLayout)
+                        #endif
+                    if let detail {
+                        CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
                             #if os(tvOS)
                             .pageRow("cast", in: rowLayout)
                             #endif
+                        TitleExtrasShelf(item: detail)
+                            #if os(tvOS)
+                            .pageRow("extras", in: rowLayout)
+                            #endif
                     }
-                    if !similar.isEmpty {
-                        MoreLikeThisShelf(title: shown, titles: $similar)
+                    if !related.similar.isEmpty {
+                        MoreLikeThisShelf(related: $related)
                         #if os(tvOS)
                         .pageRow("similar", in: rowLayout)
                         #endif
+                    }
+                    if !isGone {
+                        TitleInformation(item: shown, source: playbackSource, credits: Credits(people: detail?.people ?? []))
+                            #if os(tvOS)
+                            .pageRow("information", in: rowLayout)
+                            #endif
                     }
                 }
                 .padding(.bottom, Metrics.edge)
@@ -193,7 +212,7 @@ struct ItemDetailView: View {
         .task(id: page.id) { await load() }
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
-            similar = player.endedPlayback.applied(to: similar)
+            related.similar = player.endedPlayback.applied(to: related.similar)
             // Started here, the playback may have moved on to a later episode, which shows instead.
             if let watched = player.endedPlayback.episodeToShow(onPageOf: page) { return showEpisode(watched) }
             Task { await loadDetail() }
@@ -216,7 +235,6 @@ struct ItemDetailView: View {
             Group { secondaryButtons }
                 .layoutValue(key: SecondaryTitleAction.self, value: true)
         }
-        .focusCaptionRoom()
     }
 
     @ViewBuilder private var playButton: some View {
@@ -253,7 +271,8 @@ struct ItemDetailView: View {
         .accessibilityIdentifier("detail.checkAgain")
     }
 
-    /// Without the title on the server, only what its download still does.
+    /// Without the title on the server, only what its download still does. On Apple TV an
+    /// episode's leads to its show, as its logo does elsewhere.
     @ViewBuilder private var secondaryButtons: some View {
         let available = !shown.isNotYetAvailable()
         #if !os(tvOS)
@@ -264,9 +283,14 @@ struct ItemDetailView: View {
         if !isGone {
             WatchedButton(item: shown) { detail = $0 }
             FavoriteButton(item: shown) { detail = $0 }
+            #if os(tvOS)
+            if let series { GoToShowButton(show: series) }
+            #endif
             if available {
                 PlayElsewhereButton(subject: .title(shown, mediaSourceId: pickedSourceId))
-                    .help(PlayElsewhereSheet.title)
+            }
+            if available, sources.count > 1 {
+                VersionMenu(sources: sources, selection: Binding(get: { playbackSource?.id }, set: { pickedSourceId = $0 }))
             }
         }
     }
@@ -282,25 +306,8 @@ struct ItemDetailView: View {
             .padding(.horizontal, Metrics.edge)
     }
 
-    private var versions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(sources.count) Versions").font(.title3.weight(.semibold))
-                .accessibilityAddTraits(.isHeader)
-            VStack(alignment: .leading, spacing: 14) {
-                VersionPicker(sources: sources, selection: Binding(get: { playbackSource?.id }, set: { pickedSourceId = $0 }))
-            }
-            .padding()
-            .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 16))
-            Text("Plays and downloads from this page use the version picked here. Everywhere else, and once you leave the page, they start with the one closest to your quality settings.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, Metrics.edge)
-        .frame(maxWidth: 900, alignment: .leading)
-    }
-
-    /// The episode's show, which the name over its title leads to, opened on the episode's season.
-    /// From the details: a link names only the episode.
+    /// The episode's show, which its logo or name leads to, opened on the episode's season. From
+    /// the details: a link names only the episode.
     private var series: JellyfinItem? {
         guard shown.isEpisode, let seriesId = shown.seriesId else { return nil }
         let name = shown.seriesName ?? ""
@@ -327,7 +334,7 @@ struct ItemDetailView: View {
         pickedSourceId = nil
         loadError = nil
         isGone = false
-        if !sameTitle { similar = [] }
+        if !sameTitle { related = RelatedTitles() }
         picked = episode
         // Apple TV's focus moves to Play as the episode shows, and the page scrolls up after it.
         #if !os(tvOS)
@@ -344,19 +351,18 @@ struct ItemDetailView: View {
         detail = changed
     }
 
-    /// The details and the titles like it. Refreshing asks for both again, and has the season row
-    /// reload its episodes.
+    /// The details and what's around the title: titles like it, its genres and its collections.
+    /// Refreshing asks for both again, and has the season row reload its episodes.
     private func load(refreshing: Bool = false) async {
-        let titleId = page.titleId
         if refreshing { reloads += 1 }
         await loadDetail()
-        guard let session, !isGone, refreshing || similar.isEmpty || titleId != similarTitleId else { return }
+        guard let session, !isGone, refreshing || related.titleId != page.titleId else { return }
         do {
-            similar = try await session.client.similar(to: titleId, userId: session.userId, limit: MoreLikeThisShelf.length)
-            similarTitleId = titleId
+            related = try await RelatedTitles.load(for: detail ?? page, client: session.client, userId: session.userId,
+                                                   length: MoreLikeThisShelf.length)
         } catch {
             guard !error.isCancellation else { return }
-            similar = []
+            related = RelatedTitles()
             loadError = loadError ?? LoadFailure("Couldn't Load Titles Like This", error: error)
         }
     }
@@ -380,29 +386,6 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation, id == page.id else { return }
             loadError = LoadFailure("Couldn't Load the Details", error: error)
-        }
-    }
-}
-
-/// A title page's More Like This: the titles the server ranks as like it, as posters with the
-/// title's menu. See All, which lists more of them, is there only when the row may not have them
-/// all: the server doesn't say how many there are, so a row with as many as it asked for may not.
-struct MoreLikeThisShelf: View {
-    /// How many titles the row asks the server for.
-    static let length = 16
-
-    /// The title they're like.
-    let title: JellyfinItem
-    @Binding var titles: [JellyfinItem]
-
-    var body: some View {
-        Shelf(title: "More Like This", seeAll: titles.count >= Self.length ? .moreLike(title) : nil, items: titles,
-              cardWidth: Metrics.posterWidth) { other in
-            NavigationLink(value: other) { PosterCard(item: other) }
-                .buttonStyle(.artwork)
-                .titleMenu(other) { updated in
-                    if let index = titles.firstIndex(where: { $0.id == updated.id }) { titles[index] = updated }
-                }
         }
     }
 }
@@ -437,9 +420,29 @@ nonisolated struct SecondaryTitleAction: LayoutValueKey {
     static let defaultValue = false
 }
 
+/// Marks the button of a title's action row that takes up the rest of its row, Play, once the
+/// buttons don't all fit on one: on a phone, the full width of the page but for Start Over.
+nonisolated struct WidensTitleAction: LayoutValueKey {
+    static let defaultValue = false
+}
+
+extension VerticalAlignment {
+    /// The middle of a title action's button, above any caption under it, which the buttons in a
+    /// row of them line up by.
+    nonisolated static let titleAction = VerticalAlignment(TitleActionMiddle.self)
+}
+
+nonisolated private enum TitleActionMiddle: AlignmentID {
+    static func defaultValue(in context: ViewDimensions) -> CGFloat {
+        context[VerticalAlignment.center]
+    }
+}
+
 /// The buttons over a title's artwork: all in one row when they fit, or else Play's on a row above
 /// the rest's (`SecondaryTitleAction`), each going on to more rows as it needs, which at the
-/// largest text sizes puts one button on each. A layout rather than a choice of stacks keeps each
+/// largest text sizes puts one button on each. On rows of their own, Play widens to the rest of its
+/// row (`WidensTitleAction`). In a row the buttons line up by their middles, their captions under
+/// them (`VerticalAlignment.titleAction`). A layout rather than a choice of stacks keeps each
 /// button the same view however they're laid out, so focus stays on Play as the row rearranges,
 /// such as when Start Over joins it.
 struct TitleActionsLayout: Layout {
@@ -447,13 +450,15 @@ struct TitleActionsLayout: Layout {
 
     private struct Placement {
         let index: Int
-        let size: CGSize
+        var size: CGSize
+        /// How far down the button's middle is.
+        var middle: CGFloat
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let lines = arrange(subviews, width: proposal.width)
         let width = lines.map { line in line.reduce(0) { $0 + $1.size.width } + spacing * CGFloat(max(0, line.count - 1)) }.max() ?? 0
-        let height = lines.reduce(0) { $0 + lineHeight($1) } + spacing * CGFloat(max(0, lines.count - 1))
+        let height = lines.reduce(0) { $0 + lineHeight($1).total } + spacing * CGFloat(max(0, lines.count - 1))
         return CGSize(width: width, height: height)
     }
 
@@ -463,23 +468,32 @@ struct TitleActionsLayout: Layout {
             let height = lineHeight(line)
             var x = bounds.minX
             for placement in line {
-                subviews[placement.index].place(at: CGPoint(x: x, y: y + (height - placement.size.height) / 2),
+                subviews[placement.index].place(at: CGPoint(x: x, y: y + height.middle - placement.middle),
                                                 proposal: ProposedViewSize(placement.size))
                 x += placement.size.width + spacing
             }
-            y += height + spacing
+            y += height.total + spacing
         }
     }
 
-    private func lineHeight(_ line: [Placement]) -> CGFloat {
-        line.map(\.size.height).max() ?? 0
+    /// A line's height, and how far down the middles of its buttons are.
+    private func lineHeight(_ line: [Placement]) -> (total: CGFloat, middle: CGFloat) {
+        let above = line.map(\.middle).max() ?? 0
+        let below = line.map { $0.size.height - $0.middle }.max() ?? 0
+        return (above + below, above)
+    }
+
+    private func placement(_ index: Int, of subview: LayoutSubview, size: CGSize) -> Placement {
+        Placement(index: index, size: size, middle: subview.dimensions(in: ProposedViewSize(size))[.titleAction])
     }
 
     private func arrange(_ subviews: Subviews, width: CGFloat?) -> [[Placement]] {
         let ideal = subviews.map { $0.sizeThatFits(.unspecified) }
         let available = width ?? .infinity
         let oneRow = ideal.reduce(0) { $0 + $1.width } + spacing * CGFloat(max(0, ideal.count - 1))
-        if oneRow <= available { return [ideal.enumerated().map { Placement(index: $0.offset, size: $0.element) }] }
+        if oneRow <= available {
+            return [subviews.indices.map { placement($0, of: subviews[$0], size: ideal[$0]) }]
+        }
         var lines: [[Placement]] = []
         var line: [Placement] = []
         var lineWidth: CGFloat = 0
@@ -493,14 +507,29 @@ struct TitleActionsLayout: Layout {
                 lineWidth = 0
             }
             lineWidth += (line.isEmpty ? 0 : spacing) + size.width
-            line.append(Placement(index: index, size: size))
+            line.append(placement(index, of: subview, size: size))
         }
         if !line.isEmpty { lines.append(line) }
-        return lines
+        guard available.isFinite else { return lines }
+        return lines.map { widened($0, subviews: subviews, available: available) }
+    }
+
+    /// `line` with its widening button, if it has one, taking up the rest of the row.
+    private func widened(_ line: [Placement], subviews: Subviews, available: CGFloat) -> [Placement] {
+        guard let position = line.firstIndex(where: { subviews[$0.index][WidensTitleAction.self] }) else { return line }
+        let used = line.reduce(0) { $0 + $1.size.width } + spacing * CGFloat(max(0, line.count - 1))
+        guard available - used > 1 else { return line }
+        var line = line
+        let index = line[position].index
+        let width = line[position].size.width + available - used
+        let size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        line[position] = placement(index, of: subviews[index], size: CGSize(width: max(size.width, line[position].size.width), height: size.height))
+        return line
     }
 }
 
-/// Play, or Resume with the time left, plus Start Over when there's a position.
+/// Play, or Resume with the time left over a track of how far it got, plus Start Over beside it
+/// when there's a position.
 struct PlayButton: View {
     let item: JellyfinItem
     var mediaSourceId: String?
@@ -509,34 +538,32 @@ struct PlayButton: View {
     let focus: FocusState<Bool>.Binding
     #endif
     @Environment(PlayerCoordinator.self) private var player
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         Button {
             player.play(.item(item, mediaSourceId: mediaSourceId, loaded: item))
         } label: {
-            Label(label, systemImage: "play.fill")
-                .frame(minWidth: 120)
+            PlayLabel(title: label, progress: item.resumeSeconds != nil ? item.progress : nil)
         }
         .buttonStyle(.platformGlassProminent)
         .controlSize(.large)
-        // Its title on one line: the row's other buttons would otherwise take width it needs. At
-        // the accessibility text sizes, where one line can be wider than the screen, it wraps.
-        .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
         .accessibilityLabel(spokenLabel)
         .accessibilityInputLabels([item.resumeSeconds != nil ? "Resume" : "Play", label])
         .accessibilityIdentifier("detail.play")
         #if os(tvOS)
         .focused(focus)
         #endif
+        .layoutValue(key: WidensTitleAction.self, value: true)
         if item.resumeSeconds != nil {
             Button {
                 player.play(.item(item, mediaSourceId: mediaSourceId, fromBeginning: true, loaded: item))
             } label: {
                 Label("Start Over", systemImage: "arrow.counterclockwise")
             }
-            .buttonStyle(.platformGlass)
-            .controlSize(.large)
+            .titleActionStyle()
+            .actionCaption("Start Over")
+            .help("Start Over")
+            .accessibilityIdentifier("detail.startOver")
         }
     }
 
@@ -552,13 +579,41 @@ struct PlayButton: View {
     }
 }
 
-/// Marks a title watched or unwatched, the whole of a show or season.
+/// Play's words with its symbol, at least as wide as a short title's, and as wide as its row lets
+/// it be (`WidensTitleAction`); under them, for a resume, a thin track of how far it got.
+struct PlayLabel: View {
+    let title: String
+    /// How far a resume got, 0...1; nil for a play from the start.
+    var progress: Double?
+    var systemImage = "play.fill"
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Label(title, systemImage: systemImage)
+            if let progress {
+                Capsule()
+                    .fill(.foreground.opacity(0.25))
+                    .overlay(alignment: .leading) {
+                        GeometryReader { track in
+                            Capsule().fill(.foreground).frame(width: max(3, track.size.width * min(1, max(0, progress))))
+                        }
+                    }
+                    .frame(height: 3)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(minWidth: 120, maxWidth: .infinity)
+    }
+}
+
+/// Marks a title watched or unwatched. A whole show or season asks first, saying how many
+/// episodes that is, and then offers Undo (`WatchActions.setPlayedAfterAsking`).
 struct WatchedButton: View {
     let item: JellyfinItem
     /// Told of the change as it's made, and again of the item as it was if the server refuses it.
     let onChange: (JellyfinItem) -> Void
     /// Called once the server has the change, for what it changed besides the item, such as a
-    /// show's episodes.
+    /// show's episodes; and again once Undo has put them back.
     var afterChange: () async -> Void = {}
     @Environment(\.session) private var session
     @Environment(AppMessages.self) private var messages
@@ -567,14 +622,17 @@ struct WatchedButton: View {
 
     var body: some View {
         Button(action: press) {
-            Label("Watched", systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
-                .contentTransition(.symbolEffect(.replace))
+            Label {
+                Text("Watched")
+            } icon: {
+                Image(systemName: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle")
+                    .foregroundStyle(item.isPlayed ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .contentTransition(.symbolEffect(.replace))
+            }
         }
-        .buttonStyle(.platformGlass)
-        .controlSize(.large)
-        .labelStyle(.iconOnly)
+        .titleActionStyle()
         .sensoryFeedback(.selection, trigger: presses)
-        .focusCaption(item.isPlayed ? "Watched" : "Mark as Watched")
+        .actionCaption(item.isPlayed ? "Watched" : "Mark Watched")
         .help(item.isPlayed ? "Mark as Unwatched" : "Mark as Watched")
         // To VoiceOver and Voice Control a switch named Watched, on when watched. The button as
         // drawn would always read as on: SwiftUI takes a checkmark symbol for a selection.
@@ -591,8 +649,13 @@ struct WatchedButton: View {
 
     private func toggle() async {
         guard let session else { return }
-        await WatchActions.setPlayed(!item.isPlayed, on: item, session: session, messages: messages, onChange: onChange)
-        await afterChange()
+        if WatchActions.marksManyEpisodes(item) {
+            await WatchActions.setPlayedAfterAsking(!item.isPlayed, on: item, session: session, messages: messages,
+                                                    onChange: onChange, afterChange: afterChange)
+        } else {
+            await WatchActions.setPlayed(!item.isPlayed, on: item, session: session, messages: messages, onChange: onChange)
+            await afterChange()
+        }
     }
 }
 
@@ -608,15 +671,18 @@ struct FavoriteButton: View {
 
     var body: some View {
         Button(action: press) {
-            Label("Favorite", systemImage: item.isFavorite ? "heart.fill" : "heart")
-                .contentTransition(.symbolEffect(.replace))
-                .symbolEffect(.bounce, value: additions)
+            Label {
+                Text("Favorite")
+            } icon: {
+                Image(systemName: item.isFavorite ? "heart.fill" : "heart")
+                    .foregroundStyle(item.isFavorite ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: additions)
+            }
         }
-        .buttonStyle(.platformGlass)
-        .controlSize(.large)
-        .labelStyle(.iconOnly)
+        .titleActionStyle()
         .sensoryFeedback(.selection, trigger: presses)
-        .focusCaption(item.isFavorite ? "In Favorites" : "Add to Favorites")
+        .actionCaption(item.isFavorite ? "Favorited" : "Favorite")
         .help(item.isFavorite ? "Remove from Favorites" : "Add to Favorites")
         // To VoiceOver and Voice Control a switch named Favorite, on when it's one.
         .accessibilityRepresentation {
@@ -637,61 +703,95 @@ struct FavoriteButton: View {
     }
 }
 
-extension View {
-    /// What a round icon button does or is, under it on Apple TV while it has focus: there's no
-    /// pointer there for the Mac's help tag to show at. Elsewhere, nothing.
-    func focusCaption(_ caption: String) -> some View {
-        #if os(tvOS)
-        modifier(FocusCaption(caption: caption))
-        #else
-        self
-        #endif
-    }
-
-    /// Room under a row of buttons for the line `focusCaption` shows under them on Apple TV, so the
-    /// caption doesn't run into what's below. Elsewhere, nothing.
-    func focusCaptionRoom() -> some View {
-        #if os(tvOS)
-        VStack(alignment: .leading, spacing: FocusCaption.gap) {
-            self
-            Text(verbatim: " ").font(FocusCaption.font).hidden()
-        }
-        #else
-        self
-        #endif
-    }
-}
-
 #if os(tvOS)
-private struct FocusCaption: ViewModifier {
-    static let font = Font.caption
-    /// Between the button and its caption, clear of the button as focus lifts it.
-    static let gap: CGFloat = 6
+/// An episode's show, from its page's buttons: on Apple TV the show's logo over the episode isn't
+/// a button, which would put a stray stop for focus above Play.
+struct GoToShowButton: View {
+    let show: JellyfinItem
 
-    let caption: String
-    @FocusState private var isFocused: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        content
-            .focused($isFocused)
-            // From the button's leading edge, which keeps the first one's inside the page's margin.
-            .overlay(alignment: .bottomLeading) {
-                Text(caption)
-                    .font(Self.font)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                    .padding(.leading, 8)
-                    .alignmentGuide(.bottom) { $0[.top] - Self.gap }
-                    .opacity(isFocused ? 1 : 0)
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isFocused)
-                    // The button's name already says it.
-                    .accessibilityHidden(true)
-                    .allowsHitTesting(false)
-            }
+    var body: some View {
+        NavigationLink(value: show) {
+            Label("Go to Show", systemImage: "tv")
+        }
+        .titleActionStyle()
+        .actionCaption("Go to Show")
+        .accessibilityHint("Opens \(show.seriesName ?? show.name)")
+        .accessibilityIdentifier("detail.eyebrow")
     }
 }
 #endif
+
+extension View {
+    /// A round button of a title's actions: its symbol on glass, its name for VoiceOver and the
+    /// Mac's help tag.
+    func titleActionStyle() -> some View {
+        buttonStyle(.platformGlass)
+            .controlSize(.large)
+            .labelStyle(TitleActionLabelStyle())
+            .buttonBorderShape(.circle)
+    }
+
+    /// What a round button of a title's actions does or is, in a word or two under it, so no
+    /// button is a bare symbol and a state shows in words as well as in its symbol's fill.
+    func actionCaption(_ caption: String) -> some View {
+        modifier(ActionCaption(caption: caption))
+    }
+}
+
+/// A round button's symbol alone, in the room a round symbol takes, so a wide one such as Play
+/// On's makes no bigger a circle than the rest. Its title stays its name for VoiceOver.
+private struct TitleActionLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Label {
+            configuration.title
+        } icon: {
+            Image(systemName: "circle").hidden()
+                .overlay { configuration.icon }
+        }
+        .labelStyle(.iconOnly)
+    }
+}
+
+private struct ActionCaption: ViewModifier {
+    let caption: String
+    /// The buttons are over the hero's artwork, on its dark, in either appearance.
+    @Environment(\.actionsOverArtwork) private var overArtwork
+
+    func body(content: Content) -> some View {
+        VStack(spacing: Self.gap) {
+            content
+                .alignmentGuide(.titleAction) { $0[VerticalAlignment.center] }
+            Text(caption)
+                .font(Self.font)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize()
+                .environment(\.colorScheme, overArtwork ? .dark : colorScheme)
+                // The button's name already says it.
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private static var font: Font {
+        #if os(tvOS)
+        .caption.weight(.medium)
+        #else
+        .caption2.weight(.medium)
+        #endif
+    }
+
+    /// Between the button and its caption; on Apple TV clear of the button as focus lifts it.
+    private static var gap: CGFloat {
+        #if os(tvOS)
+        14
+        #else
+        6
+        #endif
+    }
+}
 
 #if !os(tvOS)
 /// Download, then the download's progress, then a way to delete it.
@@ -753,11 +853,10 @@ struct DownloadButton: View {
                 .help("Download")
             }
         }
-        .buttonStyle(.platformGlass)
-        .controlSize(.large)
-        .labelStyle(.iconOnly)
+        .titleActionStyle()
         .animation(.default, value: isDownloaded)
         .sensoryFeedback(trigger: isDownloaded) { was, now in now && !was ? .success : nil }
+        .actionCaption(isDownloaded ? "Downloaded" : jobs.first.map { $0.status == .failed ? "Failed" : "Downloading" } ?? "Download")
         .accessibilityIdentifier("detail.download")
     }
 

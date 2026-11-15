@@ -61,7 +61,8 @@ extension DownloadsSnapshot {
 extension DownloadsSnapshot.Title {
     init(_ job: DownloadJob) {
         self.init(itemId: job.itemId, type: job.item?.type ?? (job.isEpisode ? "Episode" : "Movie"),
-                  name: job.item?.name ?? job.title, title: job.title, subtitle: job.subtitle)
+                  name: job.item?.name ?? job.title, title: job.title, subtitle: job.subtitle,
+                  owner: job.owner.map(AppLink.Owner.init))
     }
 }
 

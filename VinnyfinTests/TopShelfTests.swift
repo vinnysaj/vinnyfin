@@ -107,11 +107,13 @@ struct TopShelfContentTests {
         let content = try #require(TopShelf.content(upNext: [movieInProgress], latestMovies: [],
                                                     latestShows: [newShow], session: session))
         let movie = content.sections[0].items[0]
-        #expect(movie.displayAction?.url == AppLink(.open, movieInProgress).url)
-        #expect(movie.playAction?.url == AppLink(.play, movieInProgress).url)
+        #expect(movie.displayAction?.url == AppLink(.open, movieInProgress, for: session.account).url)
+        #expect(movie.playAction?.url == AppLink(.play, movieInProgress, for: session.account).url)
         let show = content.sections[1].items[0]
-        #expect(show.displayAction?.url == AppLink(.open, newShow).url)
+        #expect(show.displayAction?.url == AppLink(.open, newShow, for: session.account).url)
         #expect(show.playAction == nil)
+        // Picked after someone else signs in, a title opens under the sign-in it's from.
+        #expect(movie.displayAction.flatMap { AppLink($0.url) }?.owner == AppLink.Owner(serverId: "server", userId: "u"))
     }
 
     @Test func leavesOutEmptyRowsAndHasNothingForAnEmptyLibrary() throws {

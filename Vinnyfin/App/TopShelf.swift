@@ -10,7 +10,7 @@ nonisolated enum TopShelf {
     static let itemsPerSection = 12
 
     /// Has the system ask the extension again. The app calls it as it leaves the screen, since what
-    /// was watched and who is signed in may have changed while it was open.
+    /// was watched may have changed while it was open, and as the sign-in in use changes.
     static func reload() {
         TVTopShelfContentProvider.topShelfContentDidChange()
     }
@@ -55,8 +55,9 @@ nonisolated enum TopShelf {
             shelfItem.setImageURL(url, for: traits)
         }
         if let progress = item.progress { shelfItem.playbackProgress = progress }
-        shelfItem.displayAction = TVTopShelfAction(url: AppLink(.open, item).url)
-        if item.isPlayable { shelfItem.playAction = TVTopShelfAction(url: AppLink(.play, item).url) }
+        // Under the sign-in it's from, whichever is in use when it's picked.
+        shelfItem.displayAction = TVTopShelfAction(url: AppLink(.open, item, for: session.account).url)
+        if item.isPlayable { shelfItem.playAction = TVTopShelfAction(url: AppLink(.play, item, for: session.account).url) }
         return shelfItem
     }
 }

@@ -1,8 +1,10 @@
 import Combine
 import Foundation
 import GroupActivities
+import ImageIO
 import Observation
 import OSLog
+import SwiftUI
 
 /// Watching a server title together with the people on a FaceTime call. Each participant plays
 /// it from their own sign-in to the same server, in step: AVFoundation's playback coordinator
@@ -20,11 +22,21 @@ final class SharePlay {
         var cantWatch: [String]
     }
 
+    /// A group this device could join by switching to a sign-in kept here, to ask about.
+    struct SwitchOffer: Identifiable {
+        let id = UUID()
+        let activity: WatchTogether
+        /// The sign-ins kept here to the group's server, in the order they were made here.
+        let kept: [AccountStore.Account]
+    }
+
     /// A FaceTime call is on, so an activity started here goes to everyone on it.
     private(set) var isEligible = false
     private(set) var group: Group?
     /// Why this device couldn't join or start a group, to show.
     var problem: String?
+    /// The group to ask about switching sign-ins for, until it's answered.
+    private(set) var switchOffer: SwitchOffer?
 
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let player: PlayerCoordinator
@@ -41,6 +53,8 @@ final class SharePlay {
     /// A playback started here as a group, which plays once the session does.
     @ObservationIgnored private var pendingRequest: PlaybackRequest?
     @ObservationIgnored private var cantWatch: [UUID: CantWatch] = [:]
+    /// The session `switchOffer` asks about, not joined yet.
+    @ObservationIgnored private var offeredSession: GroupSession<WatchTogether>?
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "shareplay")
 
@@ -86,11 +100,33 @@ final class SharePlay {
                              itemId: itemId, title: title, subtitle: subtitle)
     }
 
+    /// The activity with the title's poster, for FaceTime's card of it, when the server gives it
+    /// within `previewTimeLimit`; as it is otherwise.
+    func withPreview(_ activity: WatchTogether) async -> WatchTogether {
+        guard activity.preview == nil, let session = accounts.session, session.account.serverId == activity.serverId else { return activity }
+        let url = session.client.imageURL(itemId: activity.itemId, tag: nil, maxWidth: Self.previewWidth)
+        var activity = activity
+        // The server scales it down to `previewWidth` itself.
+        activity.preview = try? await withTimeLimit(Self.previewTimeLimit) {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
+                  let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0
+            else { throw URLError(.cannotDecodeContentData) }
+            return data
+        }
+        if activity.preview == nil { Self.log.notice("Watching together without a preview of \(activity.title, privacy: .public)") }
+        return activity
+    }
+
+    private static let previewWidth = 400
+    private static let previewTimeLimit = Duration.seconds(2)
+
     /// Starts watching together, with everyone on the call, playing `request` here once it has
     /// started when it isn't playing already. False when it didn't start.
     @discardableResult
     func start(_ activity: WatchTogether, playing request: PlaybackRequest? = nil) async -> Bool {
         pendingRequest = request
+        let activity = await withPreview(activity)
         do {
             if try await activity.activate() { return true }
         } catch {
@@ -136,23 +172,30 @@ final class SharePlay {
 
     // MARK: The session
 
+    /// Joins the group when the sign-in in use is to its server. Otherwise, with sign-ins to it
+    /// kept here, asks whether to switch to one (`switchOffer`), and with none, tells the group
+    /// why this device can't watch, and the viewer.
     private func join(_ session: GroupSession<WatchTogether>) async {
         endSession()
+        if let unanswered = offeredSession {
+            offeredSession = nil
+            switchOffer = nil
+            await refuse(unanswered)
+        }
         let activity = session.activity
         let access = activity.access(for: accounts.account)
-        let messenger = GroupSessionMessenger(session: session)
-        if let refusal = activity.refusal(access), let message = CantWatch(access) {
-            // Joins only to tell the others why, then leaves.
-            session.join()
-            do {
-                try await messenger.send(message)
-            } catch {
-                Self.log.error("Couldn't tell the group why this device can't join: \(error.localizedDescription, privacy: .public)")
+        if let refusal = activity.refusal(access) {
+            let kept = activity.keptSignIns(among: accounts.saved)
+            guard kept.isEmpty else {
+                offeredSession = session
+                switchOffer = SwitchOffer(activity: activity, kept: kept)
+                return
             }
-            session.leave()
+            await refuse(session)
             problem = refusal
             return
         }
+        let messenger = GroupSessionMessenger(session: session)
         self.session = session
         self.messenger = messenger
         cantWatch = [:]
@@ -201,6 +244,46 @@ final class SharePlay {
         ]
         // Where the group started here, this device sets the group's timing as it plays.
         follow(activity, waitsForGroup: !session.isLocallyInitiated)
+    }
+
+    /// Joins only to tell the others why this device can't watch with them, then leaves.
+    private func refuse(_ session: GroupSession<WatchTogether>) async {
+        guard let message = CantWatch(session.activity.access(for: accounts.account)) else { return }
+        let messenger = GroupSessionMessenger(session: session)
+        session.join()
+        do {
+            try await messenger.send(message)
+        } catch {
+            Self.log.error("Couldn't tell the group why this device can't join: \(error.localizedDescription, privacy: .public)")
+        }
+        session.leave()
+    }
+
+    /// Switches to `account`, one of `switchOffer`'s, once what plays here has stopped, and joins
+    /// the group with it.
+    func joinOffered(as account: AccountStore.Account) {
+        guard let session = offeredSession else { return }
+        offeredSession = nil
+        switchOffer = nil
+        Task {
+            await player.dismiss()
+            do {
+                try accounts.switchTo(account)
+            } catch {
+                problem = error.localizedDescription
+                await refuse(session)
+                return
+            }
+            await join(session)
+        }
+    }
+
+    /// Stays with the sign-in in use, and tells the group why this device can't watch with it.
+    func declineOffer() {
+        guard let session = offeredSession else { return }
+        offeredSession = nil
+        switchOffer = nil
+        Task { await refuse(session) }
     }
 
     /// Plays what the group plays, unless it already plays here; waiting for the group's timing,
@@ -260,6 +343,12 @@ final class SharePlay {
               let activity = activity(itemId: itemId, title: item.titleWithYear, subtitle: PlaybackResolver.subtitle(item)),
               activity.serverId == session.activity.serverId else { return }
         session.activity = activity
+        // FaceTime's card shows the new title's poster once it's in, without holding the group up.
+        Task {
+            let shown = await withPreview(activity)
+            guard shown.preview != nil, self.session === session, session.activity.itemId == itemId else { return }
+            session.activity = shown
+        }
     }
 
     private func tell(_ message: CantWatch) {
@@ -287,5 +376,42 @@ final class SharePlay {
         session = nil
         heldItemId = nil
         group = nil
+    }
+}
+
+extension View {
+    /// Asks whether to switch to a sign-in kept here to watch with a group playing from its
+    /// server (`SharePlay.switchOffer`), and says why this device can't watch with one otherwise.
+    func watchTogetherAlerts() -> some View {
+        modifier(WatchTogetherAlerts())
+    }
+}
+
+private struct WatchTogetherAlerts: ViewModifier {
+    @Environment(SharePlay.self) private var sharePlay
+    @Environment(AccountStore.self) private var accounts
+    @Environment(PlayerCoordinator.self) private var player
+
+    func body(content: Content) -> some View {
+        content
+            // Each button answers the offer, which takes it away.
+            .alert(sharePlay.switchOffer.map(title) ?? "", isPresented: Binding(get: { sharePlay.switchOffer != nil }, set: { _ in }),
+                   presenting: sharePlay.switchOffer) { offer in
+                ForEach(offer.kept, id: \.tokenKey) { account in
+                    Button("Switch to \(account.userName)") { sharePlay.joinOffered(as: account) }
+                }
+                Button("Not Now", role: .cancel) { sharePlay.declineOffer() }
+            } message: { offer in
+                Text(offer.activity.switchQuestion(signedIn: accounts.account, kept: offer.kept, isPlaying: player.presented != nil))
+            }
+            .alert("Can't Watch Together", isPresented: Binding(get: { sharePlay.problem != nil }, set: { if !$0 { sharePlay.problem = nil } })) {
+                Button("OK") { sharePlay.problem = nil }
+            } message: {
+                Text(sharePlay.problem ?? "")
+            }
+    }
+
+    private func title(_ offer: SharePlay.SwitchOffer) -> String {
+        offer.kept.count == 1 ? "Watch Together as \(offer.kept[0].userName)?" : "Watch Together on \(offer.activity.serverName)?"
     }
 }

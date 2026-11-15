@@ -230,8 +230,8 @@ final class SpotlightTitles {
         return try await (titles, episodes)
     }
 
-    /// The entries the plan puts in Spotlight, by id: what's being watched and downloaded in
-    /// any library, then the whole library or the part of it the plan keeps.
+    /// The entries the plan puts in Spotlight, by id: what's being watched, and what this sign-in
+    /// downloaded, in any library, then the whole library or the part of it the plan keeps.
     private func gather(_ plan: SpotlightPlan, session: ServerSession, key: SpotlightLedger.AccountKey) async throws -> [String: SpotlightEntry] {
         var entries: [String: SpotlightEntry] = [:]
         func add(_ items: [JellyfinItem], priority: Int) {
@@ -246,9 +246,9 @@ final class SpotlightTitles {
         let watching = try await client.upNext(userId: userId, limit: SpotlightPlan.inProgressLimit).items
         try ensureCurrent(key)
         add(watching, priority: SpotlightEntry.watchingPriority)
-        let jobs = downloads.jobs
-        let downloadedIds = jobs.map(\.itemId)
-        let watchedShowIds = watching.compactMap(\.seriesId) + jobs.compactMap(\.seriesId)
+        let downloaded = SpotlightPlan.downloads(downloads.jobs, of: session.account)
+        let downloadedIds = downloaded.itemIds
+        let watchedShowIds = watching.compactMap(\.seriesId) + downloaded.showIds
 
         switch plan {
         case .everything:
@@ -430,6 +430,13 @@ nonisolated enum SpotlightPlan: String, Codable, Sendable {
         } else {
             self = .personal
         }
+    }
+
+    /// The titles `account` downloaded, and their shows, which go in whatever the plan and at
+    /// the top. Another sign-in's downloads on the device are theirs alone, and stay out.
+    static func downloads(_ jobs: [DownloadJob], of account: AccountStore.Account) -> (itemIds: [String], showIds: [String]) {
+        let own = jobs.filter { $0.belongs(to: account) }
+        return (own.map(\.itemId), own.compactMap(\.seriesId))
     }
 
     /// Items of `types` as an entry needs them, by name.

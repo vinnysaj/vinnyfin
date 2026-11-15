@@ -159,4 +159,16 @@ nonisolated struct PlayerVolume: Equatable {
     mutating func toggleMute() {
         isMuted.toggle()
     }
+
+    /// To `level`, as a slider sets it; unmutes.
+    mutating func set(_ level: Float) {
+        isMuted = false
+        self.level = min(max(level, 0), 1)
+    }
+
+    /// The speaker it shows: struck through while nothing plays, else with as many waves lit as
+    /// the level (`Image(systemName:variableValue:)`).
+    var symbol: String {
+        output == 0 ? "speaker.slash.fill" : "speaker.wave.3.fill"
+    }
 }

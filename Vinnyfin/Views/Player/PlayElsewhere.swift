@@ -109,6 +109,11 @@ struct PlayElsewhereSheet: View {
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 380)
+        #elseif os(visionOS)
+        // SharePlay's section, with room for the rows of a group under way, in a sheet fitted to
+        // it rather than a tall one over the picture: a list has no height of its own to fit to.
+        .frame(width: 540, height: 400)
+        .presentationSizing(.fitted)
         #endif
         #if os(iOS) || os(macOS)
         .task { await refreshWhileOpen() }

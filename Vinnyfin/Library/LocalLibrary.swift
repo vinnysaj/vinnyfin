@@ -14,6 +14,11 @@ final class LocalLibrary {
         var openedAt: Date
 
         var historyKey: String { WatchHistory.fileKey(name: name, size: size) }
+
+        /// Plays the file, titled by its name.
+        var request: PlaybackRequest {
+            PlaybackRequest(source: .file(bookmark: bookmark, name: name), title: (name as NSString).deletingPathExtension)
+        }
     }
 
     private(set) var recents: [Recent] = []
@@ -66,6 +71,20 @@ final class LocalLibrary {
 
     func remove(_ recent: Recent) {
         recents.removeAll { $0.id == recent.id }
+        save()
+    }
+
+    /// How many files File › Open Recent lists on the Mac, as its apps do by default.
+    static let openRecentLimit = 10
+
+    /// The files File › Open Recent lists, the last opened first.
+    var openRecent: [Recent] {
+        Array(recents.prefix(Self.openRecentLimit))
+    }
+
+    /// Forgets every file opened, as Open Recent's Clear Menu does.
+    func clearRecents() {
+        recents.removeAll()
         save()
     }
 

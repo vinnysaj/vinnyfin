@@ -37,11 +37,12 @@ nonisolated enum EpisodesLayout {
     }
 }
 
-#if os(iOS) || os(macOS)
+#if !os(tvOS)
 /// The show's episodes in the player, from the Episodes button: on a phone held upright, a list in
 /// a sheet over the empty half of the screen below the picture; on a wider screen, a drawer of
-/// them along the bottom, above the timeline, or over it where the screen is short. Previous and
-/// Next play the episodes either side of this one, and any episode picked plays in its place.
+/// them along the bottom, above the timeline, or over it where the screen is short; on Vision Pro,
+/// the drawer in a popover from the button. Previous and Next play the episodes either side of
+/// this one, and any episode picked plays in its place.
 struct EpisodesPanel: View {
     typealias Form = EpisodesLayout.Form
 
@@ -104,17 +105,20 @@ struct EpisodesPanel: View {
     }
 }
 
-/// The drawer's and the rail's glass; the sheet has its own.
+/// The drawer's and the rail's glass; the sheet has its own, and so has a popover, which is no
+/// wider than this: a wider drawer is cut off at both ends.
 private struct DrawerGlass: ViewModifier {
     let isDrawer: Bool
 
     func body(content: Content) -> some View {
-        if isDrawer {
+        if !isDrawer {
+            content
+        } else if PlayerPanel.episodes.opensInPopover {
+            content.frame(width: 720)
+        } else {
             content
                 .frame(maxWidth: 1100)
                 .platformGlass(in: .rect(cornerRadius: 28))
-        } else {
-            content
         }
     }
 }

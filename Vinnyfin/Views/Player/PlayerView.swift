@@ -58,6 +58,8 @@ struct PlayerView: View {
     #endif
     #if os(macOS)
     @State private var isFullScreen = false
+    /// The window floats above other windows, as Playback › Float on Top has it.
+    @State private var floatsOnTop = false
     #endif
     /// Where the controls' bottom bar starts, in global coordinates.
     @State private var bottomBarTop: CGFloat?
@@ -301,12 +303,12 @@ struct PlayerView: View {
                 .frame(width: 0, height: 0)
                 .sheet(isPresented: episodesSheet) { episodesSheetContent }
             #endif
-            if panel == .quality {
+            if panel == .quality, !PlayerPanel.quality.opensInPopover {
                 placed(.quality, opensFrom: Self.qualityButtonIsAtTop ? .top : .bottom) { room in
                     QualityPanel(model: model, room: room) { closePanel() }
                 }
             }
-            if let panel, panel.isTrackPanel {
+            if let panel, panel.isTrackPanel, !panel.opensInPopover {
                 placed(panel, opensFrom: .bottom) { room in
                     TrackPanel(model: model, panel: panel, room: room) { closePanel() }
                 }
@@ -351,6 +353,9 @@ struct PlayerView: View {
             controlsOrnament
         }
         .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
+        // The window's grab bar and close button go with the controls, off the picture and out
+        // of the dark theater, as the system player's do.
+        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         // A new picture is flat until the screen showing it finds otherwise.
         .onReceive(model.engine.$currentAVPlayer.removeDuplicates { $0 === $1 }) { _ in coordinator.pictureIsStereo = false }
         .onChange(of: coordinator.screenTaps) { toggleControls() }
@@ -394,7 +399,8 @@ struct PlayerView: View {
         }
         // The window's close, minimize and zoom buttons go with the controls, off the picture.
         .background(WindowButtons(areHidden: !controlsVisible))
-        .background(PlayerWindowShape(videoSize: model.videoSize) { isFullScreen = $0 })
+        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop,
+                                      onWindow: { if let window = $0 { coordinator.playerWindow = window } }) { isFullScreen = $0 })
         .environment(\.playerIsFullScreen, isFullScreen)
         #endif
         #if os(tvOS)
@@ -489,6 +495,7 @@ struct PlayerView: View {
             return .handled
         }
         .focusedValue(\.player, PlayerCommandTarget(model: model, fillsScreen: fillsScreen, isFullScreen: isWindowFullScreen,
+                                                    floatsOnTop: isFloatingOnTop, pictureInPicture: pictureInPictureAction,
                                                     perform: perform))
         .handoffPlayback(model)
         #endif
@@ -926,8 +933,7 @@ struct PlayerView: View {
     /// A panel over the controls, by the button that opened it: above a button along the bottom,
     /// growing upward over the timeline and below the top bar, or below one in the top bar, down
     /// to the bottom bar; where the band between the bars is short, as far as the screen goes.
-    /// Without its button's place, as on Vision Pro, whose controls are below the window, it
-    /// keeps to the band between the bars at the trailing edge.
+    /// Without its button's place it keeps to the band between the bars at the trailing edge.
     ///
     /// - Parameters:
     ///   - edge: The edge it grows from as it opens: its button's.
@@ -1074,14 +1080,20 @@ struct PlayerView: View {
     private enum PictureCover: Equatable {
         case starting
         case airPlay(receiver: String)
+        /// The Mac's Picture in Picture window has the video. The player window goes off screen
+        /// meanwhile (`PlayerCoordinator`); this is what it shows as it goes and as it comes back.
+        case pictureInPicture
     }
 
     /// Why the title's picture stands in for the video, when it does: the title is starting, or
-    /// its picture is being rebuilt after the background, which looks the same; or AirPlay has the
-    /// video on another screen.
+    /// its picture is being rebuilt after the background, which looks the same; AirPlay has the
+    /// video on another screen; or on the Mac Picture in Picture has it.
     private var pictureCover: PictureCover? {
         #if os(iOS) || os(macOS)
         if externalPlayback.isActive { return .airPlay(receiver: externalPlayback.receiverName) }
+        #endif
+        #if os(macOS)
+        if coordinator.pictureInPicture.isActive { return .pictureInPicture }
         #endif
         return isStartingTitle || model.isRestoringPicture ? .starting : nil
     }
@@ -1098,6 +1110,16 @@ struct PlayerView: View {
                 #if os(iOS) || os(macOS)
                 AirPlayCaption(receiverName: receiver)
                 #endif
+            case .pictureInPicture:
+                Label {
+                    Text("Playing in Picture in Picture")
+                        .font(.title3.weight(.semibold))
+                } icon: {
+                    Image(systemName: "pip").font(.title)
+                }
+                .foregroundStyle(.white)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("player.pictureInPicture.cover")
             }
         }
         .padding(.trailing, captionPlace.trailingInset)
@@ -1410,9 +1432,26 @@ struct PlayerView: View {
             model.skip(by: -PlayerModel.skipInterval)
         case .skipForward:
             model.skip(by: PlayerModel.skipInterval)
+        case .previousEpisode:
+            guard model.item?.isEpisode == true else { return }
+            Task { await model.playPreviousEpisode() }
         case .nextEpisode:
             guard let next = model.nextEpisode else { return }
             Task { await model.play(next) }
+        case .previousChapter:
+            guard !model.chapters.isEmpty else { return }
+            model.seek(to: ChapterMark.previous(in: model.chapters, before: model.clock.time)?.start ?? 0)
+        case .nextChapter:
+            guard let next = ChapterMark.next(in: model.chapters, after: model.clock.time) else { return }
+            model.seek(to: next.start)
+        case .pictureInPicture:
+            pictureInPictureAction?.toggle()
+            return
+        case .floatOnTop:
+            #if os(macOS)
+            floatsOnTop.toggle()
+            #endif
+            return
         case .episodes:
             guard model.item?.isEpisode == true, fold == nil else { return }
             panel = panel == .episodes ? nil : .episodes
@@ -1455,6 +1494,14 @@ struct PlayerView: View {
     private var isWindowFullScreen: Bool {
         #if os(macOS)
         isFullScreen
+        #else
+        false
+        #endif
+    }
+
+    private var isFloatingOnTop: Bool {
+        #if os(macOS)
+        floatsOnTop
         #else
         false
         #endif

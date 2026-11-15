@@ -1397,6 +1397,12 @@ final class PlayerModel: Identifiable {
         engine.volume = volume.output
     }
 
+    /// To `level`, from nothing to 1, as the volume slider sets it.
+    func setVolume(_ level: Float) {
+        volume.set(level)
+        engine.volume = volume.output
+    }
+
     /// Turns the subtitles off, or back on: the track last shown, else the one the subtitle
     /// settings would choose, else the first that isn't only for foreign lines.
     func toggleSubtitles() {
@@ -2445,8 +2451,20 @@ final class PlayerModel: Identifiable {
 
     // MARK: Now Playing
 
-    /// On iPhone, iPad and Apple TV the engine's Now Playing session carries the card and the
-    /// remote commands; on the Mac and Vision Pro they go to the shared system centers.
+    /// The player serves the transport's remote commands and the Now Playing card on the shared
+    /// system centers itself, on either decode path: on the Mac and Vision Pro. On iPhone, iPad
+    /// and Apple TV they go through the engine's Now Playing session instead, and on the software
+    /// path, which has none, the engine serves them (`PlayerCoordinator.shareNowPlaying(with:)`).
+    nonisolated static var servesSharedTransport: Bool {
+        #if os(iOS) || os(tvOS)
+        false
+        #else
+        true
+        #endif
+    }
+
+    /// Where the transport's remote commands go: the engine's Now Playing session, or the shared
+    /// center (`servesSharedTransport`).
     private var commandCenter: MPRemoteCommandCenter? {
         #if os(iOS) || os(tvOS)
         engine.videoNowPlayingSession?.remoteCommandCenter

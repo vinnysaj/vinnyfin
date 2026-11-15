@@ -258,8 +258,9 @@ struct PlayerFlash: View {
 }
 #endif
 
-/// The Mac's player window, shaped like its picture: how small it goes, and how it takes the shape
-/// of a new picture without leaving the screen. Sizes are the window's content, in points.
+/// The player window on the Mac and Vision Pro, shaped like its picture: how small it goes, and
+/// how it takes the shape of a new picture, on the Mac without leaving the screen. Sizes are the
+/// window's content, in points.
 nonisolated enum PlayerWindowFrame {
     /// Along the picture's long side and its short side, the least the controls fit in.
     static let longSide: CGFloat = 480
@@ -303,6 +304,17 @@ nonisolated enum PlayerWindowFrame {
         origin.x = min(max(origin.x, visible.minX), visible.maxX - size.width)
         origin.y = min(max(origin.y, visible.minY), visible.maxY - size.height)
         return CGRect(origin: origin, size: size)
+    }
+
+    /// On Vision Pro, how wide the player window goes, in points.
+    static let visionWidths: ClosedRange<CGFloat> = 640...3200
+
+    /// On Vision Pro, the player window's size for a picture `aspect` wide for its height, from
+    /// its size `current`: as wide as it was, within `visionWidths`, and the picture's shape.
+    static func visionSize(from current: CGSize, aspect: CGFloat) -> CGSize {
+        guard aspect > 0 else { return current }
+        let width = min(max(current.width, visionWidths.lowerBound), visionWidths.upperBound).rounded()
+        return CGSize(width: width, height: (width / aspect).rounded())
     }
 }
 
@@ -384,6 +396,39 @@ struct PlayerWindowShape: NSViewRepresentable {
             guard abs(frame.minX - current.minX) > 1 || abs(frame.maxY - current.maxY) > 1
                     || abs(frame.width - current.width) > 1 || abs(frame.height - current.height) > 1 else { return }
             window.setFrame(frame, display: true, animate: true)
+        }
+    }
+}
+#endif
+
+#if os(visionOS)
+/// The player window on Vision Pro, which the picture fills edge to edge: it takes the shape of
+/// each new picture, and pulled to another size it keeps that shape. Pulled freely, it would show
+/// clear bands beside the picture and leave the controls' ornament off the picture's bottom edge.
+struct PlayerWindowShape: UIViewRepresentable {
+    /// The width over the height of the picture.
+    let aspect: CGFloat
+
+    func makeUIView(context: Context) -> ShapeView { ShapeView() }
+
+    func updateUIView(_ view: ShapeView, context: Context) {
+        view.aspect = aspect
+    }
+
+    final class ShapeView: UIView {
+        var aspect: CGFloat = 16.0 / 9.0 {
+            didSet { if aspect != oldValue { applyShape() } }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            applyShape()
+        }
+
+        private func applyShape() {
+            guard let window, let scene = window.windowScene else { return }
+            let size = PlayerWindowFrame.visionSize(from: window.bounds.size, aspect: aspect)
+            scene.requestGeometryUpdate(.Vision(size: size, resizingRestrictions: .uniform))
         }
     }
 }

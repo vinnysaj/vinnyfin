@@ -190,3 +190,20 @@ struct PanelPopoverTests {
         }
     }
 }
+
+/// Vision Pro's player window takes each picture's shape at the width it was.
+struct VisionPlayerWindowTests {
+    @Test func aNewShapeKeepsTheWidth() {
+        #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 1280, height: 720), aspect: 2.39) == CGSize(width: 1280, height: 536))
+        #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 1280, height: 536), aspect: 16.0 / 9.0) == CGSize(width: 1280, height: 720))
+    }
+
+    @Test func theWidthStaysWithinTheWindowsRange() {
+        #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 500, height: 300), aspect: 4.0 / 3.0) == CGSize(width: 640, height: 480))
+        #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 4000, height: 2250), aspect: 16.0 / 9.0) == CGSize(width: 3200, height: 1800))
+    }
+
+    @Test func noShapeLeavesTheSize() {
+        #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 1280, height: 720), aspect: 0) == CGSize(width: 1280, height: 720))
+    }
+}

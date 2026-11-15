@@ -330,7 +330,9 @@ struct PlayerWindow: View {
         #else
         // Shaped like the picture, which then fills it edge to edge, at any size it's pulled to.
         .aspectRatio(pictureAspectRatio, contentMode: .fit)
-        .frame(minWidth: 640, idealWidth: 1280, maxWidth: 3200)
+        .frame(minWidth: PlayerWindowFrame.visionWidths.lowerBound, idealWidth: 1280,
+               maxWidth: PlayerWindowFrame.visionWidths.upperBound)
+        .background(PlayerWindowShape(aspect: pictureAspectRatio))
         // Watching together, the Spatial Personas gather around this window.
         .groupActivityAssociation(.primary(PlayerWindow.id))
         #endif

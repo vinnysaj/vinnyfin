@@ -574,16 +574,19 @@ struct DownloadNotificationTests {
     @Test func groupsAShowsEpisodesThatFinishTogether() {
         let notices = ReadyNotice.notices(for: [episode(1), episode(2), episode(3), job()], delivered: [:])
         #expect(notices.count == 2)
-        #expect(notices[0].body == "3 episodes of Port Ellery are ready to watch offline.")
+        #expect(notices[0].title == "Port Ellery")
+        #expect(notices[0].body == "3 episodes are ready to watch offline.")
         #expect(notices[0].link == AppLink(.open, JellyfinItem(id: "series-1", name: "Port Ellery", type: "Series")).url)
-        #expect(notices[1].body == "Big Test Movie (2024) is ready to watch offline.")
+        #expect(notices[1].title == "Big Test Movie (2024)")
+        #expect(notices[1].body == "Ready to watch offline.")
         #expect(notices[1].link == AppLink(.open, Samples.movie).url)
         #expect(!notices[0].isUpdate)
     }
 
     @Test func namesASingleEpisodeAndOpensIt() {
         let notice = ReadyNotice.notices(for: [episode(3)], delivered: [:])[0]
-        #expect(notice.body == "Port Ellery S01E03 is ready to watch offline.")
+        #expect(notice.title == "Port Ellery")
+        #expect(notice.body == "Episode 3 (S01E03) is ready to watch offline.")
         #expect(AppLink(notice.link)?.itemId == "ep3-series-1")
     }
 
@@ -592,7 +595,7 @@ struct DownloadNotificationTests {
         let first = ReadyNotice.notices(for: [episode(1), episode(2)], delivered: [:])[0]
         let next = ReadyNotice.notices(for: [episode(3)], delivered: [first.identifier: first.itemIds])[0]
         #expect(next.identifier == first.identifier)
-        #expect(next.body == "3 episodes of Port Ellery are ready to watch offline.")
+        #expect(next.body == "3 episodes are ready to watch offline.")
         #expect(next.isUpdate)
         // Downloading one again doesn't count it twice.
         #expect(ReadyNotice.notices(for: [episode(3)], delivered: [next.identifier: next.itemIds])[0].itemIds.count == 3)

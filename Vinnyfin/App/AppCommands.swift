@@ -282,6 +282,24 @@ struct AppCommands: Commands {
 #endif
 
 #if os(macOS)
+/// File › Open Recent: the video files opened last, the last first, as the Mac's apps list their
+/// documents. Clear Menu forgets them, from Downloads' list of them too, which is the same list.
+struct OpenRecentMenu: View {
+    let library: LocalLibrary
+    let player: PlayerCoordinator
+
+    var body: some View {
+        Menu("Open Recent") {
+            ForEach(library.openRecent) { recent in
+                Button(recent.name) { player.play(recent.request) }
+            }
+            Divider()
+            Button("Clear Menu") { library.clearRecents() }
+        }
+        .disabled(library.recents.isEmpty)
+    }
+}
+
 /// Portable TV in the View menu: on and off, and the library or YouTube while it's on, as the
 /// remote's switch has them.
 struct PortableTVCommands: Commands {

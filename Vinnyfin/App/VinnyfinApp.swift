@@ -35,6 +35,7 @@ struct VinnyfinApp: App {
             CommandGroup(after: .newItem) {
                 Button("Open File…") { appDelegate.openFilePanel() }
                     .keyboardShortcut("o")
+                OpenRecentMenu(library: appDelegate.localLibrary, player: appDelegate.player)
             }
             #endif
             SidebarCommands()

@@ -274,7 +274,10 @@ struct SeriesView: View {
         WatchedButton(item: shown) { detail = $0 } afterChange: { await reloadWatchState() }
         FavoriteButton(item: shown) { detail = $0 }
         if let playTarget {
-            PlayElsewhereButton(subject: .title(playTarget, mediaSourceId: nil))
+            #if os(iOS) || os(macOS)
+            PlayOnButton(subject: .title(playTarget, mediaSourceId: nil))
+            #endif
+            SharePlayButton(subject: .title(playTarget, mediaSourceId: nil))
         }
     }
 

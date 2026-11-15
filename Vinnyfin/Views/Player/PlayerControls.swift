@@ -19,11 +19,11 @@ enum PlayerFocus: Hashable {
 }
 #endif
 
-/// The player's controls over the picture: close and title along the top, transport in the
-/// middle, the timeline and track menus along the bottom. Below the fold of an iPhone Duo
-/// standing half open they sit under the picture instead, with the show's episodes, and on
-/// Vision Pro on a pane of glass below the window, with the transport in the bottom row. On Apple
-/// TV the timeline can show by itself, as the remote moves it with the controls hidden.
+/// The player's controls over the picture: close and title along the top, transport in the middle,
+/// the timeline and track menus along the bottom. Below the fold of an iPhone Duo standing half
+/// open they sit under the picture instead, larger, with the show's episodes, and on Vision Pro on
+/// a pane of glass below the window; in both the transport is in the bottom row. On Apple TV the
+/// timeline can show by itself, as the remote moves it with the controls hidden.
 struct PlayerControls: View {
     let model: PlayerModel
     @Binding var fillsScreen: Bool
@@ -37,8 +37,11 @@ struct PlayerControls: View {
     let onInteraction: () -> Void
     /// Picture in Picture's button; nil where the player has none.
     let pictureInPicture: PictureInPictureButton?
-    /// Opens Play On and SharePlay; nil when the playback is only this device's, or on Apple TV.
-    let playElsewhere: (() -> Void)?
+    /// Opens Play On; nil when the playback is only this device's, or where there's no Play On.
+    let playOn: (() -> Void)?
+    /// SharePlay's button, which shows only on a FaceTime call or while watching together
+    /// (`SharePlay.isOffered`); nil when the playback is only this device's, or on Apple TV.
+    let watchTogether: (() -> Void)?
     var isBelowFold = false
     #if os(tvOS)
     /// The player's focus, which the remote moves between the controls. Moving counts as using
@@ -178,14 +181,14 @@ struct PlayerControls: View {
     }
 
     #if os(iOS)
+    /// Clear of the fold, the controls sit in the half screen below it, larger than over the
+    /// picture, as they're reached across a desk; the transport in the middle of the row of
+    /// buttons leaves room for the episodes.
     private var belowFold: some View {
-        VStack(spacing: 16) {
-            VStack(spacing: 12) {
+        VStack(spacing: 20) {
+            VStack(spacing: 16) {
                 topBar
-                if !isFailed {
-                    bottomBar
-                    transport
-                }
+                if !isFailed { bottomBar }
             }
             .padding(.horizontal, Metrics.playerInset)
             if let item = model.item, item.isEpisode {
@@ -193,7 +196,7 @@ struct PlayerControls: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.top, 16)
+        .padding(.top, 28)
     }
     #endif
 
@@ -257,21 +260,38 @@ struct PlayerControls: View {
                     #else
                     if !isTitleOwnRow { qualityButton }
                     #endif
-                    if let playElsewhere {
+                    if let watchTogether, sharePlay.isOffered {
                         Button {
-                            playElsewhere()
+                            watchTogether()
                             onInteraction()
                         } label: {
-                            symbol(PlayElsewhereSheet.symbol(sharePlay))
+                            symbol(SharePlay.symbol)
                         }
                         .buttonStyle(.platformGlass)
                         .buttonBorderShape(.circle)
-                        .controlSize(.large)
-                        .accessibilityLabel(PlayElsewhereSheet.title)
+                        .accessibilityLabel(SharePlay.buttonTitle)
+                        .accessibilityHint(sharePlay.group == nil ? "Watches with everyone on the call" : "")
                         .accessibilityShowsLargeContentViewer()
-                        .accessibilityIdentifier("player.playElsewhere")
-                        .playerHelp(PlayElsewhereSheet.title)
+                        .accessibilityIdentifier("player.sharePlay")
+                        .playerHelp(sharePlay.group == nil ? "Watch Together on This Call" : SharePlay.buttonTitle)
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                     }
+                    #if os(iOS) || os(macOS)
+                    if let playOn {
+                        Button {
+                            playOn()
+                            onInteraction()
+                        } label: {
+                            symbol(PlayOnSheet.symbol)
+                        }
+                        .buttonStyle(.platformGlass)
+                        .buttonBorderShape(.circle)
+                        .accessibilityLabel(PlayOnSheet.title)
+                        .accessibilityShowsLargeContentViewer()
+                        .accessibilityIdentifier("player.playOn")
+                        .playerHelp(PlayOnSheet.title)
+                    }
+                    #endif
                     #if os(iOS) || os(macOS)
                     RoutePicker()
                     if let pictureInPicture {
@@ -284,7 +304,6 @@ struct PlayerControls: View {
                         }
                         .buttonStyle(.platformGlass)
                         .buttonBorderShape(.circle)
-                        .controlSize(.large)
                         .disabled(!pictureInPicture.isPossible && !pictureInPicture.isActive)
                         .accessibilityLabel(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                         .accessibilityShowsLargeContentViewer()
@@ -293,8 +312,8 @@ struct PlayerControls: View {
                     }
                     #endif
                     #if os(iOS)
-                    // Last, where it shows by itself as the phone turns against it.
-                    RotationLockButton(onUse: onInteraction)
+                    // Last, where it shows by itself as the phone turns out of the player's shape.
+                    RotateButton(onUse: onInteraction)
                     #endif
                 }
                 .dynamicTypeSize(...Self.largestControlSize)
@@ -313,6 +332,9 @@ struct PlayerControls: View {
                 #endif
             }
         }
+        .controlSize(controlSize)
+        .environment(\.playerSymbolSide, symbolSide)
+        .animation(.snappy, value: sharePlay.isOffered)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { topBarBottom = $0 }
     }
 
@@ -378,7 +400,6 @@ struct PlayerControls: View {
         }
         .buttonStyle(.platformGlass)
         .buttonBorderShape(.circle)
-        .controlSize(.large)
         .accessibilityLabel("Close")
         .accessibilityShowsLargeContentViewer()
         .accessibilityIdentifier("player.close")
@@ -392,12 +413,11 @@ struct PlayerControls: View {
 
     #if !os(tvOS)
     private var transport: some View {
-        // Smaller below the fold, where it shares the half screen with the episodes, and in
-        // Vision Pro's bar, where it shares a row with the other buttons.
+        // Smaller in Vision Pro's bar, where it shares a row with the other buttons.
         #if os(visionOS)
         let scale: CGFloat = 0.6
         #else
-        let scale: CGFloat = isBelowFold ? 0.75 : 1
+        let scale: CGFloat = 1
         #endif
         return HStack(spacing: 44 * scale) {
             transportButton("gobackward.10", label: "Back 10 Seconds", size: 30 * scale,
@@ -502,70 +522,14 @@ struct PlayerControls: View {
             #else
             Scrubber(model: model, onInteraction: onInteraction)
             #endif
-            HStack(spacing: Self.buttonSpacing) {
-                #if os(tvOS)
-                Button {
-                    model.togglePlayPause()
-                    onInteraction()
-                } label: {
-                    symbol(playPauseSymbol)
-                        .contentTransition(.symbolEffect(.replace))
-                }
-                .buttonStyle(.platformGlass)
-                .accessibilityLabel(playPauseLabel)
-                .focused(focus, equals: .playPause)
-                #endif
-                trackMenus
-                #if os(tvOS)
-                if !model.qualityOptions.isEmpty {
-                    panelButton(.quality, identifier: "player.quality", text: model.qualityLabel,
-                                value: model.qualityStatus?.summary)
-                }
-                #endif
-                Spacer()
-                #if os(macOS) || os(visionOS)
-                VolumeControl(model: model, onInteraction: onInteraction)
-                #endif
-                episodeButtons
-                #if os(iOS)
-                Button {
-                    fillsScreen.toggle()
-                    onInteraction()
-                } label: {
-                    symbol(fillsScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                }
-                .buttonStyle(.platformGlass)
-                .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
-                .accessibilityShowsLargeContentViewer()
-                #elseif os(macOS)
-                Button {
-                    NSApp.keyWindow?.toggleFullScreen(nil)
-                    onInteraction()
-                } label: {
-                    symbol(isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                }
-                .buttonStyle(.platformGlass)
-                .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Full Screen")
-                .help(PlayerCommand.fullScreen.tooltip(isFullScreen ? "Exit Full Screen" : "Full Screen"))
-                #endif
-                #if os(visionOS)
-                CinemaButton(onUse: onInteraction)
-                #endif
+            #if os(iOS)
+            // Below the fold, the transport is in the middle of the row, which is as tall as it.
+            ZStack {
+                buttonRow
+                if isBelowFold { transport }
             }
-            // Each a circle of glass, like the buttons along the top.
-            .buttonBorderShape(.circle)
-            .controlSize(controlSize)
-            .dynamicTypeSize(...Self.largestControlSize)
-            // Hidden, they stay focusable: focus leaves the timeline only as `onTimelineMove`
-            // sends it, which shows them first. Disabled, they couldn't take it as they reappear.
-            .opacity(showsOnlyTimeline ? 0 : 1)
-            .accessibilityHidden(showsOnlyTimeline)
-            #if os(tvOS)
-            .disabled(holdsFocusOnTimeline)
-            #endif
-            #if os(visionOS)
-            // In the middle of the row, whatever is at its ends.
-            .overlay { transport.controlSize(controlSize) }
+            #else
+            buttonRow
             #endif
         }
         #if os(tvOS)
@@ -573,6 +537,74 @@ struct PlayerControls: View {
         .disabled(panel != nil)
         #endif
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { bottomBarTop = $0 }
+    }
+
+    private var buttonRow: some View {
+        HStack(spacing: Self.buttonSpacing) {
+            #if os(tvOS)
+            Button {
+                model.togglePlayPause()
+                onInteraction()
+            } label: {
+                symbol(playPauseSymbol)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.platformGlass)
+            .accessibilityLabel(playPauseLabel)
+            .focused(focus, equals: .playPause)
+            #endif
+            trackMenus
+            #if os(tvOS)
+            if !model.qualityOptions.isEmpty {
+                panelButton(.quality, identifier: "player.quality", text: model.qualityLabel,
+                            value: model.qualityStatus?.summary)
+            }
+            #endif
+            Spacer()
+            #if os(macOS) || os(visionOS)
+            VolumeControl(model: model, onInteraction: onInteraction)
+            #endif
+            episodeButtons
+            #if os(iOS)
+            Button {
+                fillsScreen.toggle()
+                onInteraction()
+            } label: {
+                symbol(fillsScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            }
+            .buttonStyle(.platformGlass)
+            .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
+            .accessibilityShowsLargeContentViewer()
+            #elseif os(macOS)
+            Button {
+                NSApp.keyWindow?.toggleFullScreen(nil)
+                onInteraction()
+            } label: {
+                symbol(isFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+            }
+            .buttonStyle(.platformGlass)
+            .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Full Screen")
+            .help(PlayerCommand.fullScreen.tooltip(isFullScreen ? "Exit Full Screen" : "Full Screen"))
+            #endif
+            #if os(visionOS)
+            CinemaButton(onUse: onInteraction)
+            #endif
+        }
+        // Each a circle of glass, like the buttons along the top.
+        .buttonBorderShape(.circle)
+        .controlSize(controlSize)
+        .dynamicTypeSize(...Self.largestControlSize)
+        // Hidden, they stay focusable: focus leaves the timeline only as `onTimelineMove`
+        // sends it, which shows them first. Disabled, they couldn't take it as they reappear.
+        .opacity(showsOnlyTimeline ? 0 : 1)
+        .accessibilityHidden(showsOnlyTimeline)
+        #if os(tvOS)
+        .disabled(holdsFocusOnTimeline)
+        #endif
+        #if os(visionOS)
+        // In the middle of the row, whatever is at its ends.
+        .overlay { transport.controlSize(controlSize) }
+        #endif
     }
 
     private var controlSize: ControlSize {
@@ -586,15 +618,17 @@ struct PlayerControls: View {
     /// A round glass button's symbol, in a square the same for every symbol, so the circles match.
     private func symbol(_ name: String) -> some View {
         Image(systemName: name)
-            .font(.headline)
-            .frame(width: Self.symbolSide, height: Self.symbolSide)
+            .font(isBelowFold ? .title2.weight(.semibold) : .headline)
+            .frame(width: symbolSide, height: symbolSide)
     }
 
-    private static var symbolSide: CGFloat {
+    /// The square of a round button's symbol, which sizes its circle: glass buttons are no larger
+    /// at a larger control size. The bar's other buttons take it from `playerSymbolSide`.
+    private var symbolSide: CGFloat {
         #if os(tvOS)
         38
         #else
-        22
+        isBelowFold ? 28 : 22
         #endif
     }
 
@@ -681,7 +715,7 @@ struct PlayerControls: View {
                 Text(text)
                     .font(.subheadline.weight(.semibold))
                     .monospacedDigit()
-                    .frame(minWidth: Self.symbolSide, minHeight: Self.symbolSide)
+                    .frame(minWidth: symbolSide, minHeight: symbolSide)
             } else {
                 symbol(filled ? kind.symbol + ".fill" : kind.symbol)
             }
@@ -791,9 +825,16 @@ private struct VolumeControl: View {
 /// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
 /// that the server is transcoding. With `action`, a button that opens the Quality panel, there
 /// for every stream, which says the stream's picture size too.
+extension EnvironmentValues {
+    /// The square of a round player button's symbol, which sizes its circle, for the buttons along
+    /// the controls' top that draw their own (`PlayerControls.symbolSide`).
+    @Entry var playerSymbolSide: CGFloat = 22
+}
+
 private struct FormatBadge: View {
     let model: PlayerModel
     var action: (() -> Void)?
+    @Environment(\.playerSymbolSide) private var symbolSide
     #if os(visionOS)
     @Environment(PlayerCoordinator.self) private var coordinator
     #endif
@@ -809,11 +850,10 @@ private struct FormatBadge: View {
                     Image(systemName: PlayerPanel.quality.symbol)
                 }
                 .font(.subheadline.weight(.semibold))
-                .frame(minHeight: 22)
+                .frame(minHeight: symbolSide)
             }
             .buttonStyle(.platformGlass)
             .buttonBorderShape(.capsule)
-            .controlSize(.large)
             .accessibilityLabel(PlayerPanel.quality.title)
             .accessibilityValue(model.qualityStatus?.summary ?? text ?? "")
             .accessibilityShowsLargeContentViewer()
@@ -1247,8 +1287,8 @@ private struct RingCue: View {
 #endif
 
 /// The sum of the skips in a row: "+30", "−1:00". On Apple TV over the playhead, with the way it
-/// went; elsewhere over the skip button, or the side of the picture double-tapped, which show
-/// the way themselves.
+/// went; elsewhere over the skip button, or on the side of the picture double-tapped, where the
+/// sign says the way.
 struct SkipTally: View {
     let seconds: Double
 

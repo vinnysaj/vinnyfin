@@ -295,7 +295,10 @@ struct ItemDetailView: View {
             if let series { GoToShowButton(show: series) }
             #endif
             if available {
-                PlayElsewhereButton(subject: .title(shown, mediaSourceId: pickedSourceId))
+                #if os(iOS) || os(macOS)
+                PlayOnButton(subject: .title(shown, mediaSourceId: pickedSourceId))
+                #endif
+                SharePlayButton(subject: .title(shown, mediaSourceId: pickedSourceId))
             }
             if available, sources.count > 1 {
                 VersionMenu(sources: sources, selection: Binding(get: { playbackSource?.id }, set: { pickedSourceId = $0 }))

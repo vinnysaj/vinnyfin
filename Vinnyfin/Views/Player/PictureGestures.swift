@@ -90,17 +90,12 @@ nonisolated struct PictureTaps {
 
 #if os(iOS)
 /// The picture's touches on iPhone and iPad: taps (`PictureTaps`), a press held to play at twice
-/// the speed until let go, a pull down to close, and a pinch to fill the screen or fit it.
+/// the speed until let go, and a pinch to fill the screen or fit it.
 struct PictureTouches: ViewModifier {
     /// A tap, where it was in the picture, and the picture's width.
-    let onTap: (_ x: CGFloat, _ width: CGFloat) -> Void
+    let onTap: (_ location: CGPoint, _ width: CGFloat) -> Void
     let onHoldBegan: () -> Void
     let onHoldEnded: () -> Void
-    /// Pulling down is on: off while a panel is open.
-    let canPull: Bool
-    /// How far down the picture has been pulled, as it follows the finger.
-    @Binding var pull: CGFloat
-    let onPulledAway: () -> Void
     let onPinch: (_ magnification: CGFloat) -> Void
     @State private var width: CGFloat = 0
     @State private var isHolding = false
@@ -109,9 +104,6 @@ struct PictureTouches: ViewModifier {
 
     /// How long a press is held before it plays faster.
     static let holdDuration = 0.4
-    /// How far a pull goes, or would go at its speed, to close.
-    static let pullDistance: CGFloat = 120
-    static let pullFling: CGFloat = 320
 
     func body(content: Content) -> some View {
         content
@@ -121,7 +113,7 @@ struct PictureTouches: ViewModifier {
                     .onEnded { value in
                         if isHolding { return }
                         if let holdEnded, Date.now.timeIntervalSince(holdEnded) < 0.3 { return }
-                        onTap(value.location.x, width)
+                        onTap(value.location, width)
                     }
             )
             .onLongPressGesture(minimumDuration: Self.holdDuration, maximumDistance: 12) {
@@ -133,73 +125,74 @@ struct PictureTouches: ViewModifier {
                 holdEnded = .now
                 onHoldEnded()
             }
-            .simultaneousGesture(
-                // In the screen's coordinates: the picture moves down with the finger, so in its
-                // own the finger would seem to go half as far.
-                DragGesture(minimumDistance: 16, coordinateSpace: .global)
-                    .onChanged { value in
-                        guard canPull, !isHolding else { return }
-                        let down = value.translation.height
-                        // Started mostly down; sideways or up, the picture stays.
-                        guard pull > 0 || down > abs(value.translation.width) else { return }
-                        pull = max(0, down)
-                    }
-                    .onEnded { value in
-                        guard pull > 0 else { return }
-                        if value.translation.height > Self.pullDistance || value.predictedEndTranslation.height > Self.pullFling {
-                            onPulledAway()
-                        } else {
-                            withAnimation(.snappy) { pull = 0 }
-                        }
-                    }
-            )
             .simultaneousGesture(MagnifyGesture().onEnded { onPinch($0.magnification) })
     }
 }
 
-/// Over the side of the picture a double tap skipped on: a wash of light rippling from the side
-/// at each tap, the way it went, and, with the controls hidden, the run's sum. With the controls
-/// up, the sum is over the skip button instead.
+/// Over the picture a double tap skipped on: with the controls hidden, the run's sum on the side
+/// tapped; with the controls up, the sum is over the skip button instead. The picture ripples
+/// like water from each tap (`PictureRipples`); where it can't, a ring of light spreads from where
+/// the tap landed.
 struct SkipRipple: View {
     let forward: Bool
     /// The run's sum, negative going back.
     let seconds: Double
     /// Counts the taps, each of which ripples.
     let taps: Int
+    /// Where the last tap landed, in this view's coordinates.
+    let tapLocation: CGPoint
+    /// The picture ripples like water under it, in place of the ring of light.
+    let bendsPicture: Bool
     let showsTally: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Counts the rings started: one as it shows, with the run's first skip, and one each tap after.
+    @State private var ripples = 0
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            let side = min(size.width * 0.42, 360)
+            let reach = min(size.width * 0.4, 380)
             ZStack {
-                Ellipse()
-                    .fill(.white.opacity(0.14))
-                    .frame(width: side * 2, height: max(size.height * 1.3, side * 2))
-                    .keyframeAnimator(initialValue: 0.0, trigger: taps) { wash, lift in
-                        wash.opacity(0.6 + 0.4 * lift)
-                    } keyframes: { _ in
-                        LinearKeyframe(1, duration: 0.08)
-                        LinearKeyframe(0, duration: 0.4)
-                    }
-                    .position(x: forward ? size.width + side * 0.25 : -side * 0.25, y: size.height / 2)
-                VStack(spacing: 10) {
-                    Image(systemName: forward ? "forward.fill" : "backward.fill")
-                        .font(.title2)
-                        .symbolEffect(.bounce.byLayer, options: .speed(1.6), value: reduceMotion ? 0 : taps)
-                    if showsTally {
-                        SkipTally(seconds: seconds)
-                            .fixedSize()
-                    }
+                if !reduceMotion, !bendsPicture {
+                    Circle()
+                        .stroke(.white.opacity(0.5), lineWidth: 2.5)
+                        .frame(width: reach * 2, height: reach * 2)
+                        .keyframeAnimator(initialValue: RippleFrame.done, trigger: ripples) { circle, frame in
+                            circle.scaleEffect(frame.scale).opacity(frame.opacity)
+                        } keyframes: { _ in
+                            KeyframeTrack(\.scale) {
+                                LinearKeyframe(0.05, duration: 0)
+                                SpringKeyframe(1, duration: 0.55, spring: .smooth)
+                            }
+                            KeyframeTrack(\.opacity) {
+                                LinearKeyframe(1, duration: 0)
+                                LinearKeyframe(1, duration: 0.2)
+                                LinearKeyframe(0, duration: 0.35)
+                            }
+                        }
+                        .position(tapLocation)
                 }
-                .foregroundStyle(.white)
-                .position(x: forward ? size.width - side * 0.45 : side * 0.45, y: size.height / 2)
+                if showsTally {
+                    SkipTally(seconds: seconds)
+                        .fixedSize()
+                        .foregroundStyle(.white)
+                        .transition(.opacity)
+                        .position(x: forward ? size.width - reach * 0.5 : reach * 0.5, y: size.height / 2)
+                }
             }
         }
         .clipped()
+        .onAppear { ripples += 1 }
+        .onChange(of: taps) { ripples += 1 }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private struct RippleFrame {
+        var scale: CGFloat
+        var opacity: Double
+
+        static let done = RippleFrame(scale: 1, opacity: 0)
     }
 }
 #endif

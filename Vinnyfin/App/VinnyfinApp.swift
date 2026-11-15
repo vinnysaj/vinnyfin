@@ -320,7 +320,7 @@ extension AppDelegate: UIApplicationDelegate {
 
     #if os(iOS)
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        PlayerOrientationLock.allowed
+        PlayerRotation.allowed
     }
     #endif
 

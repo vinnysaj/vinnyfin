@@ -134,109 +134,120 @@ struct PlayerLayoutTests {
 }
 
 #if os(iOS)
-struct PlayerOrientationRuleTests {
-    @Test func thePlayerTurnsWithThePhoneUntilLocked() {
-        var rule = PlayerOrientationLock.Rule()
-        #expect(!rule.isLocked)
-        #expect(rule.allowed == .all)
-        // Turning sideways, even for a wide picture, doesn't lock it by itself.
-        #expect(!rule.isTurnedAgainst(.landscapeRight))
-        #expect(!rule.isTurnedAgainst(.portrait))
+struct PlayerRotationHoldTests {
+    @Test func thePlayerTurnsWithThePhoneUntilItKnowsItsShape() {
+        let hold = PlayerRotation.Hold()
+        #expect(hold.allowed == .all)
+        #expect(!hold.offers(.landscapeRight))
+        #expect(!hold.offers(.portrait))
     }
 
-    @Test func lockingHoldsTheShapeItsInEitherWayUp() {
-        var rule = PlayerOrientationLock.Rule()
-        rule.lock(current: .landscapeRight)
-        #expect(rule.isLocked)
-        #expect(rule.allowed == .landscape)
-        // Lying down, the phone upright: the lock keeps the picture sideways.
-        #expect(rule.isTurnedAgainst(.portrait))
-        #expect(!rule.isTurnedAgainst(.landscapeLeft))
+    @Test func itKeepsTheShapeItOpenedInEitherWayUp() {
+        var hold = PlayerRotation.Hold()
+        hold.hold(.portrait)
+        #expect(hold.allowed == .portrait)
+        // The phone on its side: the player stays upright and offers to turn.
+        #expect(hold.offers(.landscapeLeft))
+        #expect(hold.offers(.landscapeRight))
+        // End over end it still follows.
+        #expect(!hold.offers(.portraitUpsideDown))
 
-        rule.lock(current: .portrait)
-        #expect(rule.allowed == .portrait)
-        #expect(rule.isTurnedAgainst(.landscapeLeft))
+        var sideways = PlayerRotation.Hold()
+        sideways.hold(.landscapeRight)
+        #expect(sideways.allowed == .landscape)
+        // Lying down, the phone upright: the picture stays sideways.
+        #expect(sideways.offers(.portrait))
+        #expect(!sideways.offers(.landscapeLeft))
     }
 
-    @Test func unlockingTurnsWithThePhoneAgain() {
-        var rule = PlayerOrientationLock.Rule()
-        rule.lock(current: .landscapeLeft)
-        rule.unlock()
-        #expect(!rule.isLocked)
-        #expect(rule.allowed == .all)
-        #expect(!rule.isTurnedAgainst(.portrait))
+    @Test func takingTheOfferKeepsTheNewShape() {
+        var hold = PlayerRotation.Hold()
+        hold.hold(.portrait)
+        hold.turn(to: .landscapeLeft)
+        #expect(hold.allowed == .landscape)
+        #expect(!hold.offers(.landscapeRight))
+        // Turned back upright, it offers to turn back.
+        #expect(hold.offers(.portrait))
     }
 
-    @Test func standingHalfOpenTurnsFreely() {
-        var rule = PlayerOrientationLock.Rule()
-        rule.lock(current: .landscapeRight)
-        rule.isHalfOpen = true
-        #expect(rule.allowed == .all)
-        #expect(rule.isLocked)
-        rule.isHalfOpen = false
-        #expect(rule.allowed == .landscape)
+    @Test func unfoldedItTurnsFreely() {
+        var hold = PlayerRotation.Hold()
+        hold.hold(.landscapeRight)
+        hold.isUnfolded = true
+        #expect(hold.allowed == .all)
+        #expect(!hold.offers(.portrait))
+        // Folded shut, in the shape the front screen is in.
+        hold.isUnfolded = false
+        hold.hold(.portrait)
+        #expect(hold.allowed == .portrait)
     }
 
     private let film = CGSize(width: 1920, height: 800)
 
     @Test func aLandscapeTitleHeldUprightTurnsThePlayerAndHoldsItThere() {
-        var rule = PlayerOrientationLock.Rule()
-        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        var hold = PlayerRotation.Hold()
+        hold.hold(.portrait)
+        let turns = hold.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(turns)
-        #expect(rule.isLocked)
-        #expect(rule.allowed == .landscape)
-        // Still upright, the lock waits, lit, as the way back to portrait.
-        #expect(rule.isTurnedAgainst(.portrait))
-        rule.unlock()
-        #expect(rule.allowed == .all)
+        #expect(hold.allowed == .landscape)
+        // Still upright, the offer is the way back to portrait.
+        #expect(hold.offers(.portrait))
+        hold.turn(to: .portrait)
+        #expect(hold.allowed == .portrait)
     }
 
     @Test func itTurnsOnlyForTheFirstShapeKnownWhileOpen() {
-        var rule = PlayerOrientationLock.Rule()
-        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        var hold = PlayerRotation.Hold()
+        hold.hold(.portrait)
+        let turns = hold.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(turns)
-        rule.unlock()
+        hold.turn(to: .portrait)
         // The next episode, or the stream's own size arriving after the server's, leaves the
         // shape the viewer turned it back to.
-        let turns2 = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        let turns2 = hold.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(!turns2)
-        #expect(!rule.isLocked)
+        #expect(hold.allowed == .portrait)
     }
 
     @Test func itDoesntTurnWhenItNeedntOrIsntAsked() {
         // The setting off.
-        var off = PlayerOrientationLock.Rule()
+        var off = PlayerRotation.Hold()
+        off.hold(.portrait)
         let turns = off.pictureShaped(film, current: .portrait, playsInLandscape: false)
         #expect(!turns)
+        #expect(off.allowed == .portrait)
         // A picture taller than wide.
-        var upright = PlayerOrientationLock.Rule()
+        var upright = PlayerRotation.Hold()
         let turns2 = upright.pictureShaped(CGSize(width: 1080, height: 1920), current: .portrait, playsInLandscape: true)
         #expect(!turns2)
         // On its side already.
-        var sideways = PlayerOrientationLock.Rule()
+        var sideways = PlayerRotation.Hold()
+        sideways.hold(.landscapeLeft)
         let turns3 = sideways.pictureShaped(film, current: .landscapeLeft, playsInLandscape: true)
         #expect(!turns3)
-        #expect(!sideways.isLocked)
-        // Standing half open, with the picture above the fold.
-        var halfOpen = PlayerOrientationLock.Rule()
-        halfOpen.isHalfOpen = true
-        let turns4 = halfOpen.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        #expect(sideways.allowed == .landscape)
+        // An iPhone Duo unfolded, which turns its windows itself.
+        var unfolded = PlayerRotation.Hold()
+        unfolded.isUnfolded = true
+        let turns4 = unfolded.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(!turns4)
     }
 
-    @Test func theViewersOwnLockComesFirst() {
-        var rule = PlayerOrientationLock.Rule()
-        rule.lock(current: .portrait)
-        let turns = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+    @Test func theViewersOwnTurnComesFirst() {
+        var hold = PlayerRotation.Hold()
+        hold.hold(.landscapeLeft)
+        hold.turn(to: .portrait)
+        let turns = hold.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(!turns)
-        #expect(rule.allowed == .portrait)
+        #expect(hold.allowed == .portrait)
     }
 
     @Test func aShapeNotYetKnownSettlesNothing() {
-        var rule = PlayerOrientationLock.Rule()
-        let turns = rule.pictureShaped(.zero, current: .portrait, playsInLandscape: true)
+        var hold = PlayerRotation.Hold()
+        hold.hold(.portrait)
+        let turns = hold.pictureShaped(.zero, current: .portrait, playsInLandscape: true)
         #expect(!turns)
-        let turns2 = rule.pictureShaped(film, current: .portrait, playsInLandscape: true)
+        let turns2 = hold.pictureShaped(film, current: .portrait, playsInLandscape: true)
         #expect(turns2)
     }
 }

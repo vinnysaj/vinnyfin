@@ -44,7 +44,7 @@ final class ScreenshotTests: XCTestCase {
     private func snapRemote(_ app: XCUIApplication) async throws {
         let livingRoom = LivingRoomTV(server: server, username: Self.username)
         try await livingRoom.open()
-        tap(app.buttons["playElsewhere"])
+        tap(app.buttons["playOn"])
         // By name: any other device signed in to the server, such as a simulator still running
         // an earlier test's app, is a target too.
         tap(app.buttons.matching(identifier: "playOn.target").matching(NSPredicate(format: "label BEGINSWITH %@", "Living Room")).firstMatch)

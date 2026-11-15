@@ -11,20 +11,21 @@ import OSLog
 #endif
 import SwiftUI
 
-/// The player: the picture edge to edge, subtitles over it, and controls that fade away while
-/// it plays. Tap (or move the mouse, or press a key) to bring them back; pinch to fill the
-/// screen. On an iPhone Duo standing half open like a laptop the picture takes the top half and
-/// the controls the bottom, with the show's episodes. On Vision Pro the window is the picture,
-/// with the controls on glass below it, and the room dims while it plays; in the cinema the
-/// picture moves to the big screen, a pinch there shows the controls, and the window stays,
-/// clear, holding them. On Apple TV the remote scrubs: swipe or circle the clickpad to move the
-/// timeline and click to jump there, click a side to skip, hold one to scan.
+/// The player: the picture edge to edge, subtitles over it, and controls that fade away while it
+/// plays. Tap (or move the mouse, or press a key) to bring them back; pinch to fill the screen. On
+/// an iPhone Duo standing half open like a laptop the picture takes the top half and the controls
+/// the bottom, with the show's episodes, dimmed rather than gone while it plays. On Vision Pro the
+/// window is the picture, with the controls on glass below it, and the room dims while it plays; in
+/// the cinema the picture moves to the big screen, a pinch there shows the controls, and the window
+/// stays, clear, holding them. On Apple TV the remote scrubs: swipe or circle the clickpad to move
+/// the timeline and click to jump there, click a side to skip, hold one to scan.
 struct PlayerView: View {
     let model: PlayerModel
     let onClose: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(PlayerCoordinator.self) private var coordinator
+    @Environment(SharePlay.self) private var sharePlay
     @Environment(IncomingLinks.self) private var links
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
@@ -34,8 +35,9 @@ struct PlayerView: View {
     /// The controls stay up until they're hidden the way they were shown. VoiceOver, Voice Control
     /// and Switch Control take longer to reach a control than the few seconds they'd stay.
     @State private var holdsControls = false
-    /// Play On and SharePlay are up. Here rather than with the controls, which come and go under them.
-    @State private var showsPlayElsewhere = false
+    /// Play On's sheet or SharePlay's is up. Here rather than with the controls, which come and go
+    /// under them.
+    @State private var elsewhere: Elsewhere?
     @State private var hideTask: Task<Void, Never>?
     @State private var fillsScreen = false
     @State private var panel: PlayerPanel?
@@ -53,8 +55,8 @@ struct PlayerView: View {
     #if os(iOS)
     /// The side of the picture a run of double taps is skipping on.
     @State private var pictureSkip: PictureSkip?
-    /// How far down the picture is pulled, to close it.
-    @State private var pull: CGFloat = 0
+    /// Water rippling over the picture from a double tap that skipped.
+    @State private var pictureRipples = PictureRipples()
     #endif
     #if os(macOS)
     @State private var isFullScreen = false
@@ -112,7 +114,7 @@ struct PlayerView: View {
     #endif
     #if os(iOS)
     @Environment(AppSettings.self) private var settings
-    @State private var orientationLock = PlayerOrientationLock()
+    @State private var rotation = PlayerRotation()
     /// The fold across the screen of an iPhone Duo standing half open, in window coordinates.
     @State private var fold: CGRect?
     /// The whole screen's size, which the episodes' sheet fills the part below the picture of.
@@ -127,6 +129,327 @@ struct PlayerView: View {
     #endif
 
     var body: some View {
+        animatedLayers
+            #if os(iOS)
+            .animation(.snappy, value: rotation.isAnnouncing)
+            .animation(.snappy, value: rotation.offer)
+            .animation(.smooth, value: fold)
+            // Stood half open, the controls come up below the fold before they dim.
+            .onChange(of: fold != nil) { _, folded in
+                if folded { showControls() }
+            }
+            .environment(rotation)
+            .onHingeChange { _, context in
+                rotation.hingeChanged(isUnfolded: [.partiallyOpen, .fullyOpen].contains(context.hinge?.status))
+            }
+            .onAppear {
+                rotation.start(landscapeTitles: settings.playsVideosInLandscape)
+                if let pictureShape { rotation.pictureShaped(pictureShape) }
+            }
+            .onDisappear { rotation.stop() }
+            .onChange(of: pictureShape) { _, shape in
+                if let shape { rotation.pictureShaped(shape) }
+            }
+            // An iPad's pointer brings the controls up as it moves over the picture, and keeps them up
+            // while it rests on their bars.
+            .onContinuousHover(coordinateSpace: .global) { phase in
+                switch phase {
+                case .active(let location):
+                    pointerIsOnControls = controlsVisible
+                        && PlayerLayout.isOnBars(y: location.y, topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
+                    showControls(autoHide: !pointerIsOnControls)
+                case .ended:
+                    pointerIsOnControls = false
+                    scheduleHide()
+                }
+            }
+            #endif
+            #if os(macOS)
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    pointerIsOver = true
+                    showControls()
+                case .ended:
+                    pointerIsOver = false
+                }
+            }
+            // The window's close, minimize and zoom buttons go with the controls, off the picture.
+            .background(WindowButtons(areHidden: !controlsVisible))
+            .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop,
+                                          onWindow: { if let window = $0 { coordinator.playerWindow = window } }) { isFullScreen = $0 })
+            .environment(\.playerIsFullScreen, isFullScreen)
+            #endif
+            #if os(tvOS)
+            .background {
+                // A timeline a resting finger brought up guards against a thumb on the surface as one
+                // hidden does.
+                RemoteInput(surface: touchSurface, isActive: remoteDrivesTimeline, ringArms: controlsVisible,
+                            swipeThreshold: StraySwipe.threshold(controlsHidden: !controlsVisible || controlsByPeek,
+                                                                 isScrubbing: model.scrubbing.isActive),
+                            onGesture: remote)
+            }
+            .onChange(of: touchSurface.reading) { _, reading in
+                model.scrubbing.isOnRing = reading == .armed || reading == .turning
+                settleHeldMove()
+            }
+            .onPlayPauseCommand {
+                // Moving the timeline, Play jumps there and plays (`PlayerModel.togglePlayPause`).
+                model.togglePlayPause()
+                showControls()
+            }
+            // Leaving the timeline leaves the position chosen on it, as Back does: playback stays
+            // where it is, and the controls can go.
+            .onChange(of: focus) { old, new in
+                guard old == .timeline, new != .timeline else { return }
+                if new != nil, new != .picture { controlsByPeek = false }
+                if model.scrubbing.isActive { model.cancelScrub() }
+            }
+            // A position chosen while paused, the playback started some other way, as the group
+            // watching together can: left alone, it goes as one chosen while playing does.
+            .onChange(of: model.isPlaying) { _, playing in
+                if playing { dropPositionWhenLeft() }
+            }
+            .onExitCommand {
+                if model.scrubbing.isActive {
+                    // Back to where playback is.
+                    model.cancelScrub()
+                    scheduleHide()
+                } else if panel != nil {
+                    closePanel()
+                } else if model.upNextCountdown != nil || model.upNextPhase(at: model.clock.time).map({ $0 != .ended }) == true {
+                    // The countdown stops, or the card goes, as its other button would, before the
+                    // controls or the player: the next Back does those.
+                    model.cancelUpNext()
+                } else if model.showsEndScreen {
+                    onClose()
+                } else if controlsVisible, model.isPlaying || model.status == .paused {
+                    // Playing or paused, Back hides the controls first, to look at the picture; the
+                    // next Back leaves.
+                    hideControls(explicit: true)
+                } else {
+                    onClose()
+                }
+            }
+            // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline,
+            // on what the card or the end screen offers, or after a failure on Try Again.
+            .onChange(of: controlsVisible) { _, visible in
+                if visible, case .failed = model.status {
+                    retryFocused = true
+                } else if visible, !controlsCompact, offersAction {
+                    moveFocus(to: .action)
+                } else {
+                    focus = visible ? .timeline : .picture
+                }
+            }
+            // Asked whether anyone is still watching, or at the end, focus goes to what's offered.
+            .onChange(of: model.asksStillWatching) { _, asks in
+                if asks { moveFocus(to: .action) }
+            }
+            .onChange(of: showsEndScreen) { _, shows in
+                if shows { moveFocus(to: .action) }
+            }
+            // Skips and scans from elsewhere, as Siri's or a TV remote's, show on the timeline too.
+            .onChange(of: model.scrubbing.skipRun?.id) { _, run in
+                if run != nil { revealTimeline() }
+            }
+            .onChange(of: model.scrubbing.isScanning) { _, scanning in
+                if scanning { revealTimeline() }
+            }
+            // As do seeks another device or the group asked for.
+            .onChange(of: model.seeksFromElsewhere) { revealTimeline() }
+            #else
+            .onChange(of: model.seeksFromElsewhere) { showControls() }
+            // The player takes focus as it opens, for the Playback menu's keys (`PlayerCommand`) and
+            // for the menu to act on it: a scene value doesn't reach the menu from the full-screen
+            // cover the player is on iPhone and iPad.
+            .focusable()
+            .focusEffectDisabled()
+            .focused($hasKeyboardFocus)
+            .onKeyPress(keys: PlayerCommand.keys) { press in
+                guard let command = PlayerCommand.pressed(press.key, modifiers: press.modifiers) else { return .ignored }
+                perform(command)
+                return .handled
+            }
+            .focusedValue(\.player, PlayerCommandTarget(model: model, fillsScreen: fillsScreen, isFullScreen: isWindowFullScreen,
+                                                        floatsOnTop: isFloatingOnTop, pictureInPicture: pictureInPictureAction,
+                                                        perform: perform))
+            .handoffPlayback(model)
+            #endif
+            #if os(iOS)
+            // Standing half open, the bar would sit on the picture, the controls below the fold.
+            .statusBarHidden(fold != nil || !controlsVisible)
+            .persistentSystemOverlays(.hidden)
+            // On iPhone Duo the controls keep to the middle of the screen, where the picture is,
+            // rather than making room for a vertical bar.
+            .toolbarVerticalBehavior(.disabled)
+            #endif
+            // VoiceOver's two-finger scrub closes a panel, else the player, as the remote's Menu does.
+            .accessibilityAction(.escape) {
+                if panel != nil { closePanel() } else { onClose() }
+            }
+            .onChange(of: fillsScreen) { _, fills in model.engine.videoGravity = fills ? .resizeAspectFill : .resizeAspect }
+            .onChange(of: model.status) { _, status in
+                switch status {
+                case .playing: scheduleHide()
+                // Up for a new title, and for what the viewer acts on. A new stream of the same title
+                // and a stall show in the picture, and leave the controls as they were.
+                case .preparing, .paused, .ended, .failed: showControls(autoHide: false)
+                case .loading, .buffering: break
+                }
+                // A new title starts over its picture until it plays, which it does only once its
+                // first frame is up. A new stream of the same title keeps the picture it had. The
+                // engine can pause on its way to the start position, and a playback watched together
+                // waits paused for the group, so a pause doesn't end the start.
+                switch status {
+                case .preparing: isStartingTitle = true
+                case .playing, .buffering, .ended: isStartingTitle = false
+                case .loading, .paused, .failed: break
+                }
+                if case .failed(let message) = status {
+                    announce("Couldn't play this. \(message)")
+                    #if os(tvOS)
+                    // Once the card is up: focus can't go to a button that isn't there yet, and the
+                    // controls would keep it on the timeline.
+                    DispatchQueue.main.async { retryFocused = true }
+                    #endif
+                }
+                if status == .ended {
+                    #if os(tvOS)
+                    // At the end the way on is the next episode, or the end screen, rather than the
+                    // timeline, where a click would play the episode again.
+                    if offersAction { moveFocus(to: .action) }
+                    #endif
+                } else {
+                    endScreenSetAside = false
+                }
+                #if os(iOS) || os(macOS)
+                coordinator.pictureInPicture.attach(to: model)
+                #endif
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await model.restoreAfterBackground() }
+                // Back from the background the picture can take a while to return, and the playback
+                // can be waiting on its buffer: the controls show meanwhile that it's still there.
+                if model.current != nil { showControls() }
+            }
+            .onChange(of: model.notice) { _, notice in
+                if let notice { announce(notice.text) }
+            }
+            .onChange(of: model.pictureOffer) { _, offer in
+                guard offer != nil else { return }
+                announce("The picture can't keep up. \(offer?.action ?? "")?")
+                #if os(tvOS)
+                // Once the card is up, as for a failure's Try Again.
+                DispatchQueue.main.async { offerFocused = true }
+                #endif
+            }
+            // Turned on mid-playback, they'd need the controls to stay.
+            .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
+                if assisted { hideTask?.cancel() }
+            }
+            // Portable TV's remote skipped, paused or asked for them.
+            .onChange(of: controlsRequests) { showControls() }
+            // Brought up while it plays, by a tap, a click, the remote, the pointer or a key: someone
+            // is watching. Those the playback brings up itself, as it starts, pauses or ends, aren't.
+            .onChange(of: controlsVisible) { _, visible in
+                if visible, model.isPlaying { model.noteViewerActivity() }
+            }
+            .animation(.easeInOut(duration: 0.3), value: showsEndScreen)
+            // Another device asked this one to stop.
+            .onChange(of: coordinator.stopRequest) { _, request in
+                guard request == model.id else { return }
+                coordinator.stopRequest = nil
+                onClose()
+            }
+            #if !os(tvOS)
+            .sheet(item: $elsewhere) { sheet in
+                Group {
+                    switch sheet {
+                    case .playOn:
+                        #if os(iOS) || os(macOS)
+                        PlayOnSheet(subject: .playback(model), onHandedOver: onClose)
+                        #else
+                        EmptyView()
+                        #endif
+                    case .sharePlay:
+                        SharePlaySheet(subject: .playback(model))
+                    }
+                }
+                // Half the screen, the picture still playing above it.
+                .presentationDetents([.medium, .large])
+            }
+            #endif
+            .onAppear(perform: appeared)
+            #if os(macOS)
+            // The window's playback ends with it.
+            .onDisappear { coordinator.pictureInPicture.close() }
+            #endif
+            .task {
+                #if !os(tvOS)
+                hasKeyboardFocus = true
+                #endif
+                await model.start()
+            }
+            .preferredColorScheme(.dark)
+    }
+
+    /// The layers, with their animations, AirPlay's following of the picture, and Vision Pro's window
+    /// around them.
+    private var animatedLayers: some View {
+        layers
+            .onPreferenceChange(PanelButtonFrames.self) { panelButtonFrames = $0 }
+            #if os(iOS)
+            // In as the skip lands, and out a little slower once the run is over.
+            .animation(.easeOut(duration: 0.2), value: pictureSkip?.forward)
+            .onChange(of: model.scrubbing.skipRun == nil) { _, isOver in
+                if isOver { withAnimation(.easeOut(duration: 0.35)) { pictureSkip = nil } }
+            }
+            .onReceive(model.engine.$currentAVPlayerItem) { pictureRipples.attach(to: $0) }
+            .onDisappear { pictureRipples.attach(to: nil) }
+            #endif
+            #if !os(tvOS)
+            .animation(.easeOut(duration: 0.2), value: playerFlash)
+            #endif
+            .animation(.easeInOut(duration: 0.25), value: controlsVisible)
+            .animation(.snappy, value: panel)
+            .animation(.snappy, value: model.notice)
+            // The first frame comes up through the title's picture.
+            .animation(.easeInOut(duration: 0.5), value: pictureCover)
+            // The player has no text input, so nothing it shows should make room for a keyboard: a
+            // keyboard's region left from the screen before would lift the controls up the screen.
+            .ignoresSafeArea(.keyboard)
+            #if os(iOS) || os(macOS)
+            .animation(.snappy, value: soundOnlyReceiver)
+            .onAppear { externalPlayback.follow(model.engine) }
+            .onChange(of: externalPlayback.pictureStaysLocal) { _, local in
+                if local {
+                    tellSoundOnly()
+                } else {
+                    soundOnlyTask?.cancel()
+                    soundOnlyReceiver = nil
+                }
+            }
+            #endif
+            #if os(visionOS)
+            // The window has no glass of its own; the picture takes its rounded shape.
+            .clipShape(.rect(cornerRadius: 46))
+            .ornament(visibility: controlsVisible && !showsEndScreen ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
+                controlsOrnament
+            }
+            .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
+            // The window's grab bar and close button go with the controls, off the picture and out
+            // of the dark theater, as the system player's do.
+            .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
+            // A new picture is flat until the screen showing it finds otherwise.
+            .onReceive(model.engine.$currentAVPlayer.removeDuplicates { $0 === $1 }) { _ in coordinator.pictureIsStereo = false }
+            .onChange(of: coordinator.screenTaps) { toggleControls() }
+            #endif
+    }
+
+    /// The picture, the controls and what comes and goes over them, from the bottom up.
+    private var layers: some View {
         ZStack {
             if showsPicture {
                 #if !os(visionOS)
@@ -145,6 +468,13 @@ struct PlayerView: View {
                     .ignoresSafeArea()
                     .accessibilityHidden(true)
                     .accessibilityIgnoresInvertColors()
+                #if os(iOS)
+                inPictureArea {
+                    PictureRippleView(ripples: pictureRipples, aspect: model.videoSize.map { $0.width / max(1, $0.height) },
+                                      fillsScreen: fillsScreen)
+                        .ignoresSafeArea()
+                }
+                #endif
                 if let cover = pictureCover {
                     inPictureArea {
                         PlayerBackdrop(item: model.shownItem,
@@ -183,9 +513,8 @@ struct PlayerView: View {
                 .frame(maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea()
                 #if os(iOS)
-                .modifier(PictureTouches(onTap: { x, width in pictureTapped(PictureTaps.zone(x: x, width: width)) },
-                                         onHoldBegan: holdBegan, onHoldEnded: { model.endHoldingSpeed() },
-                                         canPull: panel == nil, pull: $pull, onPulledAway: onClose, onPinch: pinched))
+                .modifier(PictureTouches(onTap: { location, width in pictureTapped(PictureTaps.zone(x: location.x, width: width), at: location) },
+                                         onHoldBegan: holdBegan, onHoldEnded: { model.endHoldingSpeed() }, onPinch: pinched))
                 #else
                 .gesture(SpatialTapGesture().onEnded { _ in pictureTapped(.middle) })
                 #endif
@@ -201,9 +530,12 @@ struct PlayerView: View {
             if let pictureSkip, let run = model.scrubbing.skipRun {
                 inPictureArea {
                     SkipRipple(forward: pictureSkip.forward, seconds: run.seconds, taps: pictureSkip.taps,
+                               tapLocation: pictureSkip.location, bendsPicture: pictureSkip.bendsPicture,
                                showsTally: !showsControls)
                         .ignoresSafeArea()
                 }
+                // A run the other way starts over on its own side as the last one fades.
+                .id(pictureSkip.forward)
                 .transition(.opacity)
             }
             #endif
@@ -216,7 +548,7 @@ struct PlayerView: View {
             if controlsVisible, !showsEndScreen {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
-                               onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: nil,
+                               onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playOn: nil, watchTogether: nil,
                                focus: $focus, isCompact: controlsCompact,
                                onTimelineSelect: timelineClicked, onTimelineMove: timelineMoved,
                                holdsFocusOnTimeline: timelineHoldsFocus)
@@ -224,17 +556,22 @@ struct PlayerView: View {
             }
             #else
             if let fold {
+                // Below the fold they stay, dimmed while they'd be hidden, and any use brings them
+                // back up.
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
-                               onClose: onClose, onInteraction: {}, pictureInPicture: pictureInPictureAction,
-                               playElsewhere: playElsewhereAction, isBelowFold: true)
+                               onClose: onClose, onInteraction: { showControls() }, pictureInPicture: pictureInPictureAction,
+                               playOn: playOnAction, watchTogether: watchTogetherAction, isBelowFold: true)
+                    .opacity(controlsVisible ? 1 : Self.dimmedBelowFold)
+                    .contentShape(.rect)
+                    .simultaneousGesture(TapGesture().onEnded { showControls() })
                     .padding(.top, fold.maxY)
                     .ignoresSafeArea(edges: .top)
             } else if controlsVisible, !showsEndScreen {
                 PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
-                               playElsewhere: playElsewhereAction)
+                               playOn: playOnAction, watchTogether: watchTogetherAction)
                     #if DEBUG
                     .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { insets in
                         // Records a bottom inset that lifts the controls up the screen, such as a
@@ -247,9 +584,10 @@ struct PlayerView: View {
             #endif
             #endif
             #if os(iOS)
-            if orientationLock.isAnnouncing, !showsControls {
+            if rotation.isAnnouncing, !showsControls {
                 // Where it waits among the controls, so it seems to go back into them.
-                RotationLockButton(onUse: scheduleHide)
+                RotateButton(onUse: scheduleHide)
+                    .controlSize(.large)
                     .padding(.horizontal, Metrics.playerInset)
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -314,296 +652,6 @@ struct PlayerView: View {
                 }
             }
         }
-        .onPreferenceChange(PanelButtonFrames.self) { panelButtonFrames = $0 }
-        #if os(iOS)
-        // Pulled down, the player follows the finger, shrinking as it goes, over the app it
-        // leaves: the cover has no background of its own behind the picture's.
-        .scaleEffect(1 - min(pull, 600) / 3000, anchor: .top)
-        .offset(y: pull)
-        .presentationBackground(.clear)
-        .animation(.easeOut(duration: 0.2), value: pictureSkip)
-        #endif
-        #if !os(tvOS)
-        .animation(.easeOut(duration: 0.2), value: playerFlash)
-        #endif
-        .animation(.easeInOut(duration: 0.25), value: controlsVisible)
-        .animation(.snappy, value: panel)
-        .animation(.snappy, value: model.notice)
-        // The first frame comes up through the title's picture.
-        .animation(.easeInOut(duration: 0.5), value: pictureCover)
-        // The player has no text input, so nothing it shows should make room for a keyboard: a
-        // keyboard's region left from the screen before would lift the controls up the screen.
-        .ignoresSafeArea(.keyboard)
-        #if os(iOS) || os(macOS)
-        .animation(.snappy, value: soundOnlyReceiver)
-        .onAppear { externalPlayback.follow(model.engine) }
-        .onChange(of: externalPlayback.pictureStaysLocal) { _, local in
-            if local {
-                tellSoundOnly()
-            } else {
-                soundOnlyTask?.cancel()
-                soundOnlyReceiver = nil
-            }
-        }
-        #endif
-        #if os(visionOS)
-        // The window has no glass of its own; the picture takes its rounded shape.
-        .clipShape(.rect(cornerRadius: 46))
-        .ornament(visibility: controlsVisible && !showsEndScreen ? .visible : .hidden, attachmentAnchor: .scene(.bottom), contentAlignment: .top) {
-            controlsOrnament
-        }
-        .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
-        // The window's grab bar and close button go with the controls, off the picture and out
-        // of the dark theater, as the system player's do.
-        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
-        // A new picture is flat until the screen showing it finds otherwise.
-        .onReceive(model.engine.$currentAVPlayer.removeDuplicates { $0 === $1 }) { _ in coordinator.pictureIsStereo = false }
-        .onChange(of: coordinator.screenTaps) { toggleControls() }
-        #endif
-        #if os(iOS)
-        .animation(.snappy, value: orientationLock.isAnnouncing)
-        .animation(.smooth, value: fold)
-        .environment(orientationLock)
-        .onHingeChange { _, context in orientationLock.hingeChanged(isHalfOpen: context.hinge?.status == .partiallyOpen) }
-        .onAppear {
-            orientationLock.start(landscapeTitles: settings.playsVideosInLandscape)
-            if let pictureShape { orientationLock.pictureShaped(pictureShape) }
-        }
-        .onDisappear { orientationLock.stop() }
-        .onChange(of: pictureShape) { _, shape in
-            if let shape { orientationLock.pictureShaped(shape) }
-        }
-        // An iPad's pointer brings the controls up as it moves over the picture, and keeps them up
-        // while it rests on their bars.
-        .onContinuousHover(coordinateSpace: .global) { phase in
-            switch phase {
-            case .active(let location):
-                pointerIsOnControls = controlsVisible
-                    && PlayerLayout.isOnBars(y: location.y, topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
-                showControls(autoHide: !pointerIsOnControls)
-            case .ended:
-                pointerIsOnControls = false
-                scheduleHide()
-            }
-        }
-        #endif
-        #if os(macOS)
-        .onContinuousHover { phase in
-            switch phase {
-            case .active:
-                pointerIsOver = true
-                showControls()
-            case .ended:
-                pointerIsOver = false
-            }
-        }
-        // The window's close, minimize and zoom buttons go with the controls, off the picture.
-        .background(WindowButtons(areHidden: !controlsVisible))
-        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop,
-                                      onWindow: { if let window = $0 { coordinator.playerWindow = window } }) { isFullScreen = $0 })
-        .environment(\.playerIsFullScreen, isFullScreen)
-        #endif
-        #if os(tvOS)
-        .background {
-            // A timeline a resting finger brought up guards against a thumb on the surface as one
-            // hidden does.
-            RemoteInput(surface: touchSurface, isActive: remoteDrivesTimeline, ringArms: controlsVisible,
-                        swipeThreshold: StraySwipe.threshold(controlsHidden: !controlsVisible || controlsByPeek,
-                                                             isScrubbing: model.scrubbing.isActive),
-                        onGesture: remote)
-        }
-        .onChange(of: touchSurface.reading) { _, reading in
-            model.scrubbing.isOnRing = reading == .armed || reading == .turning
-            settleHeldMove()
-        }
-        .onPlayPauseCommand {
-            // Moving the timeline, Play jumps there and plays (`PlayerModel.togglePlayPause`).
-            model.togglePlayPause()
-            showControls()
-        }
-        // Leaving the timeline leaves the position chosen on it, as Back does: playback stays
-        // where it is, and the controls can go.
-        .onChange(of: focus) { old, new in
-            guard old == .timeline, new != .timeline else { return }
-            if new != nil, new != .picture { controlsByPeek = false }
-            if model.scrubbing.isActive { model.cancelScrub() }
-        }
-        // A position chosen while paused, the playback started some other way, as the group
-        // watching together can: left alone, it goes as one chosen while playing does.
-        .onChange(of: model.isPlaying) { _, playing in
-            if playing { dropPositionWhenLeft() }
-        }
-        .onExitCommand {
-            if model.scrubbing.isActive {
-                // Back to where playback is.
-                model.cancelScrub()
-                scheduleHide()
-            } else if panel != nil {
-                closePanel()
-            } else if model.upNextCountdown != nil || model.upNextPhase(at: model.clock.time).map({ $0 != .ended }) == true {
-                // The countdown stops, or the card goes, as its other button would, before the
-                // controls or the player: the next Back does those.
-                model.cancelUpNext()
-            } else if model.showsEndScreen {
-                onClose()
-            } else if controlsVisible, model.isPlaying || model.status == .paused {
-                // Playing or paused, Back hides the controls first, to look at the picture; the
-                // next Back leaves.
-                hideControls(explicit: true)
-            } else {
-                onClose()
-            }
-        }
-        // Hidden, the controls leave the remote to the picture; shown, it starts on the timeline,
-        // on what the card or the end screen offers, or after a failure on Try Again.
-        .onChange(of: controlsVisible) { _, visible in
-            if visible, case .failed = model.status {
-                retryFocused = true
-            } else if visible, !controlsCompact, offersAction {
-                moveFocus(to: .action)
-            } else {
-                focus = visible ? .timeline : .picture
-            }
-        }
-        // Asked whether anyone is still watching, or at the end, focus goes to what's offered.
-        .onChange(of: model.asksStillWatching) { _, asks in
-            if asks { moveFocus(to: .action) }
-        }
-        .onChange(of: showsEndScreen) { _, shows in
-            if shows { moveFocus(to: .action) }
-        }
-        // Skips and scans from elsewhere, as Siri's or a TV remote's, show on the timeline too.
-        .onChange(of: model.scrubbing.skipRun?.id) { _, run in
-            if run != nil { revealTimeline() }
-        }
-        .onChange(of: model.scrubbing.isScanning) { _, scanning in
-            if scanning { revealTimeline() }
-        }
-        // As do seeks another device or the group asked for.
-        .onChange(of: model.seeksFromElsewhere) { revealTimeline() }
-        #else
-        .onChange(of: model.seeksFromElsewhere) { showControls() }
-        // The player takes focus as it opens, for the Playback menu's keys (`PlayerCommand`) and
-        // for the menu to act on it: a scene value doesn't reach the menu from the full-screen
-        // cover the player is on iPhone and iPad.
-        .focusable()
-        .focusEffectDisabled()
-        .focused($hasKeyboardFocus)
-        .onKeyPress(keys: PlayerCommand.keys) { press in
-            guard let command = PlayerCommand.pressed(press.key, modifiers: press.modifiers) else { return .ignored }
-            perform(command)
-            return .handled
-        }
-        .focusedValue(\.player, PlayerCommandTarget(model: model, fillsScreen: fillsScreen, isFullScreen: isWindowFullScreen,
-                                                    floatsOnTop: isFloatingOnTop, pictureInPicture: pictureInPictureAction,
-                                                    perform: perform))
-        .handoffPlayback(model)
-        #endif
-        #if os(iOS)
-        .statusBarHidden(!showsControls)
-        .persistentSystemOverlays(.hidden)
-        // On iPhone Duo the controls keep to the middle of the screen, where the picture is,
-        // rather than making room for a vertical bar.
-        .toolbarVerticalBehavior(.disabled)
-        #endif
-        // VoiceOver's two-finger scrub closes a panel, else the player, as the remote's Menu does.
-        .accessibilityAction(.escape) {
-            if panel != nil { closePanel() } else { onClose() }
-        }
-        .onChange(of: fillsScreen) { _, fills in model.engine.videoGravity = fills ? .resizeAspectFill : .resizeAspect }
-        .onChange(of: model.status) { _, status in
-            switch status {
-            case .playing: scheduleHide()
-            // Up for a new title, and for what the viewer acts on. A new stream of the same title
-            // and a stall show in the picture, and leave the controls as they were.
-            case .preparing, .paused, .ended, .failed: showControls(autoHide: false)
-            case .loading, .buffering: break
-            }
-            // A new title starts over its picture until it plays, which it does only once its
-            // first frame is up. A new stream of the same title keeps the picture it had. The
-            // engine can pause on its way to the start position, and a playback watched together
-            // waits paused for the group, so a pause doesn't end the start.
-            switch status {
-            case .preparing: isStartingTitle = true
-            case .playing, .buffering, .ended: isStartingTitle = false
-            case .loading, .paused, .failed: break
-            }
-            if case .failed(let message) = status {
-                announce("Couldn't play this. \(message)")
-                #if os(tvOS)
-                // Once the card is up: focus can't go to a button that isn't there yet, and the
-                // controls would keep it on the timeline.
-                DispatchQueue.main.async { retryFocused = true }
-                #endif
-            }
-            if status == .ended {
-                #if os(tvOS)
-                // At the end the way on is the next episode, or the end screen, rather than the
-                // timeline, where a click would play the episode again.
-                if offersAction { moveFocus(to: .action) }
-                #endif
-            } else {
-                endScreenSetAside = false
-            }
-            #if os(iOS) || os(macOS)
-            coordinator.pictureInPicture.attach(to: model)
-            #endif
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task { await model.restoreAfterBackground() }
-            // Back from the background the picture can take a while to return, and the playback
-            // can be waiting on its buffer: the controls show meanwhile that it's still there.
-            if model.current != nil { showControls() }
-        }
-        .onChange(of: model.notice) { _, notice in
-            if let notice { announce(notice.text) }
-        }
-        .onChange(of: model.pictureOffer) { _, offer in
-            guard offer != nil else { return }
-            announce("The picture can't keep up. \(offer?.action ?? "")?")
-            #if os(tvOS)
-            // Once the card is up, as for a failure's Try Again.
-            DispatchQueue.main.async { offerFocused = true }
-            #endif
-        }
-        // Turned on mid-playback, they'd need the controls to stay.
-        .onChange(of: voiceOverEnabled || switchControlEnabled) { _, assisted in
-            if assisted { hideTask?.cancel() }
-        }
-        // Portable TV's remote skipped, paused or asked for them.
-        .onChange(of: controlsRequests) { showControls() }
-        // Brought up while it plays, by a tap, a click, the remote, the pointer or a key: someone
-        // is watching. Those the playback brings up itself, as it starts, pauses or ends, aren't.
-        .onChange(of: controlsVisible) { _, visible in
-            if visible, model.isPlaying { model.noteViewerActivity() }
-        }
-        .animation(.easeInOut(duration: 0.3), value: showsEndScreen)
-        // Another device asked this one to stop.
-        .onChange(of: coordinator.stopRequest) { _, request in
-            guard request == model.id else { return }
-            coordinator.stopRequest = nil
-            onClose()
-        }
-        #if !os(tvOS)
-        .sheet(isPresented: $showsPlayElsewhere) {
-            PlayElsewhereSheet(subject: .playback(model), onHandedOver: onClose)
-                // Half the screen, the picture still playing above it.
-                .presentationDetents([.medium, .large])
-        }
-        #endif
-        .onAppear(perform: appeared)
-        #if os(macOS)
-        // The window's playback ends with it.
-        .onDisappear { coordinator.pictureInPicture.close() }
-        #endif
-        .task {
-            #if !os(tvOS)
-            hasKeyboardFocus = true
-            #endif
-            await model.start()
-        }
-        .preferredColorScheme(.dark)
     }
 
     #if os(tvOS)
@@ -904,8 +952,12 @@ struct PlayerView: View {
         onClose()
     }
 
-    /// Below the fold the controls stay, off the picture.
+    /// Below the fold the controls stay, off the picture, dimmed while they'd be hidden elsewhere.
     private var showsControls: Bool { controlsVisible || fold != nil }
+
+    /// How bright the controls below the fold are while they rest: dim enough to leave the picture
+    /// alone, bright enough to find.
+    private static let dimmedBelowFold = 0.3
 
     /// The controls show over the picture, so what's along its top and bottom keeps clear of
     /// their bars.
@@ -1168,7 +1220,8 @@ struct PlayerView: View {
     private var controlsOrnament: some View {
         PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
                        bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
-                       onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: playElsewhereAction)
+                       onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playOn: nil,
+                       watchTogether: watchTogetherAction)
             .padding(.top, 24)
     }
     #endif
@@ -1229,12 +1282,28 @@ struct PlayerView: View {
         #endif
     }
 
-    /// For a server title. On Apple TV, SharePlay starts from a title's page.
-    private var playElsewhereAction: (() -> Void)? {
+    private enum Elsewhere: Identifiable {
+        case playOn, sharePlay
+
+        var id: Self { self }
+    }
+
+    /// For a server title, on iPhone, iPad and the Mac.
+    private var playOnAction: (() -> Void)? {
+        #if os(iOS) || os(macOS)
+        model.item != nil ? { elsewhere = .playOn } : nil
+        #else
+        nil
+        #endif
+    }
+
+    /// For a server title: watches it with everyone on the call, or shows the group watching. On
+    /// Apple TV, SharePlay starts from a title's page.
+    private var watchTogetherAction: (() -> Void)? {
         #if os(tvOS)
         nil
         #else
-        model.item != nil ? { showsPlayElsewhere = true } : nil
+        model.item != nil ? { sharePlay.buttonTapped(for: .playback(model)) { elsewhere = .sharePlay } } : nil
         #endif
     }
 
@@ -1541,8 +1610,8 @@ struct PlayerView: View {
         let hadPanel: Bool
     }
 
-    /// A tap on the picture in `zone` (`PictureTaps`).
-    private func pictureTapped(_ zone: PictureTaps.Zone) {
+    /// A tap on the picture in `zone` (`PictureTaps`), at `location` in the picture where it's known.
+    private func pictureTapped(_ zone: PictureTaps.Zone, at location: CGPoint = .zero) {
         let canSkip = model.duration > 0 && controlsBeforeTap?.hadPanel != true
         switch pictureTaps.tap(at: ProcessInfo.processInfo.systemUptime, zone: zone, canSkip: canSkip) {
         case .toggleControls:
@@ -1553,7 +1622,7 @@ struct PlayerView: View {
             model.skip(by: forward ? PlayerModel.skipInterval : -PlayerModel.skipInterval)
             #if os(iOS)
             let taps = pictureSkip?.forward == forward ? pictureSkip?.taps ?? 0 : 0
-            pictureSkip = PictureSkip(forward: forward, taps: taps + 1)
+            pictureSkip = PictureSkip(forward: forward, taps: taps + 1, location: location, bendsPicture: splash(at: location))
             #endif
         case .fullScreen:
             restoreControls()
@@ -1569,10 +1638,22 @@ struct PlayerView: View {
     #endif
 
     #if os(iOS)
-    /// The side of the picture a run of double taps skips on, and how many taps it has had.
+    /// The side of the picture a run of double taps skips on, how many taps it has had, and where
+    /// the last one landed.
     private struct PictureSkip: Equatable {
         let forward: Bool
         let taps: Int
+        let location: CGPoint
+        /// The water bends the picture (`PictureRipples`), rather than light alone rippling over it.
+        let bendsPicture: Bool
+    }
+
+    /// Ripples the picture from `location`, a double tap's: false where its frame can't be read,
+    /// with Reduce Motion, and for Dolby Vision, whose frame as an output reads it is its base
+    /// layer, in the wrong colors where there's no other.
+    private func splash(at location: CGPoint) -> Bool {
+        guard !reduceMotion, model.videoFormat != .dolbyVision, pictureCover == nil else { return false }
+        return pictureRipples.splash(at: location)
     }
 
     /// A press held on the picture plays faster until it lets go, with no panel open.
@@ -1619,7 +1700,7 @@ struct PlayerView: View {
     /// there's a picture to look at, paused or at the end. A failure keeps them, for its way on.
     private func hideControls(explicit: Bool = false) {
         hideTask?.cancel()
-        guard explicit ? hasPicture : model.isPlaying, !model.scrubbing.isActive, panel == nil, fold == nil else { return }
+        guard explicit ? hasPicture : model.isPlaying, !model.scrubbing.isActive, panel == nil else { return }
         controlsVisible = false
         holdsControls = false
         #if os(tvOS)
@@ -1768,15 +1849,16 @@ private struct PlayerNotice: View {
 /// out and not drawn, gives the size. The system draws its icon in proportion to its own size,
 /// which at 36 points matches the 22-point symbols of the buttons beside it.
 struct RoutePicker: View {
+    @Environment(\.playerSymbolSide) private var symbolSide
+
     var body: some View {
-        Button {} label: { Color.clear.frame(width: 22, height: 22) }
+        Button {} label: { Color.clear.frame(width: symbolSide, height: symbolSide) }
             .buttonStyle(.platformGlass)
             .buttonBorderShape(.circle)
-            .controlSize(.large)
             .hidden()
             .overlay {
                 RoutePickerRepresentable()
-                    .frame(maxWidth: 36, maxHeight: 36)
+                    .frame(maxWidth: symbolSide * 36 / 22, maxHeight: symbolSide * 36 / 22)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .platformGlass(in: .circle)
                     .accessibilityLabel("AirPlay")
@@ -1809,42 +1891,34 @@ private struct RoutePickerRepresentable: NSViewRepresentable {
 #endif
 
 #if os(iOS)
-/// Locks the player in the shape it's in, as for watching lying down, or unlocks it to turn
-/// with the phone again. Lit while the lock is what keeps the player from turning with the phone.
-struct RotationLockButton: View {
+/// Turns the player the way the phone is, while the phone is turned out of the shape the player
+/// keeps (`PlayerRotation`): there only while there's that turn to take.
+struct RotateButton: View {
     var onUse: () -> Void = {}
-    @Environment(PlayerOrientationLock.self) private var lock: PlayerOrientationLock?
+    @Environment(PlayerRotation.self) private var rotation: PlayerRotation?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Counts the times its symbol has turned: once as it shows, and as the offer changes.
+    @State private var turns = 0
 
     var body: some View {
-        if let lock, lock.isAvailable {
+        if let rotation, let offer = rotation.offer {
             Button {
-                lock.toggle()
+                rotation.turn()
                 onUse()
             } label: {
-                Image(systemName: lock.isLocked ? "lock.rotation" : "lock.rotation.open")
+                Image(systemName: offer.isLandscape ? "rectangle.landscape.rotate" : "rectangle.portrait.rotate")
                     .font(.headline)
                     .frame(width: 22, height: 22)
                     .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.rotate.byLayer, options: .nonRepeating, value: turns)
             }
-            .modifier(LockStyle(isLit: lock.isTurnedAgainst))
+            // Turns as it's offered, the way the player would.
+            .task(id: offer) { if !reduceMotion { turns += 1 } }
+            .buttonStyle(.platformGlassProminent)
             .buttonBorderShape(.circle)
-            .controlSize(.large)
-            .accessibilityLabel("Rotation Lock")
-            .accessibilityValue(lock.isLocked ? "On" : "Off")
+            .accessibilityLabel(offer.isLandscape ? "Rotate to Landscape" : "Rotate to Portrait")
             .accessibilityShowsLargeContentViewer()
-            .accessibilityIdentifier("player.rotationLock")
-        }
-    }
-
-    private struct LockStyle: ViewModifier {
-        let isLit: Bool
-
-        func body(content: Content) -> some View {
-            if isLit {
-                content.buttonStyle(.platformGlassProminent)
-            } else {
-                content.buttonStyle(.platformGlass)
-            }
+            .accessibilityIdentifier("player.rotate")
         }
     }
 }

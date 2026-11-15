@@ -85,11 +85,6 @@ nonisolated struct WatchTogether: GroupActivity, Hashable {
     }
 }
 
-#if !os(tvOS)
-/// Offered in the share sheet, which starts SharePlay with people who aren't on a call yet.
-extension WatchTogether: Transferable {}
-#endif
-
 /// Told to the group by someone who can't watch with it.
 nonisolated struct CantWatch: Codable, Equatable, Sendable {
     enum Reason: Codable, Equatable, Sendable {

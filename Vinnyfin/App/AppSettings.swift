@@ -125,7 +125,7 @@ final class AppSettings {
     /// Switches the TV's frame rate and dynamic range to the video's (Apple TV).
     var matchContent = true { didSet { store(matchContent, Keys.matchContent) } }
     /// A landscape title turns the player to landscape on an iPhone held upright, Portrait
-    /// Orientation Lock or not (`PlayerOrientationLock`).
+    /// Orientation Lock or not (`PlayerRotation`).
     var playsVideosInLandscape = true { didSet { store(playsVideosInLandscape, Keys.playsVideosInLandscape) } }
     /// The sound Sounds plays (`SoundPlayer`), the one picked last.
     var sound = Sound.brownNoise { didSet { store(sound.rawValue, Keys.sound) } }

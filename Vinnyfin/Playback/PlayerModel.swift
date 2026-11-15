@@ -283,6 +283,9 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private var startsPaused = false
     @ObservationIgnored private var reportTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
+    /// How long each of the up-next countdown's seconds lasts: a second, but less in tests, which
+    /// would otherwise wait out every countdown.
+    @ObservationIgnored var countdownSecond: Duration = .seconds(1)
     /// The next episode with its versions, fetched as the up-next card comes up so it starts
     /// sooner, and the warming of its stream.
     @ObservationIgnored private var preparedNext: JellyfinItem?
@@ -2156,9 +2159,10 @@ final class PlayerModel: Identifiable {
         upNextCountdown = UpNextCountdown(generation: loads.generation, episodeId: current?.item?.id, nextEpisodeId: next.id,
                                           startedInCredits: inCredits)
         countdownTask?.cancel()
+        let second = countdownSecond
         countdownTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: second)
                 guard let self, !Task.isCancelled, var countdown = self.upNextCountdown else { return }
                 // Paused, or waiting for the stream, it waits too.
                 guard self.status == .playing || self.status == .ended else { continue }

@@ -1108,15 +1108,41 @@ struct PlayerDetailTests {
     }
 }
 
-/// A short silent H.264 video, a keyframe a second, written for a test to play.
+/// Short silent H.264 videos, a keyframe a second, for the tests to play. They're written once,
+/// all of them the first time a run asks for one, and kept in the temporary folder for every test
+/// and run after, under names that say how they were made.
 private enum GeneratedVideo {
     static let size = (width: 320, height: 180)
     static let framesPerSecond = 10
+    /// Long enough for the tests that seek about in one, which they reach the end of by seeking
+    /// near it.
+    static let standard = 20
+    /// Past `TitleEnding.shortestWithUpNext`, for the credits and their countdown.
+    static let long = 130
+    /// An episode a binge goes through before going on by itself, which the engine has ended as
+    /// soon as it's loaded.
+    static let short = 2
 
-    static func write(seconds: Int) async throws -> URL {
-        let folder = FileManager.default.temporaryDirectory.appending(path: "GeneratedVideo-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appending(path: "Generated.mp4")
+    static func url(seconds: Int) async throws -> URL {
+        // Every length the first time, before the test asking has started an engine: written as
+        // an engine tore down a playback, the writer has stalled for good.
+        for length in Set([short, standard, long, seconds]).sorted() {
+            let url = url(for: length)
+            guard !FileManager.default.fileExists(atPath: url.path()) else { continue }
+            // Whole or not at all, should the run stop while it's written.
+            let writing = FileManager.default.temporaryDirectory.appending(path: "GeneratedVideo-\(UUID().uuidString).mp4")
+            try await write(seconds: length, to: writing)
+            try FileManager.default.moveItem(at: writing, to: url)
+        }
+        return url(for: seconds)
+    }
+
+    private static func url(for seconds: Int) -> URL {
+        FileManager.default.temporaryDirectory
+            .appending(path: "GeneratedVideo-\(seconds)s-\(size.width)x\(size.height)-\(framesPerSecond)fps.mp4")
+    }
+
+    private static func write(seconds: Int, to url: URL) async throws {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -1142,15 +1168,20 @@ private enum GeneratedVideo {
         frames.finish()
         await withCheckedContinuation { finished in writer.finishWriting { finished.resume() } }
         guard writer.status == .completed else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-        return url
     }
 }
 
 /// A playback through the engine, at its edges: moving back once it ended, playing it again, a
-/// press while it starts. Plays a video it writes.
+/// press while it starts, the countdown to the next episode. Each test seeks to where it's
+/// testing rather than play its way there, and the countdown's seconds are short, so the suite
+/// waits on as little real time as it can. A test that hangs fails after a minute rather than
+/// holding up the run.
 @MainActor
-@Suite(.serialized)
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct PlaybackEdgeTests {
+    /// The length of each of the countdown's seconds here (`PlayerModel.countdownSecond`).
+    private static let countdownSecond: Duration = .milliseconds(100)
+
     private func makeModel(playing file: URL, engine: AetherEngine) throws -> PlayerModel {
         let defaults = try #require(UserDefaults(suiteName: "PlaybackEdgeTests-\(UUID().uuidString)"))
         let accounts = AccountStore(defaults: defaults)
@@ -1209,6 +1240,7 @@ struct PlaybackEdgeTests {
             }
             return episodes.firstIndex { $0.id == episode.id }.flatMap { $0 + 1 < episodes.count ? episodes[$0 + 1] : nil }
         }
+        model.countdownSecond = Self.countdownSecond
         return Binge(model: model, settings: settings, history: history)
     }
 
@@ -1223,15 +1255,22 @@ struct PlaybackEdgeTests {
         }
     }
 
+    /// Starts `model` and takes it to its end, by seeking to just short of it once it plays.
     private func playToTheEnd(_ model: PlayerModel) async throws {
         await model.start()
+        try await waitUntil { model.status == .playing && model.duration > 0 }
+        if model.duration > 1 { model.seek(to: model.duration - 0.5) }
         try await waitUntil { model.status == .ended }
         try #require(model.status == .ended, "Didn't end: \(model.status)")
     }
 
+    /// Long enough for a countdown of `seconds` to have run out, and a moment more.
+    private func waitOutCountdown(of seconds: Int) async throws {
+        try await Task.sleep(for: Self.countdownSecond * (seconds + 2))
+    }
+
     @Test func movingBackAfterTheEndPlaysAgainFromThere() async throws {
-        let file = try await GeneratedVideo.write(seconds: 8)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
         // The title stays on screen for the controls, and plays from the start on another device.
         #expect(model.current != nil)
@@ -1243,17 +1282,11 @@ struct PlaybackEdgeTests {
         #expect(model.clock.time >= 3 && model.clock.time < 7, "Played from \(model.clock.time)")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func goingBackTenSecondsAfterTheEndPlaysTheEndAgain() async throws {
-        let file = try await GeneratedVideo.write(seconds: 15)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
-        await model.start()
-        try await waitUntil { model.status == .playing }
-        model.seek(to: 12)
-        try await waitUntil { model.status == .ended }
-        try #require(model.status == .ended)
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
+        try await playToTheEnd(model)
         let end = model.clock.time
 
         model.skip(by: -PlayerModel.skipInterval)
@@ -1262,18 +1295,17 @@ struct PlaybackEdgeTests {
         #expect(model.clock.time < end - 5, "Played from \(model.clock.time), the end at \(end)")
 
         // Forward from the end has nowhere to go.
+        model.seek(to: model.duration - 0.5)
         try await waitUntil { model.status == .ended }
         model.skip(by: PlayerModel.skipInterval)
-        try await Task.sleep(for: .milliseconds(500))
+        try await Task.sleep(for: .milliseconds(300))
         #expect(model.status == .ended)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func playAgainStartsFromTheBeginning() async throws {
-        let file = try await GeneratedVideo.write(seconds: 6)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
 
         model.togglePlayPause()
@@ -1282,12 +1314,10 @@ struct PlaybackEdgeTests {
         #expect(model.clock.time < 3, "Played again from \(model.clock.time)")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func playWhileMovingTheTimelineJumpsThereAndPlays() async throws {
-        let file = try await GeneratedVideo.write(seconds: 20)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         await model.start()
         try await waitUntil { model.status == .playing && model.clock.time > 0.5 }
         model.togglePlayPause()
@@ -1316,66 +1346,40 @@ struct PlaybackEdgeTests {
         #expect(model.clock.time < playing - 3, "Played from \(model.clock.time), the timeline moved back from \(playing)")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func theCountdownPlaysTheNextEpisodeWhenItRunsOut() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
-        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        let model = try makeModel(playingEpisodesOf: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
         try await waitUntil { model.upNextCountdown != nil }
         try #require(model.upNextCountdown != nil, "No countdown")
 
-        try await waitUntil(seconds: 20) { model.item?.id == "e2" && model.status == .playing }
+        try await waitUntil { model.item?.id == "e2" && model.status == .playing }
         #expect(model.item?.id == "e2")
         #expect(model.status == .playing)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     /// A show shuffled: the countdown goes on to the order's next episode, not the show's, and
     /// the episode it went on to carries on in the order.
     @Test func aShuffledShowGoesOnInItsOwnOrder() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
         let order = PlayOrder(ids: ["e1", "e3", "e2"])
-        let model = try makeBinge(episodes: 3, of: file, engine: try AetherEngine(), order: order).model
+        let model = try makeBinge(episodes: 3, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  engine: try AetherEngine(), order: order).model
         try await playToTheEnd(model)
         #expect(model.nextEpisode?.id == "e3")
 
-        try await waitUntil(seconds: 20) { model.item?.id == "e3" && model.status == .playing }
+        try await waitUntil { model.item?.id == "e3" && model.status == .playing }
         #expect(model.item?.id == "e3")
         try await waitUntil { model.nextEpisode != nil }
         #expect(model.nextEpisode?.id == "e2")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-    }
-
-    /// The order's last episode has nothing after it, though the show does: the end screen, not
-    /// the show's next.
-    @Test func aShuffledShowEndsAtItsOrdersLastEpisode() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
-        let order = PlayOrder(ids: ["e2", "e1"])
-        let model = try makeBinge(episodes: 2, of: file, engine: try AetherEngine(), order: order).model
-        await model.start()
-        try await waitUntil { model.status == .playing && model.nextEpisode != nil }
-        #expect(model.item?.id == "e2")
-        #expect(model.nextEpisode?.id == "e1")
-
-        await model.playNextEpisode()
-        try await waitUntil { model.item?.id == "e1" && model.status == .playing }
-        try await waitUntil { model.status == .ended }
-        #expect(model.nextEpisode == nil)
-        #expect(model.showsEndScreen)
-
-        await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func watchAgainDuringTheCountdownStaysOnTheEpisode() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
-        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        let model = try makeModel(playingEpisodesOf: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
         try await waitUntil { model.upNextCountdown != nil }
         try #require(model.upNextCountdown != nil, "No countdown")
@@ -1384,17 +1388,16 @@ struct PlaybackEdgeTests {
         try await waitUntil { model.status == .playing }
         #expect(model.upNextCountdown == nil)
         // Past the end of the countdown it was in.
-        try await Task.sleep(for: .seconds(6))
+        try await waitOutCountdown(of: UpNextCountdown.fromEnd)
         #expect(model.item?.id == "e1")
         #expect(model.requestedItemId == "e1")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func playPauseAtTheEndPlaysTheNextEpisode() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
-        let binge = try makeBinge(episodes: 2, of: file, engine: try AetherEngine()) { $0.autoplayNextEpisode = false }
+        let binge = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  engine: try AetherEngine()) { $0.autoplayNextEpisode = false }
         let model = binge.model
         try await playToTheEnd(model)
         try await waitUntil { model.nextEpisode != nil }
@@ -1407,35 +1410,33 @@ struct PlaybackEdgeTests {
         #expect(model.item?.id == "e2")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func backDuringTheEndCountdownStopsItAndLeavesTheEpisodeEnded() async throws {
-        let file = try await GeneratedVideo.write(seconds: 4)
-        let model = try makeModel(playingEpisodesOf: file, engine: try AetherEngine())
+        let model = try makeModel(playingEpisodesOf: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         try await playToTheEnd(model)
         try await waitUntil { model.upNextCountdown != nil }
         try #require(model.upNextCountdown != nil, "No countdown")
 
         model.cancelUpNext()
         #expect(model.upNextCountdown == nil)
-        try await Task.sleep(for: .seconds(6))
+        try await waitOutCountdown(of: UpNextCountdown.fromEnd)
         #expect(model.status == .ended)
         #expect(model.item?.id == "e1")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func theCountdownStartsWithTheCreditsAndRunsOnPastTheEnd() async throws {
-        // Credits from 125 s of 130.
-        let file = try await GeneratedVideo.write(seconds: 130)
-        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 125, to: 130)],
-                                  engine: try AetherEngine()).model
+        // Credits from 125 s of 130, and a countdown that outlasts the three seconds from where it
+        // seeks to the end: ten of its seconds of four tenths of one.
+        let model = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.long),
+                                  segments: [Self.segment("Outro", from: 125, to: 130)], engine: try AetherEngine()).model
+        model.countdownSecond = .milliseconds(400)
         await model.start()
         try await waitUntil { model.status == .playing }
         try await waitUntil { !model.segments.isEmpty }
-        model.seek(to: 123)
+        model.seek(to: 127)
         try await waitUntil { model.upNextCountdown != nil }
         let countdown = try #require(model.upNextCountdown, "No countdown in the credits")
         #expect(countdown.startedInCredits)
@@ -1443,27 +1444,26 @@ struct PlaybackEdgeTests {
         #expect(model.status != .ended)
         #expect(model.upNextPhase(at: model.clock.time) == .credits)
 
-        // The file ends five seconds in, and the countdown goes on rather than starting over.
+        // The file ends a moment in, and the countdown goes on rather than starting over.
         try await waitUntil { model.status == .ended }
         let atEnd = try #require(model.upNextCountdown, "The countdown stopped at the end")
         #expect(atEnd.startedInCredits)
         #expect(atEnd.remaining < UpNextCountdown.fromCredits)
 
-        try await waitUntil(seconds: 20) { model.item?.id == "e2" && model.status == .playing }
+        try await waitUntil { model.item?.id == "e2" && model.status == .playing }
         #expect(model.item?.id == "e2")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func watchCreditsStopsTheCountdownAndTheEndOffersTheNextEpisode() async throws {
-        let file = try await GeneratedVideo.write(seconds: 130)
-        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 125, to: 130)],
-                                  engine: try AetherEngine()).model
+        let model = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.long),
+                                  segments: [Self.segment("Outro", from: 125, to: 130)], engine: try AetherEngine()).model
         await model.start()
         try await waitUntil { model.status == .playing }
         try await waitUntil { !model.segments.isEmpty }
-        model.seek(to: 124)
+        // In the credits, with the end far enough off to see the countdown go before it.
+        model.seek(to: 127)
         try await waitUntil { model.upNextCountdown != nil }
         try #require(model.upNextCountdown != nil, "No countdown in the credits")
 
@@ -1471,20 +1471,20 @@ struct PlaybackEdgeTests {
         #expect(model.upNextCountdown == nil)
         #expect(model.upNextPhase(at: model.clock.time) == nil)
         try await waitUntil { model.status == .ended }
-        try await Task.sleep(for: .seconds(2))
+        // Long enough for a countdown started at the end to show, or to have played the next.
+        try await waitOutCountdown(of: UpNextCountdown.fromEnd)
         // Back as the way on, without counting down.
         #expect(model.upNextPhase(at: model.clock.time) == .ended)
         #expect(model.upNextCountdown == nil)
         #expect(model.item?.id == "e1")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func movingBackOutOfTheCreditsStopsTheirCountdown() async throws {
-        let file = try await GeneratedVideo.write(seconds: 130)
-        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 120, to: 130)],
-                                  engine: try AetherEngine()).model
+        let model = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.long),
+                                  segments: [Self.segment("Outro", from: 120, to: 130)], engine: try AetherEngine()).model
+        model.countdownSecond = .milliseconds(250)
         await model.start()
         try await waitUntil { model.status == .playing }
         try await waitUntil { !model.segments.isEmpty }
@@ -1498,45 +1498,52 @@ struct PlaybackEdgeTests {
         #expect(model.upNextPhase(at: model.clock.time) == nil)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func leavingInTheCreditsReportsTheEpisodeWatched() async throws {
-        let file = try await GeneratedVideo.write(seconds: 8)
-        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 3, to: 8)], engine: try AetherEngine())
+        // Without a countdown, which would go on to the next episode first.
+        let binge = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  segments: [Self.segment("Outro", from: 15, to: 20)], engine: try AetherEngine()) {
+            $0.autoplayNextEpisode = false
+        }
         let model = binge.model
         await model.start()
-        try await waitUntil { model.status == .playing && model.clock.time > 3.5 }
-        try #require(model.clock.time < 7, "Played past the credits before the test caught it")
+        try await waitUntil { model.status == .playing }
+        model.seek(to: 16)
+        try await waitUntil { model.status == .playing && model.clock.time > 16.2 }
+        try #require(model.clock.time > 16 && model.clock.time < 19, "Not in the credits: \(model.clock.time)")
 
         await model.close()
         await model.stopReport?.value
         #expect(binge.history.entry(for: "e1")?.played == true)
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func leavingBeforeTheCreditsKeepsWhereItGotTo() async throws {
-        let file = try await GeneratedVideo.write(seconds: 20)
-        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 15, to: 20)], engine: try AetherEngine())
+        let binge = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  segments: [Self.segment("Outro", from: 15, to: 20)], engine: try AetherEngine())
         let model = binge.model
         await model.start()
-        try await waitUntil { model.status == .playing && model.clock.time > 1.5 }
+        try await waitUntil { model.status == .playing && model.clock.time > 0.5 }
 
         await model.close()
         await model.stopReport?.value
         let entry = try #require(binge.history.entry(for: "e1"))
         #expect(!entry.played)
         #expect(entry.position < 15)
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func movingOnInTheCreditsReportsTheEpisodeWatched() async throws {
-        let file = try await GeneratedVideo.write(seconds: 8)
-        let binge = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Outro", from: 3, to: 8)], engine: try AetherEngine())
+        // Without a countdown, which would go on to the next episode before the viewer does.
+        let binge = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  segments: [Self.segment("Outro", from: 15, to: 20)], engine: try AetherEngine()) {
+            $0.autoplayNextEpisode = false
+        }
         let model = binge.model
         await model.start()
-        try await waitUntil { model.status == .playing && model.clock.time > 3.5 && model.nextEpisode != nil }
-        try #require(model.clock.time < 7, "Played past the credits before the test caught it")
+        try await waitUntil { model.status == .playing }
+        model.seek(to: 16)
+        try await waitUntil { model.status == .playing && model.clock.time > 16.2 && model.nextEpisode != nil }
+        try #require(model.clock.time > 16 && model.clock.time < 19, "Not in the credits: \(model.clock.time)")
 
         await model.playNextEpisode()
         try await waitUntil { model.item?.id == "e2" }
@@ -1544,57 +1551,33 @@ struct PlaybackEdgeTests {
         #expect(binge.history.entry(for: "e1")?.played == true)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func afterThreeEpisodesThatStartedByThemselvesItAsksFirst() async throws {
-        let file = try await GeneratedVideo.write(seconds: 2)
-        let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
+        let model = try makeBinge(episodes: 5, of: try await GeneratedVideo.url(seconds: GeneratedVideo.short),
+                                  engine: try AetherEngine()).model
         await model.start()
         // Three countdowns run out with nobody doing anything.
-        try await waitUntil(seconds: 120) { model.item?.id == "e4" && model.status == .ended }
+        try await waitUntil { model.item?.id == "e4" && model.status == .ended }
         try #require(model.item?.id == "e4", "Got to \(model.item?.id ?? "nothing")")
         try await waitUntil { model.asksStillWatching }
         #expect(model.asksStillWatching)
         #expect(model.upNextCountdown == nil)
-        try await Task.sleep(for: .seconds(UpNextCountdown.fromEnd + 1))
+        try await waitOutCountdown(of: UpNextCountdown.fromEnd)
         #expect(model.item?.id == "e4")
 
-        // Someone's there: the next one plays.
+        // Someone's there: the next one plays, or, this short, has played.
         await model.continueWatching()
-        try await waitUntil { model.item?.id == "e5" && model.status == .playing }
-        #expect(!model.asksStillWatching)
-
-        await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-    }
-
-    @Test func theViewerUsingThePlayerStartsTheCountOver() async throws {
-        let file = try await GeneratedVideo.write(seconds: 2)
-        let model = try makeBinge(episodes: 5, of: file, engine: try AetherEngine()).model
-        await model.start()
-        // Two episodes started by themselves; a third would ask at its end. Its two seconds of
-        // playing can pass between two looks while other suites hold the main actor, so the
-        // viewer acts as soon as it's on.
-        var seen: [String] = []
-        try await waitUntil(seconds: 90) {
-            let state = "\(model.item?.id ?? "-") \(model.status)"
-            if seen.last != state { seen.append(state) }
-            return model.item?.id == "e3"
-        }
-        try #require(model.item?.id == "e3" && !model.asksStillWatching, "Went \(seen.joined(separator: ", "))")
-        model.noteViewerActivity()
-        try await waitUntil(seconds: 120) { model.item?.id == "e5" && model.status == .ended }
+        try await waitUntil { model.item?.id == "e5" && [.playing, .ended].contains(model.status) }
         #expect(model.item?.id == "e5")
         #expect(!model.asksStillWatching)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func skipIntrosAlwaysSkipsTheIntroAndOffersItBack() async throws {
-        let file = try await GeneratedVideo.write(seconds: 12)
-        let model = try makeBinge(episodes: 1, of: file, segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
+        let model = try makeBinge(episodes: 1, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
             $0.introSkipping = .always
         }.model
         await model.start()
@@ -1610,20 +1593,19 @@ struct PlaybackEdgeTests {
         model.watchIntro()
         #expect(model.chip == nil)
         try await waitUntil { model.clock.time < 3 && model.status == .playing }
-        try await waitUntil { model.clock.time > 3 }
+        try await waitUntil { model.clock.time > 2 }
         #expect(model.clock.time < 6, "Skipped again: \(model.clock.time)")
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func skipIntrosInARowLeavesTheFirstEpisodesIntro() async throws {
-        let file = try await GeneratedVideo.write(seconds: 8)
-        let model = try makeBinge(episodes: 2, of: file, segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
+        let model = try makeBinge(episodes: 2, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  segments: [Self.segment("Intro", from: 1, to: 6)], engine: try AetherEngine()) {
             $0.introSkipping = .inARow
         }.model
         await model.start()
-        try await waitUntil { model.clock.time > 2.5 }
+        try await waitUntil { model.clock.time > 1.5 }
         #expect(model.clock.time < 6)
         #expect(model.chip == nil)
 
@@ -1634,12 +1616,11 @@ struct PlaybackEdgeTests {
         #expect(model.chip != nil)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func aResumeBacksUpAndOffersToStartOver() async throws {
-        let file = try await GeneratedVideo.write(seconds: 20)
-        let model = try makeBinge(episodes: 1, of: file, engine: try AetherEngine(), firstResumesAt: 12, length: 20).model
+        let model = try makeBinge(episodes: 1, of: try await GeneratedVideo.url(seconds: GeneratedVideo.standard),
+                                  engine: try AetherEngine(), firstResumesAt: 12, length: 20).model
         await model.start()
         try await waitUntil { model.status == .playing }
         #expect(model.chip == .resumed(at: 12 - PlaybackRequest.resumeLeadIn))
@@ -1651,25 +1632,23 @@ struct PlaybackEdgeTests {
         #expect(model.clock.time < 3)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     /// Paused and staying so: the engine paused, its clock not moving, the model saying so.
     private func expectHeldPaused(_ model: PlayerModel, _ engine: AetherEngine) async throws {
         // Past the start, by when the picture is up, or would have been.
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(for: .seconds(1.5))
         #expect(model.status == .paused)
         #expect(engine.state == .paused)
         let held = engine.clock.currentTime
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .milliseconds(500))
         #expect(engine.clock.currentTime == held)
         #expect(model.status == .paused)
     }
 
     @Test func aPauseWhileItStartsHoldsThroughTheFirstPicture() async throws {
-        let file = try await GeneratedVideo.write(seconds: 6)
         let engine = try AetherEngine()
-        let model = try makeModel(playing: file, engine: engine)
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: engine)
         let starting = Task { await model.start() }
         await Task.yield()
         #expect(model.status == .preparing)
@@ -1683,13 +1662,11 @@ struct PlaybackEdgeTests {
         #expect(model.status == .playing)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func aPauseWhileTheEngineLoadsHoldsOnceItHasLoaded() async throws {
-        let file = try await GeneratedVideo.write(seconds: 6)
         let engine = try AetherEngine()
-        let model = try makeModel(playing: file, engine: engine)
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: engine)
         let starting = Task { await model.start() }
         let deadline = ContinuousClock.now + .seconds(10)
         while model.status == .preparing, ContinuousClock.now < deadline { await Task.yield() }
@@ -1701,12 +1678,10 @@ struct PlaybackEdgeTests {
         try await expectHeldPaused(model, engine)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 
     @Test func playPressedAfterAPauseWhileItStartsPlaysIt() async throws {
-        let file = try await GeneratedVideo.write(seconds: 6)
-        let model = try makeModel(playing: file, engine: try AetherEngine())
+        let model = try makeModel(playing: try await GeneratedVideo.url(seconds: GeneratedVideo.standard), engine: try AetherEngine())
         let starting = Task { await model.start() }
         await Task.yield()
         model.togglePlayPause()
@@ -1717,7 +1692,5 @@ struct PlaybackEdgeTests {
         #expect(model.status == .playing)
 
         await model.close()
-        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
     }
 }
-

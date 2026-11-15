@@ -119,15 +119,30 @@ struct HandoffTests {
         otherServer.serverName = "Work"
         #expect(handoff.mismatch(with: otherServer) == .otherServer(otherServer))
 
-        #expect(handoff.explanation(for: .notSignedIn, on: "iPad")
+        // Neither switching to a kept sign-in nor adding one signs anyone out.
+        #expect(handoff.explanation(for: .notSignedIn, isKept: false, on: "iPad")
             == "“Big Test Movie” is from Home, signed in as Alex. This iPad isn't signed in.")
-        #expect(handoff.explanation(for: .otherServer(otherServer), on: "Mac")
-            == "“Big Test Movie” is from Home, signed in as Alex. This Mac is signed in to Work as Alex, and switching signs it out there.")
-        #expect(handoff.explanation(for: .otherUser(otherUser), on: "iPhone")
-            == "“Big Test Movie” is from Home, signed in as Alex. This iPhone is signed in to it as Sam, and switching signs Sam out.")
-        #expect(handoff.signInTitle(for: .notSignedIn) == "Sign In to Home")
-        #expect(handoff.signInTitle(for: .otherServer(otherServer)) == "Switch to Home")
-        #expect(handoff.signInTitle(for: .otherUser(otherUser)) == "Switch to Alex")
+        #expect(handoff.explanation(for: .notSignedIn, isKept: true, on: "iPad")
+            == "“Big Test Movie” is from Home, signed in as Alex. This iPad isn't signed in. Alex's sign-in is kept on it, so switching needs no password.")
+        #expect(handoff.explanation(for: .otherServer(otherServer), isKept: true, on: "Mac")
+            == "“Big Test Movie” is from Home, signed in as Alex. This Mac is using Work as Alex. Switching needs no password, and Alex on Work stays signed in to switch back to.")
+        #expect(handoff.explanation(for: .otherServer(otherServer), isKept: false, on: "Mac")
+            == "“Big Test Movie” is from Home, signed in as Alex. This Mac is using Work as Alex. Adding Alex keeps Alex on Work signed in to switch back to.")
+        #expect(handoff.explanation(for: .otherUser(otherUser), isKept: true, on: "iPhone")
+            == "“Big Test Movie” is from Home, signed in as Alex. This iPhone is using it as Sam. Switching needs no password, and Sam stays signed in to switch back to.")
+        #expect(handoff.explanation(for: .otherUser(otherUser), isKept: false, on: "iPhone")
+            == "“Big Test Movie” is from Home, signed in as Alex. This iPhone is using it as Sam. Adding Alex keeps Sam signed in to switch back to.")
+        for mismatch in [Handoff.Mismatch.notSignedIn, .otherServer(otherServer), .otherUser(otherUser)] {
+            for isKept in [false, true] {
+                #expect(!handoff.explanation(for: mismatch, isKept: isKept, on: "iPhone").contains("signs"))
+            }
+        }
+        #expect(handoff.signInTitle(for: .notSignedIn, isKept: false) == "Sign In as Alex on Home")
+        #expect(handoff.signInTitle(for: .notSignedIn, isKept: true) == "Switch to Alex")
+        #expect(handoff.signInTitle(for: .otherServer(otherServer), isKept: true) == "Switch to Alex on Home")
+        #expect(handoff.signInTitle(for: .otherServer(otherServer), isKept: false) == "Add Alex on Home")
+        #expect(handoff.signInTitle(for: .otherUser(otherUser), isKept: true) == "Switch to Alex")
+        #expect(handoff.signInTitle(for: .otherUser(otherUser), isKept: false) == "Add Alex")
     }
 
     @Test func linksCarryThePositionInWholeSeconds() throws {

@@ -64,6 +64,55 @@ struct DownloadMovieIntent: AppIntent {
     }
 }
 
+/// Pausing the downloads or resuming them.
+nonisolated enum DownloadsAction: String, AppEnum {
+    case pause, resume
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Pause or Resume"
+    static let caseDisplayRepresentations: [DownloadsAction: DisplayRepresentation] = [
+        .pause: DisplayRepresentation(title: "Pause", synonyms: ["Stop", "Hold"]),
+        .resume: DisplayRepresentation(title: "Resume", synonyms: ["Continue", "Start"]),
+    ]
+
+    /// What's asked of downloads with nothing said: pausing while any is under way or waiting its
+    /// turn, and resuming the paused ones otherwise, as the Downloads control's switch does.
+    static func toggling(_ jobs: [DownloadJob]) -> DownloadsAction {
+        jobs.contains { $0.status == .active } ? .pause : .resume
+    }
+}
+
+/// Pauses every download or resumes the paused ones, as asked: "Pause downloads in vinnyfin",
+/// "Resume my vinnyfin downloads". Asked for neither, it does whichever does something
+/// (`DownloadsAction.toggling`). One App Shortcut for both, of the ten an app has.
+struct PauseOrResumeDownloadsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Pause or Resume Downloads"
+    static let description = IntentDescription("Pauses every download under way, or resumes the paused ones. Downloads that stopped wait for Retry in vinnyfin.")
+    static let supportedModes: IntentModes = .background
+
+    @Parameter(title: "Pause or Resume")
+    var action: DownloadsAction?
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("\(\.$action) downloads")
+    }
+
+    @Dependency private var downloads: DownloadManager
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        switch action ?? DownloadsAction.toggling(downloads.jobs) {
+        case .pause:
+            let count = downloads.jobs.count { $0.status == .active }
+            downloads.pauseAll()
+            return .result(dialog: IntentDialog("\(IntentSummaries.paused(count))"))
+        case .resume:
+            let count = downloads.jobs.count { $0.status == .paused }
+            downloads.resumeAll()
+            return .result(dialog: IntentDialog("\(IntentSummaries.resumed(count))"))
+        }
+    }
+}
+
 struct PauseAllDownloadsIntent: AppIntent {
     static let title: LocalizedStringResource = "Pause Downloads"
     static let description = IntentDescription("Pauses every download under way.")

@@ -117,6 +117,7 @@
 				App/WidgetArtwork.swift,
 				Downloads/DownloadsSnapshot.swift,
 				Intents/DownloadsControlIntent.swift,
+				Intents/ResumeWatchingIntent.swift,
 				Jellyfin/AccountStore.swift,
 				Jellyfin/JellyfinClient.swift,
 				Jellyfin/JellyfinModels.swift,

@@ -892,6 +892,7 @@ final class PlayerModel: Identifiable {
             self.followEnding(at: time)
             self.skipIntroIfDue(at: time)
             self.endReplaySubtitlesIfDue(at: time)
+            self.followChapter(at: time)
         }
         .store(in: &subscriptions)
         engine.clock.$sourceTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
@@ -2546,10 +2547,17 @@ final class PlayerModel: Identifiable {
     /// What plays, for Now Playing's card: its title, show, number and picture (`setNowPlaying`).
     @ObservationIgnored private var nowPlayingIdentity: [String: Any] = [:]
 
-    /// The card: what plays, with the audio tracks and subtitles there are to choose among and
-    /// those chosen (`NowPlayingLanguages`).
+    /// The chapter the card last showed playing, as Now Playing numbers it (`nowPlayingChapterNumber`).
+    @ObservationIgnored private var nowPlayingChapter: Int?
+
+    /// The card: what plays, how many chapters it has and which is playing, and the audio tracks
+    /// and subtitles there are to choose among and those chosen (`NowPlayingLanguages`).
     private var nowPlayingCard: [String: Any] {
         var info = nowPlayingIdentity
+        if !chapters.isEmpty {
+            info[MPNowPlayingInfoPropertyChapterCount] = chapters.count
+            info[MPNowPlayingInfoPropertyChapterNumber] = Self.nowPlayingChapterNumber(in: chapters, at: clock.time)
+        }
         let audio = languageOptions(.audio)
         let subtitles = languageOptions(.subtitles)
         var groups: [MPNowPlayingInfoLanguageOptionGroup] = []
@@ -2582,7 +2590,21 @@ final class PlayerModel: Identifiable {
         }
     }
 
-    /// Publishes the card, as what plays or its tracks change.
+    /// The chapter playing at `time` among `chapters`, in the order they play, as Now Playing
+    /// numbers them: from zero. None before the first starts.
+    nonisolated static func nowPlayingChapterNumber(in chapters: [ChapterMark], at time: Double) -> Int? {
+        ChapterMark.current(in: chapters, at: time).flatMap { chapters.firstIndex(of: $0) }
+    }
+
+    /// Publishes the card again as another chapter starts, playing on or after a seek.
+    private func followChapter(at time: Double) {
+        let number = Self.nowPlayingChapterNumber(in: chapters, at: time)
+        guard number != nowPlayingChapter else { return }
+        nowPlayingChapter = number
+        publishNowPlayingCard()
+    }
+
+    /// Publishes the card, as what plays, its chapter or its tracks change.
     private func publishNowPlayingCard() {
         #if os(iOS) || os(tvOS)
         engine.setVideoNowPlayingInfo(nowPlayingCard)

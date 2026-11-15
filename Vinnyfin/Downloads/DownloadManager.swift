@@ -1824,7 +1824,10 @@ final class DownloadManager {
             // Its subtitles go beside it now.
             extrasDone.remove(jobs[index].id)
             fetchExtrasSoon()
-            notifications.ready(jobs[index])
+            // An episode shows its show's poster, which says which show it is.
+            let poster = jobs[index].seriesId.flatMap { artworkURL(itemId: $0, kind: .primary) }
+                ?? artworkURL(itemId: jobs[index].itemId, kind: .primary)
+            notifications.ready(jobs[index], poster: poster)
         } catch {
             jobs[index].status = .failed
             jobs[index].lastError = "Couldn't move the finished file into place: \(error.localizedDescription)"

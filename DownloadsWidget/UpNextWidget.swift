@@ -55,11 +55,32 @@ nonisolated struct UpNextProvider: TimelineProvider {
         UpNextEntry(row: row, content: .tiles(Self.samples(of: row, count: UpNextWidgets.Layout(context.family).count)))
     }
 
+    /// The gallery's preview shows the signed-in server's own titles when they come within
+    /// `previewBudget`, and titles shaped like them otherwise, or when there are none to show.
     func getSnapshot(in context: Context, completion: @escaping @Sendable (UpNextEntry) -> Void) {
-        guard !context.isPreview else { return completion(placeholder(in: context)) }
         let request = Request(context, row: row)
-        Task { completion(await Self.entry(for: request)) }
+        guard context.isPreview else {
+            Task { completion(await Self.entry(for: request)) }
+            return
+        }
+        let samples = placeholder(in: context)
+        Task {
+            let entry = await withTaskGroup(of: UpNextEntry?.self) { group in
+                group.addTask { await Self.entry(for: request) }
+                group.addTask {
+                    try? await Task.sleep(for: Self.previewBudget)
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first
+            }
+            guard let entry, case .tiles(let tiles) = entry.content, !tiles.isEmpty else { return completion(samples) }
+            completion(entry)
+        }
     }
+
+    static let previewBudget = Duration.seconds(2)
 
     func getTimeline(in context: Context, completion: @escaping @Sendable (Timeline<UpNextEntry>) -> Void) {
         let request = Request(context, row: row)
@@ -102,12 +123,24 @@ nonisolated struct UpNextProvider: TimelineProvider {
             return UpNextEntry(row: request.row, content: problem.map { .signInProblem($0) } ?? .signedOut)
         }
         do {
+            let limit = request.layout.count
+            let owner = AppLink.Owner(session.account)
             let items = try await session.client.page(of: request.row.source, userId: session.userId,
-                                                      startIndex: 0, limit: request.layout.count).items
-            let tiles = UpNextWidgets.tiles(from: items, limit: request.layout.count, for: request.row)
+                                                      startIndex: 0, limit: limit).items
+            var tiles = UpNextWidgets.tiles(from: items, limit: limit, for: request.row, owner: owner)
+            var listed = items
+            // The row's own titles show without the newest when those can't be had.
+            if tiles.count < limit, UpNextWidgets.fills(request.row),
+               let newest = try? await session.client.page(of: UpNextWidgets.Row.recentlyAdded.source, userId: session.userId,
+                                                           startIndex: 0, limit: limit).items {
+                tiles = UpNextWidgets.filling(tiles, from: newest, limit: limit, server: session.account.serverTitle, owner: owner)
+                listed += newest
+            }
             guard let width = request.pictureWidth else { return UpNextEntry(row: request.row, content: .tiles(tiles)) }
             let shown = Set(tiles.map(\.itemId))
-            let pictures = await pictures(of: items.filter { shown.contains($0.id) }, width: width, session: session)
+            var picked = Set<String>()
+            let pictures = await pictures(of: listed.filter { shown.contains($0.id) && picked.insert($0.id).inserted },
+                                          width: width, session: session)
             return UpNextEntry(row: request.row, content: .tiles(UpNextWidgets.withArtwork(tiles, pictures: pictures)))
         } catch {
             log.error("Couldn't load \(request.row.title, privacy: .public) from \(session.client.serverURL, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -165,7 +198,13 @@ nonisolated struct UpNextProvider: TimelineProvider {
             item.seriesName = "A Show"
             item.parentIndexNumber = 1
             item.indexNumber = number
-            if number.isMultiple(of: 2) { item.userData = UserItemData(playedPercentage: Double(20 + 15 * number)) }
+            // Partway through, as an episode the row resumes says how long it has left.
+            if number.isMultiple(of: 2) {
+                let minutes: Int64 = 45
+                item.runTimeTicks = minutes * 60 * 10_000_000
+                let watched = Double(20 + 15 * number) / 100
+                item.userData = UserItemData(playbackPositionTicks: Int64(Double(item.runTimeTicks ?? 0) * min(0.9, watched)))
+            }
             return UpNextWidgets.Tile(item)
         }
     }
@@ -197,7 +236,8 @@ private struct UpNextView: View {
 }
 
 /// The titles: one with its picture in a small widget and side by side in the bigger ones, under
-/// the row's name in the biggest; text alone on the Lock Screen.
+/// the row's name; text alone on the Lock Screen. A medium widget with one title gives it the
+/// whole widget.
 private struct TilesView: View {
     let row: UpNextWidgets.Row
     let tiles: [UpNextWidgets.Tile]
@@ -216,6 +256,13 @@ private struct TilesView: View {
             TileView(tile: tiles[0], isLarge: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .widgetURL(tiles[0].link)
+        case .systemMedium where tiles.count == 1:
+            VStack(alignment: .leading, spacing: 8) {
+                RowName(row: row)
+                WideTileView(tile: tiles[0])
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .widgetURL(tiles[0].link)
         default:
             grid
         }
@@ -226,15 +273,15 @@ private struct TilesView: View {
         let rows = stride(from: 0, to: layout.count, by: layout.columns).map { start in
             (start..<start + layout.columns).map { $0 < tiles.count ? tiles[$0] : nil }
         }
-        return VStack(alignment: .leading, spacing: UpNextWidgets.Layout.spacing) {
-            if layout.count > layout.columns {
-                Text(row.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            }
+        // One row of titles has the height left under the row's name, and its pictures give way.
+        let isOneRow = rows.count == 1
+        return VStack(alignment: .leading, spacing: isOneRow ? 6 : UpNextWidgets.Layout.spacing) {
+            RowName(row: row)
             ForEach(rows.indices, id: \.self) { index in
                 HStack(alignment: .top, spacing: UpNextWidgets.Layout.spacing) {
                     ForEach(rows[index].indices, id: \.self) { column in
                         if let tile = rows[index][column] {
-                            Link(destination: tile.link) { TileView(tile: tile, isLarge: false) }
+                            Link(destination: tile.link) { TileView(tile: tile, isLarge: false, givesWay: isOneRow) }
                                 .frame(maxWidth: .infinity)
                         } else {
                             Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
@@ -242,21 +289,60 @@ private struct TilesView: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+            if !isOneRow { Spacer(minLength: 0) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
+/// Which list the widget is, over its titles: Recently Added and Favorites look alike otherwise.
+private struct RowName: View {
+    let row: UpNextWidgets.Row
+
+    var body: some View {
+        Label(row.title, systemImage: row.symbol)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+}
+
 /// A title as Home's landscape cards show it: its picture with how far through it is, its name
-/// and what's next of it.
+/// and what's next of it. One that plays has a play button on its picture.
 private struct TileView: View {
     let tile: UpNextWidgets.Tile
     /// Alone in a small widget, in bigger type.
     let isLarge: Bool
+    /// The picture takes the height the name leaves, rather than its own.
+    var givesWay = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            Artwork(data: tile.artwork, givesWay: givesWay)
+                .overlay(alignment: .bottom) {
+                    if let progress = tile.progress {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .tint(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.bottom, 5)
+                    }
+                }
+                .overlay {
+                    if tile.plays { PlayButton(isLarge: isLarge) }
+                }
+            TileText(tile: tile, isLarge: isLarge)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// One title across a medium widget: its picture beside its name.
+private struct WideTileView: View {
+    let tile: UpNextWidgets.Tile
+
+    var body: some View {
+        HStack(alignment: .center, spacing: UpNextWidgets.Layout.spacing) {
             Artwork(data: tile.artwork)
                 .overlay(alignment: .bottom) {
                     if let progress = tile.progress {
@@ -267,27 +353,58 @@ private struct TileView: View {
                             .padding(.bottom, 5)
                     }
                 }
-            VStack(alignment: .leading, spacing: 0) {
-                Text(tile.title)
-                    .font(isLarge ? .subheadline.weight(.semibold) : .caption.weight(.semibold))
-                    .lineLimit(1)
-                Text(tile.detail)
-                    .font(isLarge ? .caption : .caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(isLarge ? 2 : 1)
-            }
+                .overlay {
+                    if tile.plays { PlayButton(isLarge: true) }
+                }
+                .frame(maxWidth: .infinity)
+            TileText(tile: tile, isLarge: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxHeight: .infinity)
     }
 }
 
-/// A title's picture, 16:9, or a plain tile without one.
-private struct Artwork: View {
-    let data: Data?
+private struct TileText: View {
+    let tile: UpNextWidgets.Tile
+    let isLarge: Bool
 
     var body: some View {
-        Color.clear
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(tile.title)
+                .font(isLarge ? .subheadline.weight(.semibold) : .caption.weight(.semibold))
+                .lineLimit(1)
+            Text(tile.detail)
+                .font(isLarge ? .caption : .caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(isLarge ? 2 : 1)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Says a tap plays the title, from where it was left.
+private struct PlayButton: View {
+    let isLarge: Bool
+
+    var body: some View {
+        Image(systemName: "play.fill")
+            .font(isLarge ? .body : .caption)
+            .foregroundStyle(.white)
+            .frame(width: isLarge ? 36 : 28, height: isLarge ? 36 : 28)
+            .background(.black.opacity(0.5), in: .circle)
+            .widgetAccentable()
+            .accessibilityHidden(true)
+    }
+}
+
+/// A title's picture, 16:9, or a plain tile without one. One that gives way takes the room it's
+/// given, and is cut to it.
+private struct Artwork: View {
+    let data: Data?
+    var givesWay = false
+
+    var body: some View {
+        frame
             .background(.quaternary)
             .overlay {
                 if let image {
@@ -300,6 +417,14 @@ private struct Artwork: View {
                 }
             }
             .clipShape(.rect(cornerRadius: 8))
+    }
+
+    @ViewBuilder private var frame: some View {
+        if givesWay {
+            Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Color.clear.aspectRatio(16.0 / 9.0, contentMode: .fit)
+        }
     }
 
     private var image: CGImage? {

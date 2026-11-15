@@ -41,24 +41,57 @@ nonisolated enum DockTile {
 }
 
 #if os(macOS)
-/// Keeps the Dock icon's badge and the titles its menu lists, and makes the menu as it's opened.
-final class DockMenu: NSObject {
+/// Continue Watching's first titles for the Dock's menu, as they were last asked for, and only
+/// ever the sign-in in use's: the app asks for them again as the sign-in changes, and until
+/// they come, the last person's aren't listed.
+final class DockTitles {
     private let accounts: AccountStore
-    private let downloads: DownloadManager
-    private let links: IncomingLinks
-    private let openFile: () -> Void
-    /// Continue Watching's first titles, as they were last asked for.
     private var titles: [UpNextWidgets.Tile] = []
-    /// Opens Portable TV's window: SwiftUI's, which AppKit's menu can't reach by itself.
-    var openWindow: OpenWindowAction?
 
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "dock")
 
-    init(accounts: AccountStore, downloads: DownloadManager, links: IncomingLinks, openFile: @escaping () -> Void) {
+    init(accounts: AccountStore) {
         self.accounts = accounts
+    }
+
+    /// The titles to list: those whose link names the sign-in in use.
+    var listed: [UpNextWidgets.Tile] {
+        titles.filter { AppLink($0.link)?.owner?.isSignedIn(as: accounts.account) == true }
+    }
+
+    /// Asks the server for what's up next, for the menu to list without waiting on it. Signed
+    /// out, the titles go at once. Titles that come back after the sign-in has changed are
+    /// dropped: the change asks for its own.
+    func refresh() async {
+        guard let session = accounts.session else {
+            titles = []
+            return
+        }
+        do {
+            let items = try await session.client.upNext(userId: session.userId, limit: DockTile.titleLimit * 2).items
+            guard accounts.account == session.account else { return }
+            titles = UpNextWidgets.tiles(from: items, limit: DockTile.titleLimit, owner: AppLink.Owner(session.account))
+        } catch {
+            // The menu keeps the titles it had.
+            Self.log.notice("Couldn't refresh the Dock menu's titles: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+}
+
+/// Keeps the Dock icon's badge and the titles its menu lists, and makes the menu as it's opened.
+final class DockMenu: NSObject {
+    private let downloads: DownloadManager
+    private let links: IncomingLinks
+    private let openFile: () -> Void
+    private let titles: DockTitles
+    /// Opens Portable TV's window: SwiftUI's, which AppKit's menu can't reach by itself.
+    var openWindow: OpenWindowAction?
+
+    init(accounts: AccountStore, downloads: DownloadManager, links: IncomingLinks, openFile: @escaping () -> Void) {
         self.downloads = downloads
         self.links = links
         self.openFile = openFile
+        titles = DockTitles(accounts: accounts)
     }
 
     /// Follows the downloads, for the badge, as long as the app runs.
@@ -69,23 +102,14 @@ final class DockMenu: NSObject {
         }
     }
 
-    /// Asks the server for what's up next, for the menu to list without waiting on it.
+    /// Asks the server for what's up next (`DockTitles`).
     func refreshTitles() async {
-        guard let session = accounts.session else {
-            titles = []
-            return
-        }
-        do {
-            let items = try await session.client.upNext(userId: session.userId, limit: DockTile.titleLimit * 2).items
-            titles = UpNextWidgets.tiles(from: items, limit: DockTile.titleLimit)
-        } catch {
-            // The menu keeps the titles it had.
-            Self.log.notice("Couldn't refresh the Dock menu's titles: \(error.localizedDescription, privacy: .public)")
-        }
+        await titles.refresh()
     }
 
     func menu() -> NSMenu {
         let menu = NSMenu()
+        let titles = titles.listed
         if !titles.isEmpty {
             menu.addItem(.sectionHeader(title: UpNextWidgets.Row.continueWatching.title))
             for tile in titles {

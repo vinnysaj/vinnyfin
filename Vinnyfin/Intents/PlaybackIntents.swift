@@ -255,12 +255,75 @@ nonisolated enum TitleIntentError: LocalizedError {
     case caughtUp(String)
     case nothingAfter(show: String, episode: String)
     case notFound(String)
+    /// Continue Watching is empty.
+    case nothingToContinue
 
     var errorDescription: String? {
         switch self {
         case .caughtUp(let show): "You're caught up on \(show): there's no episode after the last one you watched."
         case .nothingAfter(let show, let episode): "\(show) has no episode after \(episode)."
         case .notFound(let term): "There's nothing called \(term) on your server."
+        case .nothingToContinue: "There's nothing to continue: nothing on your server is partway through or up next."
         }
     }
 }
+
+/// The intent that plays a title again, which Siri is given as the title starts to play, so it
+/// learns what the person watches and when, and suggests it in Spotlight, on the Lock Screen and
+/// in the Smart Stack: an episode continues its show, and a movie plays. Other titles teach it
+/// nothing. `SignInSurfaces` forgets them when the sign-in in use changes.
+nonisolated enum PlaybackDonation {
+    static func intent(for item: JellyfinItem, session: ServerSession) -> (any AppIntent)? {
+        switch item.type {
+        case "Movie":
+            let intent = PlayMovieIntent()
+            intent.movie = MovieEntity(item, session: session)
+            return intent
+        case "Episode":
+            guard let seriesId = item.seriesId else { return nil }
+            var show = JellyfinItem(id: seriesId, name: item.seriesName ?? "", type: "Series")
+            show.imageTags = item.seriesPrimaryImageTag.map { ["Primary": $0] }
+            let intent = ContinueWatchingIntent()
+            intent.show = ShowEntity(show, session: session)
+            return intent
+        default:
+            return nil
+        }
+    }
+
+    /// The intents donated, which the sign-in in use's change deletes.
+    static let types: [any AppIntent.Type] = [PlayMovieIntent.self, ContinueWatchingIntent.self]
+
+    @MainActor
+    static func donate(_ item: JellyfinItem, session: ServerSession) {
+        guard let intent = intent(for: item, session: session) else { return }
+        IntentDonationManager.shared.donate(intent: intent)
+    }
+}
+
+#if os(iOS) || os(macOS)
+/// The first title of Continue Watching, for the Continue Watching control: the one the Continue
+/// Watching widget shows first.
+final class ContinueWatchingResumer: WatchingResumer {
+    private let accounts: AccountStore
+    private let links: IncomingLinks
+
+    init(accounts: AccountStore, links: IncomingLinks) {
+        self.accounts = accounts
+        self.links = links
+    }
+
+    func titleToResume() async throws -> AppLink {
+        let session = try ServerTitles.session(accounts)
+        let items = try await session.client.page(of: UpNextWidgets.Row.continueWatching.source, userId: session.userId,
+                                                  startIndex: 0, limit: ServerTitles.suggestionLimit).items
+        guard let tile = UpNextWidgets.tiles(from: items, limit: 1, owner: AppLink.Owner(session.account)).first,
+              let link = AppLink(tile.link) else { throw TitleIntentError.nothingToContinue }
+        return link
+    }
+
+    func play(_ link: AppLink) {
+        links.open(link)
+    }
+}
+#endif

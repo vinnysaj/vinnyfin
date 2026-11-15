@@ -106,6 +106,7 @@ struct HomeView: View {
             .onDisappear {
                 isOnScreen = false
                 feed.wentAway()
+                saveForNextTime()
             }
             #if os(tvOS)
             .toolbarVisibility(hasBanner ? .hidden : .automatic, for: .navigationBar)
@@ -151,7 +152,10 @@ struct HomeView: View {
             .task { await load() }
             // Back from the background, Home refreshes as on coming back to it.
             .onChange(of: scenePhase) { _, phase in
-                if phase == .background { feed.wentAway() }
+                if phase == .background {
+                    feed.wentAway()
+                    saveForNextTime()
+                }
                 if phase == .active, isOnScreen { Task { await load() } }
             }
             // A playback started here, from the banner or a card, moved Continue Watching.
@@ -285,6 +289,13 @@ struct HomeView: View {
     private func load(reshuffling: Bool = false) async {
         guard let session else { return }
         await feed.load(session: session, reshuffling: reshuffling)
+    }
+
+    /// Saves Home for the next time it opens, while still signed in where it's from: one going
+    /// away as its sign-in ends has been deleted, and stays so.
+    private func saveForNextTime() {
+        guard let session, accounts.account?.isSame(as: session.account) == true else { return }
+        feed.saveForNextTime()
     }
 }
 

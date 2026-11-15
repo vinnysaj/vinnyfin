@@ -71,6 +71,10 @@ final class AccountStore {
     private(set) var sharingProblem: String?
     #endif
 
+    /// Deletes what the app keeps on this device for a sign-in that's no longer kept here, such
+    /// as Home's saved rows: signed out of, or gone from the Keychain.
+    @ObservationIgnored var forgetting: (Account) -> Void = { _ in }
+
     private let defaults: UserDefaults
     private let tokens: TokenStore
     /// Tells the server a sign-in has ended.
@@ -286,6 +290,7 @@ final class AccountStore {
         guard let token = try Self.token(of: account, in: tokens) else {
             saved.removeAll { $0.isSame(as: account) }
             saveList()
+            forgetting(account)
             throw AccountError.tokenMissing(account)
         }
         use(account, client: JellyfinClient(serverURL: account.serverURL, deviceId: deviceId, deviceName: Device.ownName, token: token))
@@ -347,6 +352,7 @@ final class AccountStore {
         }
         saved.removeAll { $0.isSame(as: account) }
         saveList()
+        forgetting(account)
         if isInUse {
             defaults.removeObject(forKey: Self.accountKey)
             self.account = nil

@@ -221,7 +221,7 @@ nonisolated struct JellyfinClient: Sendable {
     /// Collection types that hold movies or episodes. "" stands for a view without one (mixed content).
     static let videoCollectionTypes: Set<String> = ["movies", "tvshows", "homevideos", "musicvideos", "mixed", ""]
 
-    struct ItemQuery: Sendable, Hashable {
+    struct ItemQuery: Sendable, Hashable, Codable {
         var types: [String] = ["Movie", "Series"]
         /// Only these items.
         var ids: [String] = []
@@ -395,7 +395,7 @@ nonisolated struct JellyfinClient: Sendable {
     }
 
     /// Where a list of items comes from, a page at a time.
-    enum ItemSource: Sendable, Hashable {
+    enum ItemSource: Sendable, Hashable, Codable {
         /// The library, filtered and sorted.
         case items(ItemQuery)
         /// What to watch next, one entry for each movie or show (see `UpNext`).

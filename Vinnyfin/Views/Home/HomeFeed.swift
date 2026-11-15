@@ -9,6 +9,9 @@ import SwiftUI
 /// shows. Coming back to Home refreshes Continue Watching in place and keeps the rows as they
 /// were, so nothing moves under the viewer; a pull to refresh, or coming back after `freshness`
 /// away, picks the rows again.
+///
+/// What it loads is saved for the sign-in (`HomeCache`), and drawn at once the next time Home
+/// opens, until the server's answer takes its place.
 @MainActor @Observable
 final class HomeFeed {
     /// Requests at once for rows coming on screen.
@@ -84,12 +87,16 @@ final class HomeFeed {
     @ObservationIgnored private var awaySince: Date?
     /// Where Home notes whether Continue Watching had titles, for its stand-ins next time.
     @ObservationIgnored private let defaults: UserDefaults
+    /// Where the sign-in's Home is saved, among every sign-in's in `cacheDirectory`.
+    @ObservationIgnored private var cache: HomeCache?
+    @ObservationIgnored private let cacheDirectory: URL
     @ObservationIgnored private lazy var queue = LoadQueue<HomeRow.ID>(width: Self.width) { [weak self] id in
         await self?.loadRow(id)
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, cacheDirectory: URL = HomeCache.directory) {
         self.defaults = defaults
+        self.cacheDirectory = cacheDirectory
     }
 
     /// Notes Home leaving the screen, or the app going into the background.
@@ -99,11 +106,17 @@ final class HomeFeed {
 
     /// Loads Home as it comes on screen. The first time, for another sign-in, after a problem,
     /// after `freshness` away, or when `reshuffling`, with new rows picked at random, it picks
-    /// the rows; otherwise it refreshes Continue Watching and keeps the rows as they are.
+    /// the rows; otherwise it refreshes Continue Watching and keeps the rows as they are. The
+    /// first time for a sign-in, what was saved of its Home shows meanwhile.
     func load(session: ServerSession, reshuffling: Bool = false) async {
         let away = awaySince.map { Date.now.timeIntervalSince($0) }
         awaySince = nil
         if let current = self.session, current.account != session.account { reset() }
+        if self.session?.account != session.account || cache == nil {
+            self.session = session
+            cache = HomeCache(session, directory: cacheDirectory)
+            await restore()
+        }
         let isSettled = hasLoaded && loadError == nil && !sessionEnded && !hasNoTitles
         if Self.picksRows(reshuffling: reshuffling, awayFor: away, isSettled: isSettled) {
             await pickRows(session: session, reshuffling: reshuffling)
@@ -121,6 +134,7 @@ final class HomeFeed {
 
     /// Everything of the sign-in before, gone for another's.
     private func reset() {
+        cache = nil
         queue.cancelAll()
         rows = []
         items = [:]
@@ -218,6 +232,7 @@ final class HomeFeed {
             sessionEnded = false
             hasLoaded = true
             defaults.set(!continueWatching.isEmpty, forKey: continueWatchingKey)
+            saveForNextTime()
         } catch JellyfinError.http(status: 401, _) {
             sessionEnded = true
             hasNoTitles = false
@@ -275,6 +290,41 @@ final class HomeFeed {
     /// Placeholders of a Home that never loaded give way to what went wrong.
     private func dropPlaceholders() {
         if items.isEmpty { rows = [] }
+    }
+
+    // MARK: Saved for next time
+
+    /// Shows the sign-in's Home as it was saved, when nothing shows yet. Saved within `freshness`,
+    /// its rows picked at random are picked the same again, so the server's answer keeps them.
+    private func restore() async {
+        guard let cache, rows.isEmpty, !hasLoaded, let snapshot = await Self.read(cache),
+              // Another sign-in, or the server's answer, may have come while it was read.
+              self.cache?.file == cache.file, rows.isEmpty, !hasLoaded else { return }
+        rows = snapshot.rows
+        items = snapshot.items
+        givenWay = snapshot.givenWay
+        truncated = snapshot.truncated
+        featured = snapshot.featured
+        featuredEpisodes = snapshot.featuredEpisodes
+        if Date.now.timeIntervalSince(snapshot.savedAt) < Self.freshness { randomSeed = snapshot.randomSeed }
+    }
+
+    /// Off the main actor: a Home of many rows takes a moment to open and decode.
+    @concurrent
+    private nonisolated static func read(_ cache: HomeCache) async -> HomeSnapshot? {
+        cache.load()
+    }
+
+    /// Saves Home as it shows, for the next time it opens, once the server has given it.
+    func saveForNextTime() {
+        guard hasLoaded, !hasNoTitles, let cache else { return }
+        cache.save(snapshot)
+    }
+
+    /// What Home shows, to draw the next time it opens.
+    private var snapshot: HomeSnapshot {
+        HomeSnapshot(rows: rows, items: items, givenWay: givenWay, truncated: truncated, featured: featured,
+                     featuredEpisodes: featuredEpisodes, randomSeed: randomSeed, savedAt: .now)
     }
 
     func rowAppeared(_ id: HomeRow.ID) {

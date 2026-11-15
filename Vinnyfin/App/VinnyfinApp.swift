@@ -183,6 +183,8 @@ final class AppDelegate: NSObject {
     private func launched() {
         ImageCache.configure()
         StreamingNetwork.follow()
+        accounts.forgetting = { HomeCache.drop(for: $0) }
+        HomeCache.keepOnly(accounts.saved)
         if let problem = accounts.savedSignInProblem { messages.show(problem) }
         #if os(iOS) || os(macOS)
         if let problem = accounts.sharingProblem { messages.show(problem) }

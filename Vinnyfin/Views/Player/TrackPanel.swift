@@ -118,6 +118,8 @@ struct TrackPanel: View {
     private struct Row: Identifiable {
         let id: String
         let title: String
+        /// An audio track's, after its title: "Dolby Atmos", "7.1".
+        var tags: [String] = []
         let detail: String?
         let isSelected: Bool
         /// A chapter's picture.
@@ -132,7 +134,8 @@ struct TrackPanel: View {
 
     private var audioRows: [Row] {
         model.audioOptions.map { option in
-            Row(id: "audio.\(option.id)", title: option.title, detail: option.detail,
+            // The tags say what the detail does.
+            Row(id: "audio.\(option.id)", title: option.title, tags: option.tags, detail: option.tags.isEmpty ? option.detail : nil,
                 isSelected: model.selectedAudio == option.id) { model.chooseAudio(option.id) }
         }
     }
@@ -341,7 +344,11 @@ struct TrackPanel: View {
                     .frame(width: Self.imageWidth)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.title)
+                if row.tags.isEmpty {
+                    Text(row.title)
+                } else {
+                    TaggedTitle(title: row.title, tags: row.tags)
+                }
                 if let detail = row.detail {
                     Text(detail).font(.caption).foregroundStyle(.secondary)
                 }

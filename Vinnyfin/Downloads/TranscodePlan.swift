@@ -336,10 +336,15 @@ extension TranscodeState {
 
     /// The item as its transcoded file plays: the one version lists the file's streams as the
     /// file numbers them, the picture and then the audio, followed by the text subtitles saved
-    /// beside it, numbered after those; and the subtitle files by those numbers.
+    /// beside it, numbered after those; and the subtitle files by those numbers. The version is
+    /// named as the download is, "Transcoded 720p": the original's name and file say what the
+    /// server converted, a remux say, which the player would otherwise call the file
+    /// (`VersionLabel`).
     func playback(of item: JellyfinItem?, subtitleFiles: [Int: URL]) -> (JellyfinItem?, [Int: URL]) {
         guard var item, let original = item.mediaSources?.first else { return (item, subtitleFiles) }
         var source = original
+        source.name = label
+        source.path = nil
         source.container = "mp4"
         source.bitrate = (videoBitrate ?? request.videoBitrate) + (audioBitrate ?? request.audioBitrate)
         var streams: [MediaStream] = []

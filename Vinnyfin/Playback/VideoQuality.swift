@@ -77,20 +77,13 @@ nonisolated struct VersionTraits: Equatable, Sendable {
     }
 
     /// From the video stream's size, treating a wide 1920x800 as 1080p; failing that, from
-    /// the version's name ("4K HDR", "1080p WEB-DL"), which is all a remote stream has
-    /// before it is first opened.
+    /// the version's name ("4K HDR", "1080p WEB-DL") by the release name rules
+    /// (`ReleaseName.resolution(in:)`), which is all a remote stream has before it is first opened.
     static func resolutionClass(of source: MediaSource) -> Int? {
         if let video = source.videoStream, let width = video.width, let height = video.height, width > 0, height > 0 {
             return snap(max(height, width * 9 / 16))
         }
-        let text = [source.name, source.videoStream?.displayTitle].compactMap(\.self).joined(separator: " ").lowercased()
-        let tokens = Set(text.split { !$0.isLetter && !$0.isNumber }.map(String.init))
-        if !tokens.isDisjoint(with: ["2160p", "4k", "uhd", "2160"]) { return 2160 }
-        if !tokens.isDisjoint(with: ["1440p", "2k", "1440"]) { return 1440 }
-        if !tokens.isDisjoint(with: ["1080p", "1080i", "fhd", "1080"]) { return 1080 }
-        if !tokens.isDisjoint(with: ["720p", "720"]) { return 720 }
-        if !tokens.isDisjoint(with: ["576p", "540p", "480p", "sd", "dvd", "480", "576"]) { return 480 }
-        return nil
+        return ReleaseName.resolution(in: [source.name, source.videoStream?.displayTitle].compactMap(\.self))
     }
 
     /// Rounds a measured height to the class it was mastered at, so 1036 or 1088 is 1080.

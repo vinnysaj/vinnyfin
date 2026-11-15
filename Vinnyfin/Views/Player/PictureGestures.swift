@@ -89,15 +89,24 @@ nonisolated struct PictureTaps {
 }
 
 #if os(iOS)
+extension CoordinateSpaceProtocol where Self == NamedCoordinateSpace {
+    /// The player's layers, where a tap on the picture lands and the ripples it makes spread
+    /// from. One space for both: each view's own can start at the screen's edge or at its safe
+    /// area's, as it ignores the safe area or not, and a ripple placed by one view's coordinates
+    /// in another's would spread a safe area's inset from the finger.
+    nonisolated static var playerPicture: Self { .named("player.picture") }
+}
+
 /// The picture's touches on iPhone and iPad: taps (`PictureTaps`), a press held to play at twice
 /// the speed until let go, and a pinch to fill the screen or fit it.
 struct PictureTouches: ViewModifier {
-    /// A tap, where it was in the picture, and the picture's width.
-    let onTap: (_ location: CGPoint, _ width: CGFloat) -> Void
+    /// A tap, and the picture's area, both in the player's layers (`playerPicture`), where the
+    /// ripples it makes are placed too.
+    let onTap: (_ location: CGPoint, _ area: CGRect) -> Void
     let onHoldBegan: () -> Void
     let onHoldEnded: () -> Void
     let onPinch: (_ magnification: CGFloat) -> Void
-    @State private var width: CGFloat = 0
+    @State private var area: CGRect = .zero
     @State private var isHolding = false
     /// When the press held last let go: the lift that ends a hold isn't a tap.
     @State private var holdEnded: Date?
@@ -107,13 +116,13 @@ struct PictureTouches: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .playerPicture) } action: { area = $0 }
             .gesture(
-                SpatialTapGesture()
+                SpatialTapGesture(coordinateSpace: .playerPicture)
                     .onEnded { value in
                         if isHolding { return }
                         if let holdEnded, Date.now.timeIntervalSince(holdEnded) < 0.3 { return }
-                        onTap(value.location, width)
+                        onTap(value.location, area)
                     }
             )
             .onLongPressGesture(minimumDuration: Self.holdDuration, maximumDistance: 12) {
@@ -139,7 +148,7 @@ struct SkipRipple: View {
     let seconds: Double
     /// Counts the taps, each of which ripples.
     let taps: Int
-    /// Where the last tap landed, in this view's coordinates.
+    /// Where the last tap landed, in the player's layers (`playerPicture`).
     let tapLocation: CGPoint
     /// The picture ripples like water under it, in place of the ring of light.
     let bendsPicture: Bool
@@ -151,6 +160,7 @@ struct SkipRipple: View {
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
+            let origin = geometry.frame(in: .playerPicture).origin
             let reach = min(size.width * 0.4, 380)
             ZStack {
                 if !reduceMotion, !bendsPicture {
@@ -170,7 +180,7 @@ struct SkipRipple: View {
                                 LinearKeyframe(0, duration: 0.35)
                             }
                         }
-                        .position(tapLocation)
+                        .position(x: tapLocation.x - origin.x, y: tapLocation.y - origin.y)
                 }
                 if showsTally {
                     SkipTally(seconds: seconds)

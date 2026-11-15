@@ -26,7 +26,6 @@ enum PlayerFocus: Hashable {
 /// timeline can show by itself, as the remote moves it with the controls hidden.
 struct PlayerControls: View {
     let model: PlayerModel
-    @Binding var fillsScreen: Bool
     @Binding var panel: PlayerPanel?
     /// Where the timeline and buttons start, in global coordinates, so subtitles can stay above them.
     @Binding var bottomBarTop: CGFloat?
@@ -559,15 +558,8 @@ struct PlayerControls: View {
             #endif
             episodeButtons
             #if os(iOS)
-            Button {
-                fillsScreen.toggle()
-                onInteraction()
-            } label: {
-                symbol(fillsScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-            }
-            .buttonStyle(.platformGlass)
-            .accessibilityLabel(fillsScreen ? "Fit to Screen" : "Fill Screen")
-            .accessibilityShowsLargeContentViewer()
+            // At the end, where a thumb rests; the picture fills the screen and fits it with a pinch.
+            chaptersButton
             #elseif os(macOS)
             Button {
                 NSApp.keyWindow?.toggleFullScreen(nil)
@@ -690,6 +682,12 @@ struct PlayerControls: View {
         let audio = model.audioOptions.count > 1 ? model.audioOptions.first { $0.id == model.selectedAudio }?.title : nil
         panelButton(.audioAndSubtitles, identifier: "player.subtitles", filled: subtitle != nil,
                     value: [audio, "Subtitles \(subtitle ?? "Off")"].compactMap(\.self).joined(separator: ", "))
+        #if !os(iOS)
+        chaptersButton
+        #endif
+    }
+
+    @ViewBuilder private var chaptersButton: some View {
         if !model.chapters.isEmpty {
             panelButton(.chapters, identifier: "player.chapters",
                         value: ChapterMark.current(in: model.chapters, at: model.clock.time)?.name)

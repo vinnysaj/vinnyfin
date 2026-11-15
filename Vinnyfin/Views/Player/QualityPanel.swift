@@ -4,8 +4,10 @@ import UIKit
 #endif
 
 /// What plays and why ("Converted to 720p, the connection slowed"), the speed, and the ways to
-/// play the title: Auto, each version as it is, and each size the server can convert the version
-/// playing to. The way picked is checked. A download or a file has only what plays.
+/// play the title: Auto, or the download in its place when there is one, each version as it is,
+/// by its size and tags (`VersionNames`), and each size the server can convert the version
+/// playing to. The way picked is checked. While the download plays, the versions and sizes stream
+/// in its place, once the server has given them; a file of this device's has only what plays.
 struct QualityPanel: View {
     let model: PlayerModel
     /// The height there's room for. The panel is as tall as its rows, up to that or its own limit.
@@ -20,6 +22,7 @@ struct QualityPanel: View {
     private struct Row: Identifiable {
         let id: String
         let title: String
+        var tags: [String] = []
         let detail: String?
         let option: QualityOption
     }
@@ -36,22 +39,34 @@ struct QualityPanel: View {
         let sources = options.compactMap { option -> MediaSource? in
             if case .version(let source) = option { source } else { nil }
         }
+        let names = VersionNames(sources)
         let versions = sources.map { source in
-            Row(id: "quality.version.\(source.id)", title: Self.title(of: source, among: sources),
-                detail: Self.detail(of: source), option: .version(source))
+            let label = names.label(source)
+            return Row(id: "quality.version.\(source.id)", title: label.title, tags: label.tags,
+                       detail: Self.detail(of: label), option: .version(source))
         }
         let sizes = options.compactMap { option -> Row? in
             guard case .converted(let quality) = option else { return nil }
             return Row(id: "quality.converted.\(quality.rawValue)", title: quality.label,
                        detail: "Up to \(QualityLearning.label(forBitrate: quality.transcodeBitrate))", option: option)
         }
-        var sections = [Section(id: "auto", title: nil, rows: [Row(id: "quality.auto", title: "Auto", detail: autoDetail, option: .auto)]),
-                        Section(id: "versions", title: sources.count > 1 ? "Versions" : "As It Is", rows: versions)]
+        let hasDownload = options.contains(.download)
+        let first = hasDownload ? downloadRow : Row(id: "quality.auto", title: "Auto", detail: autoDetail, option: .auto)
+        let versionsTitle = hasDownload ? "Stream from the Server" : sources.count > 1 ? "Versions" : "As It Is"
+        var sections = [Section(id: "first", title: nil, rows: [first]), Section(id: "versions", title: versionsTitle, rows: versions)]
         if !sizes.isEmpty { sections.append(Section(id: "converted", title: "Converted by the Server", rows: sizes)) }
         return sections
     }
 
-    private var chosen: QualityOption { model.qualityPick ?? .auto }
+    private var chosen: QualityOption { model.qualityChoice }
+
+    /// The download, tagged with its picture's size and what sets it apart.
+    private var downloadRow: Row {
+        let label = model.downloadedVersion.map(VersionLabel.init)
+        let tags = label.map { ($0.title == "Version" ? [] : [$0.title]) + $0.tags } ?? []
+        let detail = ["On this \(Device.name)", label?.bitrateText].compactMap(\.self).joined(separator: " · ")
+        return Row(id: "quality.download", title: "Downloaded", tags: tags, detail: detail, option: .download)
+    }
 
     /// What Auto keeps to: the streaming quality, and with Adaptive Quality, the connection.
     private var autoDetail: String {
@@ -93,6 +108,8 @@ struct QualityPanel: View {
             focusedRow = sections.flatMap(\.rows).first { $0.option == chosen }?.id ?? SpeedChips.focusID(model.rate)
         }
         #endif
+        // A download's versions to stream instead, when the server didn't answer as it started.
+        .task { await model.lookUpServerVersions() }
         .accessibilityElement(children: .contain)
         // VoiceOver's two-finger scrub, and Escape, close it.
         .accessibilityAction(.escape, onClose)
@@ -175,8 +192,8 @@ struct QualityPanel: View {
                 Image(systemName: "checkmark")
                     .fontWeight(.semibold)
                     .opacity(isSelected ? 1 : 0)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.title)
+                VStack(alignment: .leading, spacing: 3) {
+                    TaggedTitle(title: row.title, tags: row.tags)
                     if let detail = row.detail {
                         Text(detail).font(.caption).foregroundStyle(.secondary)
                     }
@@ -199,20 +216,11 @@ struct QualityPanel: View {
         .id(row.id)
     }
 
-    /// "4K", or with another version the same size, "4K · Director's Cut".
-    private static func title(of source: MediaSource, among sources: [MediaSource]) -> String {
-        let label = PlaybackPlan.direct(source).label
-        guard let label else { return source.name ?? "Version" }
-        let sameSize = sources.filter { PlaybackPlan.direct($0).label == label }.count > 1
-        guard sameSize, let name = source.name, !name.isEmpty, name != label else { return label }
-        return "\(label) · \(name)"
-    }
-
-    /// "HEVC HDR10 · 25 Mbps"
-    private static func detail(of source: MediaSource) -> String? {
-        let parts = [source.videoStream?.displayTitle, VersionTraits(source).bitrate.map(QualityLearning.label(forBitrate:))]
-        let line = parts.compactMap(\.self).joined(separator: " · ")
-        return line.isEmpty ? nil : line
+    /// A version's main audio and bitrate, which tells apart even files alike in all else:
+    /// "Dolby Atmos · 7.1 · 25 Mbps".
+    private static func detail(of label: VersionLabel) -> String? {
+        let parts = [label.audio, label.bitrateText].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// Every speed fits across it.

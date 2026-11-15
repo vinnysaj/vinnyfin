@@ -2,9 +2,13 @@ import AppIntents
 import SwiftUI
 
 struct RootView: View {
+    #if os(iOS)
+    /// The app's shared state, for the player, which UIKit presents outside this view's
+    /// environment (`PlayerPresenter`).
+    let app: AppDelegate
+    #endif
     @Environment(AccountStore.self) private var accounts
     @Environment(ServerReachability.self) private var reachability
-    @Environment(KnownServers.self) private var knownServers
     @Environment(PlayerCoordinator.self) private var player
     @Environment(AppMessages.self) private var messages
     @Environment(WatchHistory.self) private var history
@@ -20,7 +24,6 @@ struct RootView: View {
     #endif
     #if !os(tvOS)
     @Environment(SmartDownloads.self) private var smartDownloads
-    @Environment(DownloadManager.self) private var downloads
     @Environment(SpotlightTitles.self) private var spotlight
     #endif
     /// A title a link or another device asked to open, which may be from another sign-in.
@@ -32,9 +35,18 @@ struct RootView: View {
 
     private var session: ServerSession? { accounts.session }
 
+    /// The app's alerts show over what's on top: the player while it's up on iPhone and iPad,
+    /// whose UIKit presentation they couldn't show over from here.
+    private var alertsAreHere: Bool {
+        #if os(iOS)
+        player.coverModel == nil
+        #else
+        true
+        #endif
+    }
+
     var body: some View {
         @Bindable var player = player
-        @Bindable var messages = messages
         Group {
             if let session {
                 MainTabs(linkedItem: $linkedItem, linkedSearch: $linkedSearch)
@@ -59,6 +71,18 @@ struct RootView: View {
             openWindow(id: PlayerWindow.id, value: request)
             #endif
         }
+        #elseif os(iOS)
+        // So the player knows how an iPhone Duo is folded as it opens.
+        .onHingeChange { _, context in PlayerRotation.hingeIsOpen = PlayerRotation.isOpen(context) }
+        // Away while its playback plays in Picture in Picture (`PlayerCoordinator.isInPictureInPicture`).
+        .background {
+            PlayerPresenter(coordinator: player) { model in
+                PlayerView(model: model) { Task { await player.dismiss() } }
+                    .environment(\.session, session)
+                    .appAlerts(isActive: true)
+                    .withAppEnvironment(app)
+            }
+        }
         #else
         // Away while its playback plays in Picture in Picture (`PlayerCoordinator.isInPictureInPicture`).
         .fullScreenCover(item: $player.coverModel) { model in
@@ -66,49 +90,7 @@ struct RootView: View {
                 .environment(\.session, session)
         }
         #endif
-        .alert("Something Went Wrong", isPresented: Binding(get: { messages.current != nil }, set: { if !$0 { messages.current = nil } })) {
-            Button("OK") { messages.current = nil }
-        } message: {
-            Text(messages.current ?? "")
-        }
-        .alert(messages.confirmation?.title ?? "", isPresented: Binding(get: { messages.confirmation != nil },
-                                                                        set: { if !$0 { messages.confirmation = nil } }),
-               presenting: messages.confirmation) { confirmation in
-            Button(confirmation.action, action: confirmation.perform)
-                .accessibilityIdentifier("confirmation.confirm")
-            Button("Cancel", role: .cancel) {}
-        } message: { confirmation in
-            Text(confirmation.message)
-        }
-        .alert("Save Password to iCloud?", isPresented: Binding(get: { knownServers.passwordOffer != nil },
-                                                                 set: { if !$0 { knownServers.passwordOffer = nil } }),
-               presenting: knownServers.passwordOffer) { offer in
-            Button("Save Password") { knownServers.save(offer) }
-                .accessibilityIdentifier("savePassword.save")
-            Button("Not Now", role: .cancel) {}
-        } message: { _ in
-            Text("vinnyfin will sign you in automatically on your other devices that use it with your iCloud.")
-        }
-        .alert("Can't Play", isPresented: Binding(get: { player.problem != nil }, set: { if !$0 { player.problem = nil } })) {
-            Button("OK") { player.problem = nil }
-        } message: {
-            Text(player.problem ?? "")
-        }
-        .watchTogetherAlerts()
-        #if !os(tvOS)
-        .alert("Download a Transcode?", isPresented: Binding(get: { downloads.transcodes.proposal != nil },
-                                                             set: { if !$0 { downloads.transcodes.proposal = nil } }),
-               presenting: downloads.transcodes.proposal) { proposal in
-            Button("Download Transcode") { downloads.enqueue(proposal.item, plan: proposal.plan, startedByUser: true) }
-                .accessibilityIdentifier("transcode.download")
-            Button("Download As It Is (\(proposal.original.summary))") {
-                downloads.enqueue(proposal.item, plan: proposal.original, startedByUser: true)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { proposal in
-            Text(proposal.message)
-        }
-        #endif
+        .appAlerts(isActive: alertsAreHere)
         // Others can play to this device while it's open, or while it plays in the background.
         .task(id: socketConnection) {
             guard socketConnection != nil, let client = accounts.client else { return }
@@ -240,6 +222,74 @@ struct RootView: View {
             titleFromSignIn = .handoff(handoff)
         #endif
         }
+    }
+}
+
+extension View {
+    /// The app's alerts: problems, confirmations, an offer to save a password, a title that
+    /// can't play, watching together, and a download that would be a transcode. Off while
+    /// `isActive` is false, where something over this view shows them instead.
+    func appAlerts(isActive: Bool) -> some View {
+        modifier(AppAlerts(isActive: isActive))
+    }
+}
+
+private struct AppAlerts: ViewModifier {
+    let isActive: Bool
+    @Environment(AppMessages.self) private var messages
+    @Environment(KnownServers.self) private var knownServers
+    @Environment(PlayerCoordinator.self) private var player
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads
+    #endif
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Something Went Wrong", isPresented: shows(messages.current != nil) { messages.current = nil }) {
+                Button("OK") { messages.current = nil }
+            } message: {
+                Text(messages.current ?? "")
+            }
+            .alert(messages.confirmation?.title ?? "", isPresented: shows(messages.confirmation != nil) { messages.confirmation = nil },
+                   presenting: messages.confirmation) { confirmation in
+                Button(confirmation.action, action: confirmation.perform)
+                    .accessibilityIdentifier("confirmation.confirm")
+                Button("Cancel", role: .cancel) {}
+            } message: { confirmation in
+                Text(confirmation.message)
+            }
+            .alert("Save Password to iCloud?", isPresented: shows(knownServers.passwordOffer != nil) { knownServers.passwordOffer = nil },
+                   presenting: knownServers.passwordOffer) { offer in
+                Button("Save Password") { knownServers.save(offer) }
+                    .accessibilityIdentifier("savePassword.save")
+                Button("Not Now", role: .cancel) {}
+            } message: { _ in
+                Text("vinnyfin will sign you in automatically on your other devices that use it with your iCloud.")
+            }
+            .alert("Can't Play", isPresented: shows(player.problem != nil) { player.problem = nil }) {
+                Button("OK") { player.problem = nil }
+            } message: {
+                Text(player.problem ?? "")
+            }
+            .watchTogetherAlerts(isActive: isActive)
+            #if !os(tvOS)
+            .alert("Download a Transcode?", isPresented: shows(downloads.transcodes.proposal != nil) { downloads.transcodes.proposal = nil },
+                   presenting: downloads.transcodes.proposal) { proposal in
+                Button("Download Transcode") { downloads.enqueue(proposal.item, plan: proposal.plan, startedByUser: true) }
+                    .accessibilityIdentifier("transcode.download")
+                Button("Download As It Is (\(proposal.original.summary))") {
+                    downloads.enqueue(proposal.item, plan: proposal.original, startedByUser: true)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { proposal in
+                Text(proposal.message)
+            }
+            #endif
+    }
+
+    /// Up while `isUp` and this is where alerts show; `dismiss` clears what it's for.
+    private func shows(_ isUp: Bool, dismiss: @escaping () -> Void) -> Binding<Bool> {
+        Binding(get: { isActive && isUp }, set: { if !$0 { dismiss() } })
     }
 }
 

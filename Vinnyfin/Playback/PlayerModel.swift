@@ -160,6 +160,28 @@ struct TrackOption: Identifiable, Equatable {
     let id: Int
     let title: String
     let detail: String?
+    /// How an audio track sounds, as the panel tags it: "Dolby Atmos", "7.1". `detail` says the
+    /// same on one line.
+    var tags: [String] = []
+
+    /// An audio track with how it sounds, "English · Dolby Atmos · 7.1", for a list with no room
+    /// for its tags, where two tracks in one language would read alike without them; anything
+    /// else by its title.
+    var line: String {
+        tags.isEmpty ? title : ([title] + tags).joined(separator: " · ")
+    }
+
+    /// An audio track as `label` names it.
+    init(id: Int, audio label: AudioLabel) {
+        self.init(id: id, title: label.title, detail: label.format, tags: label.tags)
+    }
+
+    init(id: Int, title: String, detail: String?, tags: [String] = []) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.tags = tags
+    }
 }
 
 /// A playback on screen: what it is, how it's going, and the commands for it. Drives the shared
@@ -236,6 +258,13 @@ final class PlayerModel: Identifiable {
     /// The way to play the title the viewer picked in the Quality panel, which holds until Auto is
     /// picked or the title is asked for again; nil leaves it to Auto.
     private(set) var qualityPick: QualityOption?
+    /// The title on screen as the server last gave it, versions and all: a stream's own item, or
+    /// while its download plays, the server's answer to `lookUpServerVersions`. Nil until the
+    /// server has given it, and for a file of this device's.
+    private(set) var serverItem: JellyfinItem?
+    /// The version of the title on screen downloaded to this device, which the Quality panel
+    /// offers first; nil without a download.
+    private(set) var downloadedVersion: MediaSource?
     /// A transcode the server lost is being asked for again (`TranscodeReconnect`).
     private(set) var isReconnecting = false
     /// A lighter way to play the title, offered while its sound plays with no picture.
@@ -366,6 +395,8 @@ final class PlayerModel: Identifiable {
     /// The title's next episode was looked for, found or not: nil `nextEpisode` means it has none.
     @ObservationIgnored private var lookedForNextEpisode = false
     @ObservationIgnored private var retryHoldTask: Task<Void, Never>?
+    /// The server is being asked for the versions of the title whose download plays.
+    @ObservationIgnored private var isLookingUpServerVersions = false
     /// The server item the player opened on.
     let startedItemId: String?
 
@@ -589,6 +620,8 @@ final class PlayerModel: Identifiable {
             similarTask?.cancel()
             similarTask = nil
             similarTitles = []
+            serverItem = nil
+            downloadedVersion = nil
         }
         asksStillWatching = false
         dismissChip()
@@ -641,6 +674,8 @@ final class PlayerModel: Identifiable {
         if sessionIsOpen { finishSession(.interrupted) }
         current = resolved
         sessionIsOpen = true
+        if resolved.isStream { serverItem = resolved.item }
+        downloadedVersion = resolved.isDownload ? resolved.mediaSource : resolved.item.flatMap { resolver.downloadedVersion(of: $0.id) }
         title = resolved.title
         subtitle = resolved.subtitle
         duration = resolved.duration ?? 0
@@ -742,6 +777,7 @@ final class PlayerModel: Identifiable {
         Self.keepScreenAwake(!startsPaused && engine.state != .paused)
         startReporting()
         if resolved.isStream { watchConnection() }
+        if resolved.isDownload { Task { await lookUpServerVersions() } }
         // Watched together, the group sets the position, and a start over would be everyone's.
         if resolved.resumesSavedPosition, sharing == nil, let start = resolved.startPosition {
             show(.resumed(at: start), for: Self.resumeChipSeconds)
@@ -1007,12 +1043,12 @@ final class PlayerModel: Identifiable {
         defer { publishNowPlayingCard() }
         if let transcode = current?.transcode, let source = current?.mediaSource {
             audioOptions = source.audioStreams.compactMap { stream in
-                stream.index.map { TrackOption(id: $0, title: Self.streamTitle(stream), detail: stream.displayTitle) }
+                stream.index.map { TrackOption(id: $0, audio: AudioLabel(stream, fallback: "Track \($0)")) }
             }
             selectedAudio = transcode.audioIndex ?? source.defaultAudioStreamIndex ?? audioOptions.first?.id
             return
         }
-        audioOptions = tracks.map { TrackOption(id: $0.id, title: Self.trackTitle($0), detail: Self.audioDetail($0)) }
+        audioOptions = tracks.map { TrackOption(id: $0.id, audio: AudioLabel($0)) }
         let previous = selectedAudio
         selectedAudio = active
         if isLoaded, previous != active { reportProgressNow() }
@@ -1868,13 +1904,15 @@ final class PlayerModel: Identifiable {
 
     /// Moves to another way of playing the title on screen, from where it is and with the same
     /// audio and subtitles, holding the picture until the new stream's first frame where the
-    /// engine can. `onSwitch` runs once the server has given the new stream, as it replaces the
-    /// one playing. When the server can't give it, the stream playing goes on as it is.
-    private func switchStream(to target: PlaybackPlan, because reason: QualityReason, announcing announcement: String? = nil,
-                              onSwitch: @escaping () -> Void = {}) async {
-        guard let playing = session, let item = playing.item else { return }
+    /// engine can. `item` is the title as the server gives it, for a download playing, whose own
+    /// lists only the version downloaded. `onSwitch` runs once the server has given the new
+    /// stream, as it replaces the one playing. When the server can't give it, the stream or
+    /// download playing goes on as it is.
+    private func switchStream(to target: PlaybackPlan, of item: JellyfinItem? = nil, because reason: QualityReason,
+                              announcing announcement: String? = nil, onSwitch: @escaping () -> Void = {}) async {
+        guard let playing = session, let item = item ?? playing.item else { return }
         let quality = target.label ?? (target.isTranscode ? "a conversion" : "another version")
-        let tracks = currentTrackSelection()
+        let tracks = currentTrackSelection().carried(from: playing.mediaSource, to: target.source)
         await startLoad { [self] generation in
             var resolved: ResolvedPlayback
             do {
@@ -1903,6 +1941,26 @@ final class PlayerModel: Identifiable {
             onSwitch()
             await begin(resolved, carrying: tracks, generation: generation)
             if let announcement, loads.isCurrent(generation), isLoaded { show(announcement, .connection, for: 4) }
+        }
+    }
+
+    /// Goes back to the download of the title on screen from the stream playing, as picked in the
+    /// Quality panel, from where it is and with the same audio and subtitles. When the download is
+    /// gone, the stream goes on.
+    private func switchToDownload() async {
+        guard let playing = session, let itemId = playing.reporting?.itemId else { return }
+        let selection = currentTrackSelection()
+        await startLoad { [self] generation in
+            guard let resolved = resolver.download(of: itemId, title: title, from: switchPosition) else {
+                downloadedVersion = nil
+                show("The download is no longer on this \(Device.name).", .info, for: 6)
+                return
+            }
+            if engine.state == .paused { startsPaused = true }
+            engine.prepareForItemReplacement()
+            finishSession(.interrupted)
+            qualityPick = nil
+            await begin(resolved, carrying: selection.carried(from: playing.mediaSource, to: resolved.mediaSource), generation: generation)
         }
     }
 
@@ -1936,8 +1994,9 @@ final class PlayerModel: Identifiable {
             return QualityStatus(plan: plan, reason: qualityReason, sources: current.item?.mediaSources ?? [])
         }
         let what = current.isDownload ? "Downloaded" : "On this \(Device.name)"
+        let tags = current.mediaSource.map { VersionLabel($0).tags } ?? []
         return QualityStatus(summary: [what, qualityLabel].compactMap(\.self).joined(separator: " · "),
-                             detail: current.mediaSource?.videoStream?.displayTitle)
+                             detail: tags.isEmpty ? nil : tags.joined(separator: " · "))
     }
 
     /// The picture size playing, as the quality settings name it: "4K", "720p"; nil when nothing says.
@@ -1945,18 +2004,72 @@ final class PlayerModel: Identifiable {
         current?.plan?.label ?? current?.mediaSource.flatMap { PlaybackPlan.direct($0).label }
     }
 
-    /// The ways the Quality panel offers to play the title on screen; none for a download or a
-    /// file, which play as they are.
+    /// The ways the Quality panel offers to play the title on screen. For a stream: Auto, or the
+    /// download in its place when there is one, then each version and each size the server can
+    /// convert the one playing to. For a download: itself, then the same to stream instead, once
+    /// the server has given its versions (`lookUpServerVersions`), the sizes those the server can
+    /// convert the version downloaded to. None for a file of this device's, which plays as it is.
     var qualityOptions: [QualityOption] {
-        guard let current, current.isStream, let source = current.mediaSource else { return [] }
-        return QualityOption.all(sources: current.item?.mediaSources ?? [source], playing: source)
+        guard let current, let source = current.mediaSource else { return [] }
+        if current.isStream {
+            return QualityOption.all(sources: current.item?.mediaSources ?? [source], playing: source, download: downloadedVersion != nil)
+        }
+        guard current.isDownload, let sources = serverItem?.mediaSources, let version = Self.version(of: source, in: sources) else { return [] }
+        return QualityOption.all(sources: sources, playing: version, download: true)
+    }
+
+    /// The way the Quality panel checks: the download while it plays; for a stream, the pick, or
+    /// without one, Auto, or with a download in Auto's place, the stream playing.
+    var qualityChoice: QualityOption {
+        guard let current else { return .auto }
+        if current.isDownload { return .download }
+        if let qualityPick { return qualityPick }
+        guard downloadedVersion != nil, let plan = current.plan else { return .auto }
+        return switch plan {
+        case .direct(let source): .version(source)
+        case .transcode(_, let quality): .converted(quality)
+        }
+    }
+
+    /// The server's version a download is a copy of, or failing that the item's own: what a
+    /// conversion streamed in the download's place is made from.
+    private static func version(of downloaded: MediaSource, in sources: [MediaSource]) -> MediaSource? {
+        sources.first { $0.id == downloaded.id } ?? sources.first
+    }
+
+    /// Asks the server for the title on screen, versions and all, while its download plays, for
+    /// the Quality panel to offer them to stream instead: as the download starts, and again as
+    /// the panel opens until the server has answered.
+    func lookUpServerVersions() async {
+        guard let playing = current, playing.isDownload, let itemId = playing.reporting?.itemId, serverItem?.id != itemId,
+              !isLookingUpServerVersions, let client = accounts.client, let account = accounts.account else { return }
+        isLookingUpServerVersions = true
+        defer { isLookingUpServerVersions = false }
+        do {
+            let item = try await client.item(id: itemId, userId: account.userId)
+            guard current?.historyKey == playing.historyKey, item.mediaSources?.isEmpty == false, !item.isNotYetAvailable() else { return }
+            serverItem = item
+        } catch {
+            guard !error.isCancellation else { return }
+            Self.log.notice("Couldn't ask the server for the title's versions: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Plays the title on screen the way the viewer picked in the Quality panel, from where it is.
     /// Auto plays what the streaming limit allows, as the title would start, and lets Adaptive
-    /// Quality move it again.
+    /// Quality move it again. A version or a size picked while the download plays streams in its
+    /// place, until the download is picked again.
     func chooseQuality(_ option: QualityOption) {
-        guard let playing = session, let item = playing.item, let plan = playing.plan else { return }
+        guard let playing = session else { return }
+        if option == .download {
+            if !playing.isDownload { Task { await switchToDownload() } }
+            return
+        }
+        if playing.isDownload {
+            stream(option, insteadOf: playing)
+            return
+        }
+        guard let item = playing.item, let plan = playing.plan else { return }
         let sources = item.mediaSources ?? []
         let target: PlaybackPlan
         let reason: QualityReason
@@ -1975,6 +2088,8 @@ final class PlayerModel: Identifiable {
         case .converted(let quality):
             target = .transcode(plan.source, quality)
             reason = .picked
+        case .download:
+            return
         }
         let pick: QualityOption? = option == .auto ? nil : option
         guard target != plan else {
@@ -1983,6 +2098,19 @@ final class PlayerModel: Identifiable {
             return
         }
         Task { await switchStream(to: target, because: reason) { self.qualityPick = pick } }
+    }
+
+    /// Streams `option`, a version or a size, in place of the download playing.
+    private func stream(_ option: QualityOption, insteadOf playing: ResolvedPlayback) {
+        guard let item = serverItem, let downloaded = playing.mediaSource,
+              let version = Self.version(of: downloaded, in: item.mediaSources ?? []) else { return }
+        let target: PlaybackPlan
+        switch option {
+        case .auto, .download: return
+        case .version(let source): target = .direct(source)
+        case .converted(let quality): target = .transcode(version, quality)
+        }
+        Task { await switchStream(to: target, of: item, because: .picked) { self.qualityPick = option } }
     }
 
     /// Plays the lighter stream offered while the sound played alone, which a step up then never
@@ -2584,7 +2712,7 @@ final class PlayerModel: Identifiable {
             candidates = (kind == .audio ? engine.audioTracks : engine.subtitleTracks).map(TrackChooser.Candidate.init)
         }
         return options.compactMap { option in
-            candidates.first { $0.id == option.id }.map { NowPlayingLanguages.option(kind, $0, title: option.title) }
+            candidates.first { $0.id == option.id }.map { NowPlayingLanguages.option(kind, $0, title: option.line) }
         }
     }
 
@@ -2821,14 +2949,6 @@ final class PlayerModel: Identifiable {
         return title
     }
 
-    static func audioDetail(_ track: TrackInfo) -> String {
-        var parts = [codecName(track.codec, profile: track.profile)]
-        if let layout = channelLayoutName(track.channels) { parts.append(layout) }
-        if track.isAtmos { parts.append("Atmos") }
-        if track.isDTSX { parts.append("DTS:X") }
-        return parts.joined(separator: " ")
-    }
-
     static func subtitleDetail(_ track: TrackInfo) -> String {
         var parts = [codecName(track.codec, profile: nil)]
         if track.isExternal { parts.append("External") }
@@ -2867,17 +2987,6 @@ final class PlayerModel: Identifiable {
         case "mov_text": return "Text"
         case let pcm where pcm.hasPrefix("pcm_"): return "PCM"
         default: return codec.uppercased()
-        }
-    }
-
-    static func channelLayoutName(_ channels: Int) -> String? {
-        switch channels {
-        case 0: nil
-        case 1: "Mono"
-        case 2: "Stereo"
-        case 6: "5.1"
-        case 8: "7.1"
-        default: "\(channels) ch"
         }
     }
 }

@@ -382,12 +382,14 @@ final class SharePlay {
 extension View {
     /// Asks whether to switch to a sign-in kept here to watch with a group playing from its
     /// server (`SharePlay.switchOffer`), and says why this device can't watch with one otherwise.
-    func watchTogetherAlerts() -> some View {
-        modifier(WatchTogetherAlerts())
+    /// Off while `isActive` is false, where something over this view shows them instead.
+    func watchTogetherAlerts(isActive: Bool = true) -> some View {
+        modifier(WatchTogetherAlerts(isActive: isActive))
     }
 }
 
 private struct WatchTogetherAlerts: ViewModifier {
+    let isActive: Bool
     @Environment(SharePlay.self) private var sharePlay
     @Environment(AccountStore.self) private var accounts
     @Environment(PlayerCoordinator.self) private var player
@@ -395,7 +397,7 @@ private struct WatchTogetherAlerts: ViewModifier {
     func body(content: Content) -> some View {
         content
             // Each button answers the offer, which takes it away.
-            .alert(sharePlay.switchOffer.map(title) ?? "", isPresented: Binding(get: { sharePlay.switchOffer != nil }, set: { _ in }),
+            .alert(sharePlay.switchOffer.map(title) ?? "", isPresented: Binding(get: { isActive && sharePlay.switchOffer != nil }, set: { _ in }),
                    presenting: sharePlay.switchOffer) { offer in
                 ForEach(offer.kept, id: \.tokenKey) { account in
                     Button("Switch to \(account.userName)") { sharePlay.joinOffered(as: account) }
@@ -404,7 +406,8 @@ private struct WatchTogetherAlerts: ViewModifier {
             } message: { offer in
                 Text(offer.activity.switchQuestion(signedIn: accounts.account, kept: offer.kept, isPlaying: player.presented != nil))
             }
-            .alert("Can't Watch Together", isPresented: Binding(get: { sharePlay.problem != nil }, set: { if !$0 { sharePlay.problem = nil } })) {
+            .alert("Can't Watch Together", isPresented: Binding(get: { isActive && sharePlay.problem != nil },
+                                                                set: { if !$0 { sharePlay.problem = nil } })) {
                 Button("OK") { sharePlay.problem = nil }
             } message: {
                 Text(sharePlay.problem ?? "")

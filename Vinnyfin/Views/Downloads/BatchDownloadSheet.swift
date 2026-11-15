@@ -140,9 +140,7 @@ struct BatchDownloadSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else if let plan = plans[episode.id] {
-                        // Named only when the name isn't the episode's file's, as one version's is.
-                        VersionSummary(source: plan.source, name: DownloadJob.distinctName(
-                            plan.source.name, title: detail.titleWithYear, stem: DownloadJob.destinationStem(for: detail)))
+                        VersionSummary(source: plan.source)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {

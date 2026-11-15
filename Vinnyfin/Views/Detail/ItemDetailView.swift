@@ -114,6 +114,18 @@ struct ItemDetailView: View {
         sources.first { $0.id == pickedSourceId } ?? VersionChooser.choose(from: sources, limit: settings.streamingLimit)
     }
 
+    /// The title's finished download, which Play plays unless another version is picked, as
+    /// `PlaybackResolver` does.
+    private var downloadedVersion: DownloadedVersion? {
+        #if os(tvOS)
+        nil
+        #else
+        downloads.jobs(forItem: page.id).first { $0.status == .completed }.map { job in
+            DownloadedVersion(sourceId: job.mediaSourceId, transcode: job.transcode?.label, size: job.displayTotalBytes)
+        }
+        #endif
+    }
+
     /// A finished download of the title, which plays when the server no longer has it.
     private var isDownloaded: Bool {
         #if os(tvOS)
@@ -298,7 +310,11 @@ struct ItemDetailView: View {
                 SharePlayButton(subject: .title(shown, mediaSourceId: pickedSourceId))
             }
             if available, sources.count > 1 {
-                VersionMenu(sources: sources, selection: Binding(get: { playbackSource?.id }, set: { pickedSourceId = $0 }))
+                let downloaded = downloadedVersion
+                VersionMenu(sources: sources,
+                            selection: Binding(get: { pickedSourceId ?? downloaded?.sourceId ?? playbackSource?.id },
+                                               set: { pickedSourceId = $0 }),
+                            downloaded: downloaded)
             }
         }
     }

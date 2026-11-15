@@ -1,34 +1,25 @@
 import SwiftUI
 
-/// One version of an item: its name and what's in it.
+/// One version of an item, as a picker lists it: its picture's size with tags for what sets it
+/// apart (`VersionLabel`), over its main audio, bitrate and size.
 struct VersionSummary: View {
-    let source: MediaSource
-    /// What to call it; nil leaves only what's in it.
-    var name: String?
+    let label: VersionLabel
+    let size: Int64?
 
-    init(source: MediaSource) {
-        self.source = source
-        name = source.name ?? "Default"
-    }
-
-    init(source: MediaSource, name: String?) {
-        self.source = source
-        self.name = name
+    /// `label` is the version's among the title's others (`VersionNames`), which tells it apart
+    /// from them; without one, its own.
+    init(source: MediaSource, label: VersionLabel? = nil) {
+        self.label = label ?? VersionLabel(source)
+        size = source.plausibleSize
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let name {
-                Text(name)
-                    .font(.body)
-                    .lineLimit(4)
-            }
-            let details = source.detailLine
-            if !details.isEmpty {
-                Text(details)
+        VStack(alignment: .leading, spacing: 4) {
+            TaggedTitle(title: label.title, tags: label.tags)
+            if let caption = label.caption(size: size) {
+                Text(caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
             }
         }
     }
@@ -41,13 +32,14 @@ struct VersionPicker: View {
     @Binding var selection: String?
 
     var body: some View {
+        let names = VersionNames(sources)
         ForEach(sources) { source in
             let isSelected = selection == source.id
             Button {
                 selection = source.id
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VersionSummary(source: source)
+                    VersionSummary(source: source, label: names.label(source))
                     Spacer(minLength: 0)
                     Image(systemName: "checkmark")
                         .fontWeight(.semibold)
@@ -63,30 +55,56 @@ struct VersionPicker: View {
     }
 }
 
+/// The version of a title downloaded to this device, which its page plays unless another is
+/// picked.
+struct DownloadedVersion: Equatable {
+    let sourceId: String
+    /// What the server made of it for the download, "Transcoded 1080p"; nil for its file as it is.
+    var transcode: String?
+    /// The download's size, which a transcode's own is.
+    var size: Int64?
+}
+
 /// The version a title's page plays and downloads, as a chip among its buttons that shows the one
 /// picked, "4K", over its caption; it opens a menu of them all, each by its name and size over
-/// what's in it. The pick holds for the page alone: everywhere else, and back on the page later,
-/// playback starts with the version closest to the quality settings.
+/// its tags, audio and bitrate. The one downloaded to this device comes first, under a note
+/// that it's downloaded, and plays unless another is picked to stream instead. The pick holds
+/// for the page alone: everywhere else, and back on the page later, playback starts with the
+/// download, else the version closest to the quality settings.
 struct VersionMenu: View {
     let sources: [MediaSource]
     @Binding var selection: String?
+    var downloaded: DownloadedVersion?
 
     var body: some View {
         let names = VersionNames(sources)
         let picked = selection.flatMap { id in sources.first { $0.id == id } }.map(names.name)
+        let download = downloaded.flatMap { downloaded in sources.first { $0.id == downloaded.sourceId } }
+        let playsDownload = download != nil && selection == download?.id
         Menu {
-            // Toggles rather than a picker's options: a menu reads the second text of a toggle's
-            // label as a line under the first, where a picker makes each text an option of its own.
-            Section("For Plays and Downloads from This Page") {
-                ForEach(sources) { source in
-                    Toggle(isOn: Binding(get: { selection == source.id }, set: { if $0 { selection = source.id } })) {
-                        Text(names.title(of: source))
-                        Text(source.detailLine(withSize: false))
+            if let download, let downloaded {
+                Section(playsDownload ? "Downloaded · Plays from This \(Device.name)" : "Downloaded to This \(Device.name)") {
+                    option(download,
+                           title: [names.name(download), (downloaded.size ?? download.plausibleSize)?.formatted(.byteCount(style: .file))]
+                               .compactMap(\.self).joined(separator: " · "),
+                           details: downloaded.transcode ?? names.label(download).details)
+                }
+                Section("Stream Instead") {
+                    ForEach(sources.filter { $0.id != download.id }) { source in
+                        option(source, title: names.title(of: source), details: names.label(source).details)
                     }
+                }
+            } else {
+                ForEach(sources) { source in
+                    option(source, title: names.title(of: source), details: names.label(source).details)
                 }
             }
         } label: {
             HStack(spacing: 5) {
+                if playsDownload {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .accessibilityHidden(true)
+                }
                 Text(picked ?? "Version")
                 Image(systemName: "chevron.up.chevron.down")
                     .imageScale(.small)
@@ -99,69 +117,194 @@ struct VersionMenu: View {
         .actionCaption("Version")
         .help("Version")
         .accessibilityLabel("Version")
-        .accessibilityValue(picked ?? "")
+        .accessibilityValue([picked, playsDownload ? "Downloaded" : nil].compactMap(\.self).joined(separator: ", "))
         .accessibilityIdentifier("detail.version")
+    }
+
+    /// Toggles rather than a picker's options: a menu reads the second text of a toggle's label as
+    /// a line under the first, where a picker makes each text an option of its own.
+    private func option(_ source: MediaSource, title: String, details: String?) -> some View {
+        Toggle(isOn: Binding(get: { selection == source.id }, set: { if $0 { selection = source.id } })) {
+            Text(title)
+            if let details {
+                Text(details)
+            }
+        }
     }
 }
 
-/// What a title's versions are called, each in a word or two from its picture: "4K", "1080p HDR",
-/// "4K Dolby Vision". Where the picture says nothing, the server's name for it; and where two
-/// would be called the same, each with the server's name after, "1080p · Director's Cut", or
-/// failing that its place, "1080p · 2".
+/// A title with its tags after it, "4K" then "Dolby Vision", "Remux", wrapping onto more lines as
+/// the room runs out.
+struct TaggedTitle: View {
+    let title: String
+    let tags: [String]
+
+    var body: some View {
+        TagFlow {
+            Text(title)
+            ForEach(Array(tags.enumerated()), id: \.offset) { _, tag in
+                TagChip(text: tag)
+            }
+        }
+    }
+}
+
+/// One of a version's or a track's tags, small in a capsule, in the colors of the text around it,
+/// so on Apple TV it darkens with a row that has focus.
+struct TagChip: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .foregroundStyle(.secondary)
+            .background(.quaternary, in: .capsule)
+    }
+}
+
+/// Views in lines as wide as the room, each line's views centered on one another. One wider than
+/// the room alone, as a long title, wraps to it.
+struct TagFlow: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 4
+
+    private struct Line {
+        var items: [(index: Int, size: CGSize)] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let lines = lines(subviews, width: proposal.width ?? .infinity)
+        let height = lines.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(0, lines.count - 1))
+        return CGSize(width: lines.map(\.width).max() ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        // Broken as they were measured: the bounds are the measured width rounded to the pixel,
+        // which can be a hair short of it, and would move the last tag to a line of its own.
+        for line in lines(subviews, width: proposal.width ?? .infinity) {
+            var x = bounds.minX
+            for item in line.items {
+                subviews[item.index].place(at: CGPoint(x: x, y: y + (line.height - item.size.height) / 2),
+                                           proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += line.height + lineSpacing
+        }
+    }
+
+    /// The first line's first view's baseline, so a checkmark beside a title lines up with it.
+    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                           cache: inout ()) -> CGFloat? {
+        guard guide == .firstTextBaseline, let line = lines(subviews, width: proposal.width ?? .infinity).first,
+              let first = line.items.first else { return nil }
+        let baseline = subviews[first.index].dimensions(in: ProposedViewSize(first.size))[.firstTextBaseline]
+        return bounds.minY + (line.height - first.size.height) / 2 + baseline
+    }
+
+    private func lines(_ subviews: Subviews, width: CGFloat) -> [Line] {
+        var lines: [Line] = []
+        var line = Line()
+        for index in subviews.indices {
+            var size = subviews[index].sizeThatFits(.unspecified)
+            if size.width > width, width.isFinite {
+                size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            }
+            if !line.items.isEmpty, line.width + spacing + size.width > width {
+                lines.append(line)
+                line = Line()
+            }
+            line.width += (line.items.isEmpty ? 0 : spacing) + size.width
+            line.height = max(line.height, size.height)
+            line.items.append((index, size))
+        }
+        if !line.items.isEmpty { lines.append(line) }
+        return lines
+    }
+}
+
+/// What a title's versions are called, each told apart from the others. Each is its picture's
+/// size with tags for what sets it apart (`VersionLabel`), over its bitrate, which every row
+/// shows; where two would be alike in tags and bitrate, its release group is one more tag, or
+/// failing that its place, "Version 2". Its name in a word or two is the size with as many of its
+/// tags as tell it from the others of that size, and failing those its bitrate: "4K", "4K · Dolby
+/// Vision", "1080p · Director's Cut", "1080p · 8.3 Mbps".
 nonisolated struct VersionNames {
+    private let labels: [String: VersionLabel]
     private let names: [String: String]
 
     init(_ sources: [MediaSource]) {
-        let plain = sources.map(Self.plainName)
+        let plain = sources.map(VersionLabel.init)
+        var told = plain
+        for (index, label) in plain.enumerated() {
+            let alike = plain.filter { $0.title == label.title && $0.tags == label.tags }
+            guard alike.count > 1 else { continue }
+            let bitrates = alike.map(\.bitrateText)
+            if !bitrates.contains(nil), Set(bitrates).count == alike.count { continue }
+            let groups = alike.map(\.group)
+            if let group = label.group, !groups.contains(nil), Set(groups).count == alike.count {
+                told[index].tags.append(group)
+            } else {
+                told[index].tags.append("Version \(index + 1)")
+            }
+        }
         var names: [String: String] = [:]
-        for (index, source) in sources.enumerated() {
-            let name = plain[index]
-            guard plain.filter({ $0 == name }).count > 1 else {
-                names[source.id] = name
+        for (index, label) in told.enumerated() {
+            let others = told.indices.filter { $0 != index && told[$0].title == label.title }.map { told[$0] }
+            guard !others.isEmpty else {
+                names[sources[index].id] = label.title
                 continue
             }
-            let own = source.name.flatMap { $0.isEmpty || $0 == name || $0 == "Default" ? nil : $0 }
-            names[source.id] = "\(name) · \(own ?? String(index + 1))"
+            // Its tags the others of its size don't all have, then its bitrate, as few of them as tell it apart.
+            let shared = others.reduce(Set(label.tags)) { $0.intersection($1.tags) }
+            let tellingOf = { (other: VersionLabel) in other.tags.filter { !shared.contains($0) } + [other.bitrateText].compactMap(\.self) }
+            let telling = tellingOf(label)
+            let count = (0...telling.count).first { count in
+                others.allSatisfy { Array(tellingOf($0).prefix(count)) != Array(telling.prefix(count)) }
+            } ?? telling.count
+            names[sources[index].id] = ([label.title] + telling.prefix(count)).joined(separator: " · ")
         }
+        labels = Dictionary(zip(sources.map(\.id), told)) { first, _ in first }
         self.names = names
     }
 
-    /// "4K"
+    /// The version's label, told apart from the others'.
+    func label(_ source: MediaSource) -> VersionLabel {
+        labels[source.id] ?? VersionLabel(source)
+    }
+
+    /// "4K", "4K · Dolby Vision"
     func name(_ source: MediaSource) -> String {
-        names[source.id] ?? Self.plainName(source)
+        names[source.id] ?? VersionLabel(source).title
     }
 
     /// The version's name with its size, as the menu lists it: "4K · 40.5 MB".
     func title(of source: MediaSource) -> String {
         [name(source), source.plausibleSize?.formatted(.byteCount(style: .file))].compactMap(\.self).joined(separator: " · ")
     }
+}
 
-    /// From the picture's size and range, else the server's name, else "Version".
-    static func plainName(_ source: MediaSource) -> String {
-        let picture = [VersionTraits(source).resolutionClass.map(VersionTraits.label(forResolution:)), source.dynamicRangeName]
-            .compactMap(\.self)
-        if !picture.isEmpty { return picture.joined(separator: " ") }
-        return source.name.flatMap { $0.isEmpty || $0 == "Default" ? nil : $0 } ?? "Version"
+nonisolated extension VersionLabel {
+    /// Its tags, audio and bitrate on one line, as a menu has room for: "Dolby Vision · Remux ·
+    /// Dolby Atmos · 7.1 · 52 Mbps". Nil with none of them.
+    var details: String? {
+        let parts = tags + [audio, bitrateText].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Its audio, bitrate and `size`: "Dolby Atmos · 7.1 · 52 Mbps · 58.2 GB". Nil with none.
+    func caption(size: Int64?) -> String? {
+        let parts = [audio, bitrateText, size.map { $0.formatted(.byteCount(style: .file)) }].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
 nonisolated extension MediaSource {
-    /// "1080p H264 SDR · AAC 5.1 +1 · 4.2 GB · MKV", with or without the size.
-    func detailLine(withSize: Bool) -> String {
-        var parts: [String] = []
-        if let video = videoStream?.displayTitle { parts.append(video) }
-        if let audio = audioStreams.first?.displayTitle {
-            parts.append(audioStreams.count > 1 ? "\(audio) +\(audioStreams.count - 1)" : audio)
-        }
-        if !subtitleStreams.isEmpty { parts.append("\(subtitleStreams.count) subtitles") }
-        if withSize, let size = plausibleSize { parts.append(size.formatted(.byteCount(style: .file))) }
-        if let ext = fileExtension { parts.append(ext.uppercased()) }
-        return parts.joined(separator: " · ")
-    }
-
-    /// "1080p H264 SDR · AAC 5.1 +1 · 4.2 GB · MKV"
-    var detailLine: String { detailLine(withSize: true) }
-
     /// The picture's high dynamic range, by the video stream's range or the version's name:
     /// "Dolby Vision", "HDR10+", "HDR" or "HLG"; nil for standard range.
     var dynamicRangeName: String? {

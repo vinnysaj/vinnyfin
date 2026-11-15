@@ -399,6 +399,20 @@ struct PlaybackResolver {
 
     // MARK: Downloads
 
+    /// The version of the item downloaded to this device; nil without a download.
+    func downloadedVersion(of itemId: String) -> MediaSource? {
+        downloadedCopy(itemId, nil)?.item?.mediaSources?.first
+    }
+
+    /// The item's download, from `position`, to play in place of a stream of it; nil when it has
+    /// none. `title` stands for the item's when the download kept none.
+    func download(of itemId: String, title: String, from position: Double) -> ResolvedPlayback? {
+        guard let copy = downloadedCopy(itemId, nil) else { return nil }
+        let request = PlaybackRequest(source: .item(id: itemId, mediaSourceId: nil), title: title,
+                                      startingPoint: PlaybackRequest.StartingPoint(position: position))
+        return resolveDownload(copy, itemId: itemId, request: request)
+    }
+
     private func resolveDownload(_ copy: DownloadedCopy, itemId: String, request: PlaybackRequest) -> ResolvedPlayback {
         let item = copy.item
         // The server's position when it was last seen, unless this device has a newer one.
@@ -675,6 +689,23 @@ struct TrackSelection {
         guard subtitle != nil, let source, streams?.mediaSourceId == source.id, let index = streams?.subtitle,
               source.subtitleStreams.contains(where: { $0.index == index }) else { return nil }
         return index
+    }
+
+    /// The selection as it carries from `copy` to `source`, another copy of the version it was
+    /// chosen in, such as its download: by the very streams only where both list them alike. A
+    /// download the server converted numbers its streams its own way, so there they're found by
+    /// language and kind instead.
+    func carried(from copy: MediaSource?, to source: MediaSource?) -> TrackSelection {
+        guard let streams, let copy, let source, streams.mediaSourceId == source.id,
+              Self.listing(of: copy) != Self.listing(of: source) else { return self }
+        var carried = self
+        carried.streams = nil
+        return carried
+    }
+
+    /// A version's audio and subtitle streams as its copies number them.
+    private static func listing(of source: MediaSource) -> [String] {
+        (source.audioStreams + source.subtitleStreams).map { "\($0.index ?? -1) \($0.codec ?? "") \($0.language ?? "")" }
     }
 
     /// The server's indexes in `source` of the same audio and subtitles, to ask a transcode for:

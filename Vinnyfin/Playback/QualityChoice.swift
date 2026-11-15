@@ -6,15 +6,18 @@ nonisolated enum QualityOption: Hashable, Sendable {
     /// What the streaming limit allows, which with Adaptive Quality moves down when the connection
     /// can't keep up and back up once it recovers.
     case auto
+    /// The title's download on this device, which takes Auto's place where there is one.
+    case download
     /// A version as it is.
     case version(MediaSource)
     /// The version playing, converted by the server to a smaller size.
     case converted(VideoQuality)
 
-    /// The ways to play a title whose versions are `sources`, `playing` among them: Auto, each
-    /// version, and each size the server can convert `playing` to that saves something, the
-    /// largest first. None for a version the server won't convert.
-    static func all(sources: [MediaSource], playing: MediaSource) -> [QualityOption] {
+    /// The ways to play a title whose versions are `sources`, `playing` among them: Auto, or with
+    /// a `download`, the download, then each version, and each size the server can convert
+    /// `playing` to that saves something, the largest first. No sizes for a version the server
+    /// won't convert.
+    static func all(sources: [MediaSource], playing: MediaSource, download: Bool = false) -> [QualityOption] {
         let traits = VersionTraits(playing)
         let height = traits.resolutionClass ?? .max
         let bitrate = traits.estimatedBitrate ?? .max
@@ -22,7 +25,7 @@ nonisolated enum QualityOption: Hashable, Sendable {
             let lines = quality.maxHeight ?? .max
             return lines < height || (lines == height && Double(quality.transcodeBitrate) <= Double(bitrate) * 0.85)
         }
-        return [.auto] + sources.map(QualityOption.version) + sizes.map(QualityOption.converted)
+        return [download ? .download : .auto] + sources.map(QualityOption.version) + sizes.map(QualityOption.converted)
     }
 }
 
@@ -58,7 +61,7 @@ nonisolated enum QualityReason: Equatable, Sendable {
 nonisolated struct QualityStatus: Equatable, Sendable {
     /// "Converted to 720p, the connection slowed"
     let summary: String
-    /// "From 4K · up to 6 Mbps"
+    /// "Dolby Vision · Remux · 52 Mbps", "From 4K · up to 6 Mbps"
     let detail: String?
 
     init(summary: String, detail: String?) {
@@ -72,9 +75,9 @@ nonisolated struct QualityStatus: Equatable, Sendable {
         summary = Self.why(reason).map { "\(what), \($0)" } ?? what
         switch plan {
         case .direct(let source):
-            let parts = [source.videoStream?.displayTitle, VersionTraits(source).bitrate.map(QualityLearning.label(forBitrate:))]
-            let line = parts.compactMap(\.self).joined(separator: " · ")
-            detail = line.isEmpty ? nil : line
+            let label = VersionLabel(source)
+            let parts = label.tags + [label.bitrateText].compactMap(\.self)
+            detail = parts.isEmpty ? nil : parts.joined(separator: " · ")
         case .transcode(let source, let quality):
             let from = PlaybackPlan.direct(source).label.map { "From \($0) · " } ?? ""
             detail = "\(from)up to \(QualityLearning.label(forBitrate: quality.transcodeBitrate))"

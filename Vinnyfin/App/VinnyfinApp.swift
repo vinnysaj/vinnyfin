@@ -20,9 +20,17 @@ struct VinnyfinApp: App {
     @State private var cinemaImmersion: any ImmersionStyle = .progressive(0.2...1, initialAmount: 1)
     #endif
 
+    private var rootView: RootView {
+        #if os(iOS)
+        RootView(app: appDelegate)
+        #else
+        RootView()
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
-            RootView()
+            rootView
                 .withAppEnvironment(appDelegate)
                 #if os(macOS)
                 .background(DockMenuWindows(dockMenu: appDelegate.dockMenu))

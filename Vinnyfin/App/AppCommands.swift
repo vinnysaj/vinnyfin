@@ -261,7 +261,7 @@ struct AppCommands: Commands {
             if let id { player?.model.chooseAudio(id) }
         })) {
             ForEach(player?.model.audioOptions ?? []) { option in
-                Text(option.title).tag(Optional(option.id))
+                Text(option.line).tag(Optional(option.id))
             }
         }
         .disabled(player?.model.audioOptions.isEmpty ?? true)

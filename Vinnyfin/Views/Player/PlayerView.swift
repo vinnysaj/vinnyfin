@@ -142,7 +142,7 @@ struct PlayerView: View {
             .environment(rotation)
             .environment(\.playerSheetSources, sheetSources)
             .onHingeChange { _, context in
-                rotation.hingeChanged(isUnfolded: [.partiallyOpen, .fullyOpen].contains(context.hinge?.status))
+                rotation.hingeChanged(isUnfolded: PlayerRotation.isOpen(context))
             }
             .onAppear {
                 rotation.start(landscapeTitles: settings.playsVideosInLandscape)
@@ -455,6 +455,7 @@ struct PlayerView: View {
                     .onGeometryChange(for: CGRect?.self) { Self.fold(in: $0) } action: { fold = $0 }
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                         screenSize = size
+                        rotation.screenChanged(size)
                         #if DEBUG
                         Self.log.debug("Player screen \(Int(size.width))x\(Int(size.height))")
                         #endif
@@ -512,7 +513,9 @@ struct PlayerView: View {
                 .frame(maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea()
                 #if os(iOS)
-                .modifier(PictureTouches(onTap: { location, width in pictureTapped(PictureTaps.zone(x: location.x, width: width), at: location) },
+                .modifier(PictureTouches(onTap: { location, area in
+                    pictureTapped(PictureTaps.zone(x: location.x - area.minX, width: area.width), at: location)
+                },
                                          onHoldBegan: holdBegan, onHoldEnded: { model.endHoldingSpeed() }, onPinch: pinched))
                 #else
                 .gesture(SpatialTapGesture().onEnded { _ in pictureTapped(.middle) })
@@ -524,6 +527,10 @@ struct PlayerView: View {
                 .accessibilityHint("Shows or hides the controls")
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction { toggleControls(holding: true) }
+                #if os(iOS)
+                // The pinch's, for VoiceOver and Voice Control.
+                .accessibilityAction(named: fillsScreen ? "Fit to Screen" : "Fill Screen") { fillsScreen.toggle() }
+                #endif
                 .accessibilityIdentifier("player.picture")
             #if os(iOS)
             if let pictureSkip, let run = model.scrubbing.skipRun {
@@ -545,7 +552,7 @@ struct PlayerView: View {
             #if os(tvOS)
             // The end screen stands in for them.
             if controlsVisible, !showsEndScreen {
-                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
+                PlayerControls(model: model, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, watchTogether: nil,
                                focus: $focus, isCompact: controlsCompact,
@@ -557,7 +564,7 @@ struct PlayerView: View {
             if let fold {
                 // Below the fold they stay, dimmed while they'd be hidden, and any use brings them
                 // back up.
-                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
+                PlayerControls(model: model, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: { showControls() }, pictureInPicture: pictureInPictureAction,
                                watchTogether: watchTogetherAction, isBelowFold: true)
@@ -567,7 +574,7 @@ struct PlayerView: View {
                     .padding(.top, fold.maxY)
                     .ignoresSafeArea(edges: .top)
             } else if controlsVisible, !showsEndScreen {
-                PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
+                PlayerControls(model: model, panel: $panel,
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: pictureInPictureAction,
                                watchTogether: watchTogetherAction)
@@ -651,6 +658,9 @@ struct PlayerView: View {
                 }
             }
         }
+        #if os(iOS)
+        .coordinateSpace(.playerPicture)
+        #endif
     }
 
     #if os(tvOS)
@@ -1218,7 +1228,7 @@ struct PlayerView: View {
 
     #if os(visionOS)
     private var controlsOrnament: some View {
-        PlayerControls(model: model, fillsScreen: $fillsScreen, panel: $panel,
+        PlayerControls(model: model, panel: $panel,
                        bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                        onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil,
                        watchTogether: watchTogetherAction)
@@ -1624,7 +1634,7 @@ struct PlayerView: View {
 
     #if os(iOS)
     /// The side of the picture a run of double taps skips on, how many taps it has had, and where
-    /// the last one landed.
+    /// the last one landed, in the player's layers (`playerPicture`).
     private struct PictureSkip: Equatable {
         let forward: Bool
         let taps: Int

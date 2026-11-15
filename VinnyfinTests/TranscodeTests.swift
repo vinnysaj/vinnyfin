@@ -429,6 +429,9 @@ struct TranscodeStateTests {
         let source = try #require(item?.mediaSources?.first)
         #expect(item?.mediaSources?.count == 1)
         #expect(source.container == "mp4")
+        // Named as the download is, not as the version it was converted from.
+        #expect(source.name == state.label)
+        #expect(source.path == nil)
         #expect(source.videoStream?.index == 0)
         #expect(source.videoStream?.codec == "h264")
         #expect(source.videoStream?.height == 720)

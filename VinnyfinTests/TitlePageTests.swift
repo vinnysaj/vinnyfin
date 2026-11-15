@@ -259,8 +259,10 @@ struct TitlePageTests {
         #expect(names.name(sources[0]) == "4K")
         #expect(names.name(sources[1]) == "1080p")
         #expect(names.title(of: sources[0]) == "4K · \(Int64(40_451_055).formatted(.byteCount(style: .file)))")
-        #expect(VersionNames.plainName(Self.source("d", name: "Remux", width: 3840, height: 2160, range: "DOVIWithHDR10")) == "4K Dolby Vision")
-        #expect(VersionNames.plainName(Self.source("h", name: nil, width: 1920, height: 800, range: "HDR10")) == "1080p HDR")
+        let remux = VersionLabel(Self.source("d", name: "Remux", width: 3840, height: 2160, range: "DOVIWithHDR10"))
+        #expect(remux.title == "4K")
+        #expect(remux.tags == ["Dolby Vision", "Remux"])
+        #expect(VersionLabel(Self.source("h", name: nil, width: 1920, height: 800, range: "HDR10")).tags == ["HDR10"])
     }
 
     @Test func versionsCalledTheSameAreToldApartByTheirNames() {
@@ -270,17 +272,18 @@ struct TitlePageTests {
         let names = VersionNames(sources)
         #expect(names.name(sources[0]) == "1080p · Theatrical")
         #expect(names.name(sources[1]) == "1080p · Director's Cut")
-        #expect(names.name(sources[2]) == "1080p · 3")
+        // The one without an edition is the only plain 1080p.
+        #expect(names.name(sources[2]) == "1080p")
         // Nothing of the picture known: the server's name, or failing that, "Version".
-        #expect(VersionNames.plainName(Self.source("r", name: "Stream")) == "Stream")
-        #expect(VersionNames.plainName(Self.source("x", name: "Default")) == "Version")
+        #expect(VersionLabel(Self.source("r", name: "Stream")).title == "Stream")
+        #expect(VersionLabel(Self.source("x", name: "Default")).title == "Version")
     }
 
     @Test func theMenuLeavesTheSizeOutOfWhatsInAVersion() {
-        var source = Self.source("a", name: "1080p", width: 1920, height: 1080, size: 300_000_000)
-        source.container = "mkv"
-        #expect(!source.detailLine(withSize: false).contains("MB"))
-        #expect(source.detailLine.contains("MB"))
+        let source = Self.source("a", name: "1080p WEB-DL", width: 1920, height: 1080, size: 300_000_000)
+        let label = VersionNames([source]).label(source)
+        #expect(label.details == "WEB-DL")
+        #expect(label.caption(size: source.plausibleSize)?.contains("MB") == true)
     }
 
     // MARK: The episode's still

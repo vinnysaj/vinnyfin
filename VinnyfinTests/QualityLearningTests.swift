@@ -158,6 +158,8 @@ struct QualityLearningTests {
     @Test func namesTheLimitInMegabits() {
         #expect(QualityLearning.label(forBitrate: 20_000_000) == "20 Mbps")
         #expect(QualityLearning.label(forBitrate: 28_000_000) == "28 Mbps")
+        #expect(QualityLearning.label(forBitrate: 2_500_000) == "2.5 Mbps")
+        #expect(QualityLearning.label(forBitrate: 350_400) == "350 kbps")
     }
 }
 

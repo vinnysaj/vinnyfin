@@ -88,9 +88,10 @@ nonisolated struct QualityLearning: Codable, Equatable, Sendable {
         calendar.startOfDay(for: date.addingTimeInterval(-Double(Rules.dayStartHour) * 60 * 60))
     }
 
-    /// "20 Mbps", "2.5 Mbps"
+    /// "20 Mbps", "2.5 Mbps", and under a megabit, which would read "0 Mbps", "350 kbps".
     static func label(forBitrate bitrate: Int) -> String {
-        "\((Double(bitrate) / 1_000_000).formatted(.number.precision(.fractionLength(0...1)))) Mbps"
+        guard bitrate >= 1_000_000 else { return "\((Double(bitrate) / 1_000).rounded().formatted()) kbps" }
+        return "\((Double(bitrate) / 1_000_000).formatted(.number.precision(.fractionLength(0...1)))) Mbps"
     }
 }
 

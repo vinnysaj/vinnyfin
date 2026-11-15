@@ -5,19 +5,24 @@
 # is still submitted for review in App Store Connect, which takes a submission per platform. The
 # archives stay out of the repo, in AppStore/Output.
 #
-# The platforms archive at once, and their archives upload one at a time, in the order the
-# platforms are named, each once it's archived. Uploads at once fail with "Failed to Use
-# Accounts" and sign Xcode out of App Store Connect. One platform that fails leaves the others to
-# finish. Each has its own DerivedData, as two builds can't share one's build database, and its
-# own log in AppStore/Output/Logs. The packages are fetched once, before any build, into a folder
-# they all read.
+# The platforms archive at once, each uploading as soon as it's archived, whatever the others are
+# doing. One platform that fails leaves the others to finish. Each has its own DerivedData, as two
+# builds can't share one's build database, and its own log in AppStore/Output/Logs. The packages
+# are fetched once, before any build, into a folder they all read.
 #
 # App Store Connect takes a build number once per version and platform, so CURRENT_PROJECT_VERSION
 # goes up before every upload after the first of a version.
 #
 # Usage: AppStore/release.sh [ios] [mac] [tv] [vision]   (default: all)
-# Needs Xcode signed in to an account in the team, whose distribution certificate and profiles it
-# makes and signs with.
+#
+# Signs in to App Store Connect with an API key, which makes and signs with the team's
+# distribution certificate and profiles, and uploads: a Team Key with the Admin role, made in App
+# Store Connect under Users and Access, Integrations. Its file goes in
+# ~/.appstoreconnect/private_keys as Apple names it, AuthKey_<key ID>.p8, and the issuer ID shown
+# above the keys in ~/.appstoreconnect/issuer_id. With more than one key there,
+# APP_STORE_CONNECT_KEY_ID says which. Not the account Xcode is signed in to: every xcodebuild
+# under way at once refreshes that in the keychain, they race, and Xcode ends up signed out
+# partway through.
 set -euo pipefail
 # Each platform's job leads a process group of its own, for stopping it with what it runs.
 set -m
@@ -46,6 +51,25 @@ for name in "${names[@]}"; do
 done
 
 command -v xcodebuild >/dev/null || fail "xcodebuild isn't installed."
+
+# The API key, passed to every xcodebuild that reaches App Store Connect.
+keys="$HOME/.appstoreconnect/private_keys"
+if [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ]; then
+  key="$keys/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+  [ -f "$key" ] || fail "There's no key $key."
+else
+  found=("$keys"/AuthKey_*.p8)
+  [ -f "${found[0]}" ] || found=()
+  [ ${#found[@]} -le 1 ] || fail "There are ${#found[@]} keys in $keys; set APP_STORE_CONNECT_KEY_ID to the one to use."
+  key=${found[0]:-}
+fi
+[ -n "$key" ] || fail "There's no App Store Connect API key in $keys. The top of AppStore/release.sh says how to add one."
+issuer_file="$HOME/.appstoreconnect/issuer_id"
+[ -f "$issuer_file" ] || fail "The issuer ID for $key goes in $issuer_file."
+issuer=$(tr -d '[:space:]' <"$issuer_file")
+[ -n "$issuer" ] || fail "$issuer_file is empty."
+key_id=$(basename "$key" .p8)
+auth=(-authenticationKeyPath "$key" -authenticationKeyID "${key_id#AuthKey_}" -authenticationKeyIssuerID "$issuer")
 
 settings=$(xcodebuild -showBuildSettings -project "$project" -target Vinnyfin 2>/dev/null)
 setting() { awk -v name="$1" '$1 == name { print $3; exit }' <<<"$settings"; }
@@ -89,56 +113,54 @@ archive() { # platform
   rm -rf "$archive"
   xcodebuild archive -project "$project" -scheme Vinnyfin -configuration Release -destination "generic/platform=$1" \
     -archivePath "$archive" -derivedDataPath "$output/DerivedData/$1" -clonedSourcePackagesDirPath "$packages" \
-    -disableAutomaticPackageResolution -skipPackageUpdates -allowProvisioningUpdates -quiet
+    -disableAutomaticPackageResolution -skipPackageUpdates -allowProvisioningUpdates "${auth[@]}" -quiet
 }
 
 # Uploads a platform's archive. An upload exports nothing to the export path; Xcode prints where
 # it keeps the upload's logs.
 upload() { # platform
   xcodebuild -exportArchive -archivePath "$output/Archives/$1.xcarchive" -exportOptionsPlist "$options" \
-    -exportPath "$output/Uploads/$1" -allowProvisioningUpdates -quiet
+    -exportPath "$output/Uploads/$1" -allowProvisioningUpdates "${auth[@]}" -quiet
 }
 
-say "Archiving vinnyfin $version ($build) for ${platforms[*]}, and uploading each in turn"
-# The archives, and the upload under way, run as jobs, so Ctrl-C reaches only this script, which
-# stops them all with it.
+# Archives a platform and uploads the archive, saying how far it got: 1 if the archive failed, 2
+# if the upload did.
+release() { # platform
+  archive "$1" >"$logs/$1.log" 2>&1 </dev/null || return 1
+  echo "Archived $1 at $((SECONDS / 60))m $((SECONDS % 60))s; uploading"
+  local started=$SECONDS
+  upload "$1" >>"$logs/$1.log" 2>&1 </dev/null || return 2
+  echo "Uploaded $1 in $((SECONDS - started))s"
+}
+
+say "Archiving vinnyfin $version ($build) for ${platforms[*]}, and uploading each once it's archived"
+# The platforms run as jobs, so Ctrl-C reaches only this script, which stops them all with it.
 pids=()
 for platform in "${platforms[@]}"; do
-  archive "$platform" >"$logs/$platform.log" 2>&1 </dev/null &
+  release "$platform" &
   pids+=($!)
 done
-uploading=
 stop() {
   local pid
-  for pid in "${pids[@]}" $uploading; do kill -- "-$pid" 2>/dev/null || true; done
+  for pid in "${pids[@]}"; do kill -- "-$pid" 2>/dev/null || true; done
   exit 130
 }
 trap stop INT TERM
 
 uploaded=()
 failed=()
-failure() { # platform, what failed
-  failed+=("$1")
-  printf '\n\033[31m%s\033[0m The end of %s:\n' "$2" "$logs/$1.log" >&2
-  tail -n 15 "$logs/$1.log" >&2
-}
 for index in "${!platforms[@]}"; do
   platform=${platforms[$index]}
-  if ! wait "${pids[$index]}"; then
-    failure "$platform" "Archiving for $platform failed."
-    continue
-  fi
-  echo "Archived $platform at $((SECONDS / 60))m $((SECONDS % 60))s; uploading"
-  started=$SECONDS
-  upload "$platform" >>"$logs/$platform.log" 2>&1 </dev/null &
-  uploading=$!
-  if wait "$uploading"; then
-    uploaded+=("$platform")
-    echo "Uploaded $platform in $((SECONDS - started))s"
-  else
-    failure "$platform" "Uploading $platform failed; Xcode's logs are in the .xcdistributionlogs bundle its log names."
-  fi
-  uploading=
+  wait "${pids[$index]}" && status=0 || status=$?
+  case $status in
+    0) uploaded+=("$platform"); continue ;;
+    1) problem="Archiving for $platform failed." ;;
+    2) problem="Uploading $platform failed; Xcode's logs are in the .xcdistributionlogs bundle its log names." ;;
+    *) problem="$platform stopped." ;;
+  esac
+  failed+=("$platform")
+  printf '\n\033[31m%s\033[0m The end of %s:\n' "$problem" "$logs/$platform.log" >&2
+  tail -n 15 "$logs/$platform.log" >&2
 done
 
 if [ ${#failed[@]} -gt 0 ]; then

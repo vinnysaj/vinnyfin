@@ -27,16 +27,19 @@ struct OfflinePlayability: ViewModifier {
     let item: JellyfinItem
     let mediaSourceId: String?
     let dims: Bool
-    /// Whether the item has a download here; nil asks the app's downloads.
-    var isDownloaded: ((_ itemId: String, _ mediaSourceId: String?) -> Bool)?
-    @Environment(ServerReachability.self) private var reachability
-    @Environment(\.session) private var session
-    #if !os(tvOS)
-    @Environment(DownloadManager.self) private var downloads: DownloadManager?
-    #endif
+    private let playable: PlayableNow
+
+    /// `isDownloaded` says whether the item has a download here; nil asks the app's downloads.
+    init(item: JellyfinItem, mediaSourceId: String?, dims: Bool,
+         isDownloaded: ((_ itemId: String, _ mediaSourceId: String?) -> Bool)? = nil) {
+        self.item = item
+        self.mediaSourceId = mediaSourceId
+        self.dims = dims
+        playable = PlayableNow(isDownloaded: isDownloaded)
+    }
 
     func body(content: Content) -> some View {
-        if isPlayable {
+        if playable(item, mediaSourceId: mediaSourceId) {
             content
         } else {
             content
@@ -47,7 +50,56 @@ struct OfflinePlayability: ViewModifier {
         }
     }
 
-    private var isPlayable: Bool {
+    /// "Can't reach Showcase. Download it to watch it offline."
+    private var reason: String {
+        let server = "Can't reach \(playable.serverTitle)."
+        #if os(tvOS)
+        return server
+        #else
+        return item.isSeries ? server : server + " Download it to watch it offline."
+        #endif
+    }
+}
+
+/// Under a title page's actions while its Play is off, the server being out of reach: when it
+/// plays, set in from the page's edges as its other notes are. The page's alone: cards and menus
+/// say why only to VoiceOver and under the pointer. With Play on, nothing, not even room.
+struct OfflinePlayNote: View {
+    let item: JellyfinItem
+    let mediaSourceId: String?
+    private let playable: PlayableNow
+
+    /// `isDownloaded` says whether the item has a download here; nil asks the app's downloads.
+    init(item: JellyfinItem, mediaSourceId: String?,
+         isDownloaded: ((_ itemId: String, _ mediaSourceId: String?) -> Bool)? = nil) {
+        self.item = item
+        self.mediaSourceId = mediaSourceId
+        playable = PlayableNow(isDownloaded: isDownloaded)
+    }
+
+    var body: some View {
+        if !playable(item, mediaSourceId: mediaSourceId) {
+            Label("Plays when vinnyfin can reach \(playable.serverTitle) again.", systemImage: "wifi.slash")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Metrics.edge)
+                .accessibilityIdentifier("detail.offlinePlayNote")
+        }
+    }
+}
+
+/// Whether a title plays now, by `PlayAvailability`, from whether the server answers and what's
+/// downloaded here.
+struct PlayableNow: DynamicProperty {
+    @Environment(ServerReachability.self) private var reachability
+    @Environment(\.session) private var session
+    #if !os(tvOS)
+    @Environment(DownloadManager.self) private var downloads: DownloadManager?
+    #endif
+    /// Whether the item has a download here; nil asks the app's downloads.
+    let isDownloaded: ((_ itemId: String, _ mediaSourceId: String?) -> Bool)?
+
+    func callAsFunction(_ item: JellyfinItem, mediaSourceId: String?) -> Bool {
         PlayAvailability.canPlay(item, mediaSourceId: mediaSourceId, isServerOutOfReach: reachability.isOutOfReach) { itemId, sourceId in
             if let isDownloaded { return isDownloaded(itemId, sourceId) }
             #if os(tvOS)
@@ -58,13 +110,8 @@ struct OfflinePlayability: ViewModifier {
         }
     }
 
-    /// "Can't reach Showcase. Download it to watch it offline."
-    private var reason: String {
-        let server = "Can't reach \(session?.account.serverTitle ?? "the server")."
-        #if os(tvOS)
-        return server
-        #else
-        return item.isSeries ? server : server + " Download it to watch it offline."
-        #endif
+    /// The signed-in server's name, to say it can't be reached.
+    var serverTitle: String {
+        session?.account.serverTitle ?? "the server"
     }
 }

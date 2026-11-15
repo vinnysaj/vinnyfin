@@ -437,21 +437,43 @@ struct PlayableOfflineTests {
         }
     }
 
-    /// Whether a control that plays `item` is on, with the server answering or not, and the item
-    /// downloaded or not.
-    private func isOn(_ item: JellyfinItem, serverAnswers: Bool, downloaded: Bool) async -> Bool? {
+    /// Runs `body` with the server answering or not, as the app would know.
+    private func with<Result>(serverAnswers: Bool, _ body: (ServerReachability) -> Result) async -> Result {
         let reachability = ServerReachability(networkChanges: { AsyncStream { _ in } }) { _, _ in
             if !serverAnswers { throw URLError(.cannotConnectToHost) }
         }
         let following = Task { await reachability.follow(Offline.session(Offline.alex, token: "a")) }
         defer { following.cancel() }
         _ = await Offline.until { reachability.state != .unknown }
-        let seen = Seen()
-        let control = Control(seen: seen)
-            .modifier(OfflinePlayability(item: item, mediaSourceId: nil, dims: true) { _, _ in downloaded })
-            .environment(reachability)
-        _ = ImageRenderer(content: control).cgImage
-        return seen.isEnabled
+        return body(reachability)
+    }
+
+    /// Whether a control that plays `item` is on, with the server answering or not, and the item
+    /// downloaded or not.
+    private func isOn(_ item: JellyfinItem, serverAnswers: Bool, downloaded: Bool) async -> Bool? {
+        await with(serverAnswers: serverAnswers) { reachability in
+            let seen = Seen()
+            let control = Control(seen: seen)
+                .modifier(OfflinePlayability(item: item, mediaSourceId: nil, dims: true) { _, _ in downloaded })
+                .environment(reachability)
+            _ = ImageRenderer(content: control).cgImage
+            return seen.isEnabled
+        }
+    }
+
+    /// Whether the title page's note under its actions draws at all.
+    private func showsNote(serverAnswers: Bool, downloaded: Bool) async -> Bool {
+        await with(serverAnswers: serverAnswers) { reachability in
+            let note = OfflinePlayNote(item: Offline.item("m1", "Amber Cartographers"), mediaSourceId: nil) { _, _ in downloaded }
+                .environment(reachability)
+            return (ImageRenderer(content: note).cgImage?.width ?? 0) > 0
+        }
+    }
+
+    @Test func theTitlePageSaysWhenWhatIsntDownloadedPlays() async {
+        #expect(await showsNote(serverAnswers: false, downloaded: false))
+        #expect(await !showsNote(serverAnswers: false, downloaded: true))
+        #expect(await !showsNote(serverAnswers: true, downloaded: false))
     }
 
     @Test func playsWhileTheServerAnswers() async {

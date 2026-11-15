@@ -141,6 +141,9 @@ struct ItemDetailView: View {
                             .padding(.horizontal, Metrics.edge)
                     }
                     if !isGone, shown.isNotYetAvailable() { notYetAvailableNote }
+                    if !isGone || isDownloaded, !shown.isNotYetAvailable() {
+                        OfflinePlayNote(item: shown, mediaSourceId: pickedSourceId)
+                    }
                     OverviewText(item: shown).padding(.horizontal, Metrics.edge)
                     if sources.count > 1 { versions }
                     if page.isEpisode, !isGone {

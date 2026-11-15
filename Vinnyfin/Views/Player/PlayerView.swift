@@ -340,6 +340,9 @@ struct PlayerView: View {
             controlsOrnament
         }
         .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
+        // The window's grab bar and close button go with the controls, off the picture and out
+        // of the dark theater, as the system player's do.
+        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         // A new picture is flat until the screen showing it finds otherwise.
         .onReceive(model.engine.$currentAVPlayer.removeDuplicates { $0 === $1 }) { _ in coordinator.pictureIsStereo = false }
         .onChange(of: coordinator.screenTaps) { toggleControls() }

@@ -135,6 +135,8 @@ struct CinemaSpace: View {
             }
         }
         .preferredSurroundingsEffect(.dark)
+        // The Home indicator stays out of the picture until it's asked for.
+        .persistentSystemOverlays(.hidden)
         .onAppear {
             player.isInCinema = true
             Self.setSoundStage(.large)

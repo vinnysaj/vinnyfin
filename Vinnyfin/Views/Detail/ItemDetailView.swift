@@ -161,6 +161,10 @@ struct ItemDetailView: View {
                             #if os(tvOS)
                             .pageRow("cast", in: rowLayout)
                             #endif
+                        TitleExtrasShelf(item: detail)
+                            #if os(tvOS)
+                            .pageRow("extras", in: rowLayout)
+                            #endif
                     }
                     if !similar.isEmpty {
                         MoreLikeThisShelf(title: shown, titles: $similar)

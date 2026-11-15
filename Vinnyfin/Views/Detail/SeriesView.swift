@@ -99,6 +99,7 @@ struct SeriesView: View {
                     }
                     if let detail {
                         CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
+                        TitleExtrasShelf(item: detail)
                     }
                     if !similar.isEmpty { MoreLikeThisShelf(title: shown, titles: $similar) }
                     if !isGone { TitleInformation(item: shown, source: nil, credits: Credits(people: detail?.people ?? [])) }

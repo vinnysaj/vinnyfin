@@ -168,6 +168,12 @@ struct ItemDetailView: View {
                         .pageRow("similar", in: rowLayout)
                         #endif
                     }
+                    if !isGone {
+                        TitleInformation(item: shown, source: playbackSource, credits: Credits(people: detail?.people ?? []))
+                            #if os(tvOS)
+                            .pageRow("information", in: rowLayout)
+                            #endif
+                    }
                 }
                 .padding(.bottom, Metrics.edge)
             }

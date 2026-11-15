@@ -101,6 +101,7 @@ struct SeriesView: View {
                         CastAndCrewShelf(credits: Credits(people: detail.people ?? []))
                     }
                     if !similar.isEmpty { MoreLikeThisShelf(title: shown, titles: $similar) }
+                    if !isGone { TitleInformation(item: shown, source: nil, credits: Credits(people: detail?.people ?? [])) }
                 }
                 .padding(.bottom, Metrics.edge)
             }

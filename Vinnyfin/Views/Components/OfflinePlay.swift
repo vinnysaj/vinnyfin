@@ -50,13 +50,19 @@ struct OfflinePlayability: ViewModifier {
         }
     }
 
-    /// "Can't reach Showcase. Download it to watch it offline."
     private var reason: String {
-        let server = "Can't reach \(playable.serverTitle)."
+        Self.reason(for: item, server: playable.serverTitle)
+    }
+
+    /// "Can't reach Showcase. Download it to watch it offline.", where it can be downloaded: not
+    /// a show, which the server picks an episode of, nor a trailer or extra, which downloads don't
+    /// keep, nor anything on Apple TV.
+    static func reason(for item: JellyfinItem, server: String) -> String {
+        let reason = "Can't reach \(server)."
         #if os(tvOS)
-        return server
+        return reason
         #else
-        return item.isSeries ? server : server + " Download it to watch it offline."
+        return item.isSeries || item.extraType != nil ? reason : reason + " Download it to watch it offline."
         #endif
     }
 }

@@ -161,6 +161,8 @@ struct ScenesShelf: View {
         .foregroundStyle(.primary)
         .accessibilityHint("Plays from here")
         .accessibilityIdentifier("scene.\(chapter.index)")
+        // Plays from the download while the server is out of reach, as Play does.
+        .playableOffline(item, mediaSourceId: pickedSourceId, dimming: true)
     }
 
     private var key: Key {

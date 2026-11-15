@@ -470,6 +470,19 @@ struct PlayableOfflineTests {
         }
     }
 
+    @Test func suggestsDownloadingOnlyWhatDownloads() {
+        let movie = Offline.item("m1", "Amber Cartographers")
+        var trailer = Offline.item("t1", "Teaser", type: "Trailer")
+        trailer.extraType = "Trailer"
+        #if os(tvOS)
+        #expect(OfflinePlayability.reason(for: movie, server: "Home") == "Can't reach Home.")
+        #else
+        #expect(OfflinePlayability.reason(for: movie, server: "Home") == "Can't reach Home. Download it to watch it offline.")
+        #endif
+        #expect(OfflinePlayability.reason(for: Offline.item("s1", "Starfall Station", type: "Series"), server: "Home") == "Can't reach Home.")
+        #expect(OfflinePlayability.reason(for: trailer, server: "Home") == "Can't reach Home.")
+    }
+
     @Test func theTitlePageSaysWhenWhatIsntDownloadedPlays() async {
         #expect(await showsNote(serverAnswers: false, downloaded: false))
         #expect(await !showsNote(serverAnswers: false, downloaded: true))

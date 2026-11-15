@@ -364,7 +364,8 @@ struct PlayerView: View {
         }
         // The window's close, minimize and zoom buttons go with the controls, off the picture.
         .background(WindowButtons(areHidden: !controlsVisible))
-        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop) { isFullScreen = $0 })
+        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop,
+                                      onWindow: { if let window = $0 { coordinator.playerWindow = window } }) { isFullScreen = $0 })
         .environment(\.playerIsFullScreen, isFullScreen)
         #endif
         #if os(tvOS)
@@ -933,13 +934,19 @@ struct PlayerView: View {
     private enum PictureCover: Equatable {
         case starting
         case airPlay(receiver: String)
+        /// The Mac's Picture in Picture window has the video. The player window goes off screen
+        /// meanwhile (`PlayerCoordinator`); this is what it shows as it goes and as it comes back.
+        case pictureInPicture
     }
 
-    /// Why the title's picture stands in for the video, when it does: the title is starting, or
-    /// AirPlay has the video on another screen.
+    /// Why the title's picture stands in for the video, when it does: the title is starting,
+    /// AirPlay has the video on another screen, or on the Mac Picture in Picture has it.
     private var pictureCover: PictureCover? {
         #if os(iOS) || os(macOS)
         if externalPlayback.isActive { return .airPlay(receiver: externalPlayback.receiverName) }
+        #endif
+        #if os(macOS)
+        if coordinator.pictureInPicture.isActive { return .pictureInPicture }
         #endif
         return isStartingTitle ? .starting : nil
     }
@@ -956,6 +963,16 @@ struct PlayerView: View {
                 #if os(iOS) || os(macOS)
                 AirPlayCaption(receiverName: receiver)
                 #endif
+            case .pictureInPicture:
+                Label {
+                    Text("Playing in Picture in Picture")
+                        .font(.title3.weight(.semibold))
+                } icon: {
+                    Image(systemName: "pip").font(.title)
+                }
+                .foregroundStyle(.white)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("player.pictureInPicture.cover")
             }
         }
         .padding(.trailing, captionPlace.trailingInset)

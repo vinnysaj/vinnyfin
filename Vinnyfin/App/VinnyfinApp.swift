@@ -341,7 +341,11 @@ struct PlayerWindow: View {
         .onDisappear {
             let closing = model
             model = nil
+            #if os(macOS)
+            if let closing { player.playerWindowClosed(closing) }
+            #else
             if player.presented === closing { player.presented = nil }
+            #endif
             #if os(visionOS)
             if player.isInCinema { Task { await dismissImmersiveSpace() } }
             #endif

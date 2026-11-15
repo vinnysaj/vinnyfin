@@ -319,6 +319,8 @@ struct PlayerWindowShape: NSViewRepresentable {
     /// The picture's shape; nil until it's known.
     let videoSize: CGSize?
     var floatsOnTop = false
+    /// Given the window as the player moves into it, and nil as it leaves.
+    var onWindow: (NSWindow?) -> Void = { _ in }
     let onFullScreenChange: (Bool) -> Void
 
     func makeNSView(context: Context) -> ShapeView {
@@ -327,12 +329,14 @@ struct PlayerWindowShape: NSViewRepresentable {
 
     func updateNSView(_ view: ShapeView, context: Context) {
         view.onFullScreenChange = onFullScreenChange
+        view.onWindow = onWindow
         view.floatsOnTop = floatsOnTop
         view.videoSize = videoSize
     }
 
     final class ShapeView: NSView {
         var onFullScreenChange: (Bool) -> Void = { _ in }
+        var onWindow: (NSWindow?) -> Void = { _ in }
         var floatsOnTop = false {
             didSet { if floatsOnTop != oldValue { applyLevel() } }
         }
@@ -350,6 +354,7 @@ struct PlayerWindowShape: NSViewRepresentable {
             super.viewDidMoveToWindow()
             observers.forEach(NotificationCenter.default.removeObserver)
             observers = []
+            onWindow(window)
             guard let window else { return }
             applyLevel()
             for (name, isFullScreen) in [(NSWindow.didEnterFullScreenNotification, true), (NSWindow.didExitFullScreenNotification, false)] {

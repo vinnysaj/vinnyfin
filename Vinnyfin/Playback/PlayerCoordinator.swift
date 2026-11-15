@@ -1,4 +1,7 @@
 import AetherEngine
+#if os(macOS)
+import AppKit
+#endif
 import Foundation
 import Observation
 import OSLog
@@ -61,10 +64,17 @@ final class PlayerCoordinator {
         #endif
     }
 
-    /// On iPhone and iPad, the player is put away while its playback plays in Picture in Picture,
-    /// so the app can be browsed meanwhile; `presented` keeps the playback. The window's restore
-    /// button brings the player back, and its close button ends the playback.
+    /// The player is put away while its playback plays in Picture in Picture, so the app can be
+    /// browsed meanwhile; `presented` keeps the playback. On iPhone and iPad the full-screen player
+    /// goes; on the Mac its window goes off screen (`playerWindow`). The Picture in Picture
+    /// window's restore button brings the player back, and its close button ends the playback.
     private(set) var isInPictureInPicture = false
+
+    #if os(macOS)
+    /// The player's window, which goes off screen while its playback plays in Picture in Picture:
+    /// SwiftUI can close a window but not take one off screen and bring it back.
+    @ObservationIgnored weak var playerWindow: NSWindow?
+    #endif
 
     /// The playback the full-screen player shows: `presented`, but for while it plays in Picture
     /// in Picture with the player put away.
@@ -153,7 +163,7 @@ final class PlayerCoordinator {
         case .unpause: model.play()
         case .togglePause: model.togglePlayPause()
         // Put away, the player isn't there to close itself.
-        case .stop where isInPictureInPicture: Task { await dismiss() }
+        case .stop where isInPictureInPicture: endPlaybackPutAway()
         case .stop: stopRequest = model.id
         case .seek(let seconds): model.seekAsAskedElsewhere(to: seconds)
         case .skip(let seconds): model.skip(by: seconds)
@@ -206,26 +216,50 @@ final class PlayerCoordinator {
         pictureInPicture.onClose = { [weak self] in self?.pictureInPictureClosed() }
     }
 
-    /// On iPhone and iPad the player is put away once the window has the picture.
+    /// The player is put away once the window has the picture.
     private func pictureInPictureStarted() {
-        #if os(iOS)
         guard presented != nil else { return }
+        #if os(macOS)
+        // In full screen the window keeps its Space, saying where the picture went, rather than
+        // leave an empty Space behind.
+        guard let playerWindow, !playerWindow.styleMask.contains(.fullScreen) else { return }
+        isInPictureInPicture = true
+        playerWindow.orderOut(nil)
+        #else
         isInPictureInPicture = true
         #endif
     }
 
     /// The window's restore button: the player comes back at once, without its slide, as the
     /// window flies back into it, and takes the picture back once it's on screen. It comes back
-    /// over the page the viewer browsed to meanwhile, which closing it then leaves them on.
+    /// over the page the viewer browsed to meanwhile, which closing it then leaves them on. On
+    /// the Mac the player's window comes back to the front.
     private func restoreFromPictureInPicture(_ done: @escaping (Bool) -> Void) {
         guard isInPictureInPicture, presented != nil else { return done(presented != nil) }
+        #if os(macOS)
+        isInPictureInPicture = false
+        guard let playerWindow else { return done(false) }
+        NSApp.activate()
+        playerWindow.makeKeyAndOrderFront(nil)
+        done(true)
+        #else
         pageUnderPlayer = pageOnScreen
         pendingRestore?(false)
         pendingRestore = done
         var instant = Transaction()
         instant.disablesAnimations = true
         withTransaction(instant) { isInPictureInPicture = false }
+        #endif
     }
+
+    #if os(macOS)
+    /// A player window closed, ending its playback and its Picture in Picture: as the window
+    /// closes for a new playback's, the new one may already be presented.
+    func playerWindowClosed(_ model: PlayerModel) {
+        isInPictureInPicture = false
+        if presented === model { presented = nil }
+    }
+    #endif
 
     /// The player is on screen: a restore waiting for it completes.
     func playerAppeared() {
@@ -236,9 +270,22 @@ final class PlayerCoordinator {
     /// The window's own close button ends the playback, its player put away.
     private func pictureInPictureClosed() {
         guard isInPictureInPicture else { return }
-        Task { await dismiss() }
+        endPlaybackPutAway()
     }
     #endif
+
+    /// Ends the playback while its player is put away: on iPhone and iPad here; on the Mac by
+    /// closing its window, whose playback ends with it.
+    private func endPlaybackPutAway() {
+        #if os(macOS)
+        if let playerWindow {
+            isInPictureInPicture = false
+            playerWindow.close()
+            return
+        }
+        #endif
+        Task { await dismiss() }
+    }
 
     /// A model for `request`, on the shared engine. Nil when the engine can't be built.
     func makeModel(for request: PlaybackRequest) -> PlayerModel? {

@@ -554,9 +554,11 @@ struct PlayButton: View {
     let focus: FocusState<Bool>.Binding
     #endif
     @Environment(PlayerCoordinator.self) private var player
+    private let playable = PlayableNow(isDownloaded: nil)
 
     var body: some View {
         Button {
+            guard playable(item, mediaSourceId: mediaSourceId) else { return }
             player.play(.item(item, mediaSourceId: mediaSourceId, loaded: item))
         } label: {
             PlayLabel(title: label, progress: item.resumeSeconds != nil ? item.progress : nil)
@@ -566,9 +568,15 @@ struct PlayButton: View {
         .accessibilityLabel(spokenLabel)
         .accessibilityInputLabels([item.resumeSeconds != nil ? "Resume" : "Play", label])
         .accessibilityIdentifier("detail.play")
-        .playableOffline(item, mediaSourceId: mediaSourceId)
         #if os(tvOS)
+        // Focusable while it can't play, the server being out of reach, so focus can start on it:
+        // a page opened then has nothing else to focus, and the remote's Back would do nothing.
+        .opacity(playable(item, mediaSourceId: mediaSourceId) ? 1 : 0.5)
+        .accessibilityHint(OfflinePlayability.reason(for: item, server: playable.serverTitle),
+                           isEnabled: !playable(item, mediaSourceId: mediaSourceId))
         .focused(focus)
+        #else
+        .playableOffline(item, mediaSourceId: mediaSourceId)
         #endif
         .layoutValue(key: WidensTitleAction.self, value: true)
         if item.resumeSeconds != nil {
@@ -625,7 +633,8 @@ struct PlayLabel: View {
 }
 
 /// Marks a title watched or unwatched. A whole show or season asks first, saying how many
-/// episodes that is, and then offers Undo (`WatchActions.setPlayedAfterAsking`).
+/// episodes that is, and then offers Undo (`WatchActions.setPlayedAfterAsking`). Off while the
+/// server is out of reach.
 struct WatchedButton: View {
     let item: JellyfinItem
     /// Told of the change as it's made, and again of the item as it was if the server refuses it.
@@ -658,6 +667,7 @@ struct WatchedButton: View {
             Toggle("Watched", isOn: Binding(get: { item.isPlayed }, set: { _ in press() }))
         }
         .accessibilityIdentifier("detail.watched")
+        .needsServer()
     }
 
     private func press() {
@@ -677,7 +687,7 @@ struct WatchedButton: View {
     }
 }
 
-/// Adds a title to the favorites or takes it out.
+/// Adds a title to the favorites or takes it out. Off while the server is out of reach.
 struct FavoriteButton: View {
     let item: JellyfinItem
     let onChange: (JellyfinItem) -> Void
@@ -707,6 +717,7 @@ struct FavoriteButton: View {
             Toggle("Favorite", isOn: Binding(get: { item.isFavorite }, set: { _ in press() }))
         }
         .accessibilityIdentifier("detail.favorite")
+        .needsServer()
     }
 
     private func press() {

@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The long-press menu for a title: play, its show for an episode, watched, favourite and, off
 /// Apple TV, download. A show's plays its next episode, or shuffles its episodes. For a card that
-/// plays on a tap, it leads with the title's page instead.
+/// plays on a tap, it leads with the title's page instead. While the server is out of reach, what
+/// needs it is off: playing what isn't downloaded, and marking watched or favourite.
 struct ItemContextMenu: View {
     let item: JellyfinItem
     /// The card plays the title on a tap, as Continue Watching's do, so the menu leads with
@@ -44,10 +45,12 @@ struct ItemContextMenu: View {
                systemImage: item.isPlayed ? "checkmark.circle.fill" : "checkmark.circle") {
             Task { await setPlayed(!item.isPlayed) }
         }
+        .needsServer()
         Button(item.isFavorite ? "Remove from Favorites" : "Add to Favorites",
                systemImage: item.isFavorite ? "heart.slash" : "heart") {
             Task { await setFavorite(!item.isFavorite) }
         }
+        .needsServer()
         #if !os(tvOS)
         if item.isMovie || item.isEpisode {
             if downloads.isDownloaded(item.id) {
@@ -151,6 +154,7 @@ struct MarkPreviousWatchedButton: View {
                     await WatchActions.markPreviousWatched(before: episode, session: session, messages: messages, afterChange: afterChange)
                 }
             }
+            .needsServer()
         }
     }
 }

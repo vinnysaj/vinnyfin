@@ -477,6 +477,19 @@ struct PlayableOfflineTests {
         }
     }
 
+    /// Whether a control whose change only the server can make is on, with the server answering
+    /// or not.
+    private func isOnNeedingServer(serverAnswers: Bool) async -> Bool? {
+        await with(serverAnswers: serverAnswers) { reachability in
+            let seen = Seen()
+            let control = Control(seen: seen)
+                .needsServer()
+                .environment(reachability)
+            _ = ImageRenderer(content: control).cgImage
+            return seen.isEnabled
+        }
+    }
+
     /// Whether the title page's note under its actions draws at all.
     private func showsNote(serverAnswers: Bool, downloaded: Bool) async -> Bool {
         await with(serverAnswers: serverAnswers) { reachability in
@@ -515,6 +528,12 @@ struct PlayableOfflineTests {
 
     @Test func playsWhatsDownloadedWhileTheServerIsOutOfReach() async {
         #expect(await isOn(Offline.item("m1", "Amber Cartographers"), serverAnswers: false, downloaded: true) == true)
+    }
+
+    /// Marking watched, favourites and Remove from Continue Watching change what the server keeps.
+    @Test func whatOnlyTheServerCanDoIsOffWhileItsOutOfReach() async {
+        #expect(await isOnNeedingServer(serverAnswers: true) == true)
+        #expect(await isOnNeedingServer(serverAnswers: false) == false)
     }
 
     /// A show's Shuffle and its menu's Play ask the server for the episodes; its page's Play plays

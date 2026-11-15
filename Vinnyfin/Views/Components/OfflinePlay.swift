@@ -21,6 +21,23 @@ extension View {
     func playableOffline(_ item: JellyfinItem, mediaSourceId: String? = nil, dimming: Bool = false) -> some View {
         modifier(OfflinePlayability(item: item, mediaSourceId: mediaSourceId, dims: dimming))
     }
+
+    /// Turns off a control whose change only the server can make, such as marking a title
+    /// watched, while the server is out of reach, and says why to VoiceOver.
+    func needsServer() -> some View {
+        modifier(ServerOnlyAction())
+    }
+}
+
+struct ServerOnlyAction: ViewModifier {
+    @Environment(ServerReachability.self) private var reachability
+    @Environment(\.session) private var session
+
+    func body(content: Content) -> some View {
+        content
+            .disabled(reachability.isOutOfReach)
+            .accessibilityHint("Can't reach \(session?.account.serverTitle ?? "the server").", isEnabled: reachability.isOutOfReach)
+    }
 }
 
 struct OfflinePlayability: ViewModifier {
@@ -91,6 +108,20 @@ struct OfflinePlayNote: View {
                 .padding(.horizontal, Metrics.edge)
                 .accessibilityIdentifier("detail.offlinePlayNote")
         }
+    }
+}
+
+/// In place of a show's episodes while the server is out of reach, with none loaded to show, set in
+/// from the page's edges.
+struct EpisodesOfflineNote: View {
+    @Environment(\.session) private var session
+
+    var body: some View {
+        Label("The episodes show when vinnyfin can reach \(session?.account.serverTitle ?? "the server") again.",
+              systemImage: "wifi.slash")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, Metrics.edge)
     }
 }
 

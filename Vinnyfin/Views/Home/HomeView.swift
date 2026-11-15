@@ -410,6 +410,7 @@ private struct HomeRowView: View {
                 .buttonStyle(.artwork)
                 .titleMenu(item, playsOnTap: true) { feed.replace($0) } more: {
                     Button("Remove from Continue Watching", systemImage: "minus.circle") { removeFromContinueWatching(item) }
+                        .needsServer()
                 }
                 .accessibilityHint(item.resumeSeconds != nil ? "Resumes it" : "Plays it")
                 .playableOffline(item, dimming: true)

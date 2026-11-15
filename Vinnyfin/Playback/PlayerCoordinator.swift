@@ -311,13 +311,7 @@ final class PlayerCoordinator {
         if let engine { return engine }
         do {
             let engine = try AetherEngine()
-            // The player draws its own controls, so the engine owns the system's Now Playing
-            // card and remote commands on both of its decode paths.
-            #if os(iOS) || os(tvOS)
-            engine.ownsVideoNowPlayingSession = true
-            #endif
-            engine.ownsSoftwareNowPlaying = true
-            engine.remoteSkipInterval = PlayerModel.skipInterval
+            Self.shareNowPlaying(with: engine)
             #if os(macOS)
             engine.volume = volume
             #endif
@@ -327,6 +321,21 @@ final class PlayerCoordinator {
             problem = "The player couldn't start: \(error.localizedDescription)"
             return nil
         }
+    }
+
+    /// Hands `engine` the parts of the system's Now Playing card and remote commands the player
+    /// doesn't serve itself. The player draws its own controls, so on iPhone, iPad and Apple TV
+    /// the engine serves both through its own session on the native path and on the shared
+    /// centers on the software path. On the Mac and Vision Pro the player serves the shared
+    /// centers on both paths (`PlayerModel.servesSharedTransport`); the engine serving them too
+    /// would answer each media key twice, so a press of Play/Pause would toggle and toggle back,
+    /// and two writers would fight over the card.
+    static func shareNowPlaying(with engine: AetherEngine) {
+        #if os(iOS) || os(tvOS)
+        engine.ownsVideoNowPlayingSession = true
+        #endif
+        engine.ownsSoftwareNowPlaying = !PlayerModel.servesSharedTransport
+        engine.remoteSkipInterval = PlayerModel.skipInterval
     }
 }
 

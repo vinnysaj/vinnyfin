@@ -8,7 +8,8 @@ import OSLog
 /// (`PlaybackDonation`, and the playback's activity, `View.handoffPlayback`). All of it is brought
 /// up to date as the sign-in in use changes, switched to, added or signed out of, so nothing of
 /// one person's stays on show while another's is in use: on a Mac's desktop, beside an iPad's
-/// window, or on a Lock Screen. Spotlight follows the sign-in itself (`SpotlightTitles`).
+/// window, or on a Lock Screen. Spotlight follows the sign-in itself (`SpotlightTitles`), and the
+/// app delegate adds the Mac's Dock menu, which it keeps, to what each change refreshes.
 enum SignInSurfaces {
     private static let log = Logger(subsystem: "net.vinnysaj.vinnyfin", category: "surfaces")
 

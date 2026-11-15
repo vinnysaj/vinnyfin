@@ -209,7 +209,17 @@ final class AppDelegate: NSObject {
         Task { await cloudSync.run() }
         let knownServers = knownServers
         Task { await knownServers.followSignIns() }
+        #if os(macOS)
+        let dockMenu = dockMenu
+        Task {
+            await SignInSurfaces.follow(accounts) {
+                Task { await dockMenu.refreshTitles() }
+                await SignInSurfaces.refresh()
+            }
+        }
+        #else
         Task { await SignInSurfaces.follow(accounts) }
+        #endif
         let player = player
         player.sharePlay = sharePlay
         #if os(macOS)
@@ -250,7 +260,6 @@ final class AppDelegate: NSObject {
         Task { await widgetDownloads.run() }
         #endif
         #if os(macOS)
-        let dockMenu = dockMenu
         Task { await dockMenu.followDownloads() }
         Task { await dockMenu.refreshTitles() }
         #endif

@@ -417,6 +417,125 @@ struct WidgetFillTests {
 }
 #endif
 
+#if os(macOS)
+/// The Dock menu's titles against a server where Alex and Sam are each partway through a movie of
+/// their own (`DockTitlesStub`).
+@MainActor
+struct DockTitlesSignInTests {
+    private static let address = URL(string: "https://\(DockTitlesStub.host)")!
+    private let alex = AccountStore.Account(serverURL: Self.address, serverId: "dock", serverName: "Dock", userId: "alex", userName: "Alex")
+    private let sam = AccountStore.Account(serverURL: Self.address, serverId: "dock", serverName: "Dock", userId: "sam", userName: "Sam")
+
+    /// After a switch, none of the last person's titles are listed, even before the new
+    /// sign-in's come; then the new sign-in's are. Signed out, none are.
+    @Test func aSwitchEmptiesThenReplacesTheTitles() async throws {
+        DockTitlesStub.register()
+        let accounts = try People.accounts(inUse: alex, kept: [alex, sam])
+        let titles = DockTitles(accounts: accounts)
+        await titles.refresh()
+        #expect(titles.listed.map(\.title) == ["Alex's Movie"])
+        #expect(AppLink(titles.listed[0].link)?.owner == AppLink.Owner(alex))
+
+        try accounts.switchTo(sam)
+        #expect(titles.listed.isEmpty)
+        await titles.refresh()
+        #expect(titles.listed.map(\.title) == ["Sam's Movie"])
+
+        accounts.signOut()
+        #expect(titles.listed.isEmpty)
+        await titles.refresh()
+        try accounts.switchTo(alex)
+        // Signing out let Sam's go, and Alex's come again only when asked for.
+        #expect(titles.listed.isEmpty)
+        await titles.refresh()
+        #expect(titles.listed.map(\.title) == ["Alex's Movie"])
+    }
+
+    /// Titles asked for before a switch that come back after it don't replace the new sign-in's.
+    @Test func dropsTitlesThatComeBackAfterASwitch() async throws {
+        DockTitlesStub.register()
+        let accounts = try People.accounts(inUse: alex, kept: [alex, sam])
+        let titles = DockTitles(accounts: accounts)
+        DockTitlesStub.answersSlowly(to: "alex")
+        defer { DockTitlesStub.answersSlowly(to: nil) }
+        let late = Task { await titles.refresh() }
+        try await Task.sleep(for: .milliseconds(100))
+        try accounts.switchTo(sam)
+        await titles.refresh()
+        await late.value
+        #expect(titles.listed.map(\.title) == ["Sam's Movie"])
+    }
+}
+
+/// A server for `DockTitlesSignInTests`: each user is partway through a movie named for them, and
+/// there's nothing else. One user's answers can be made to come late.
+nonisolated final class DockTitlesStub: URLProtocol {
+    static let host = "dock-titles.test"
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var slowUser: String?
+    private static let registered: Void = { URLProtocol.registerClass(DockTitlesStub.self) }()
+
+    static func register() {
+        _ = registered
+    }
+
+    static func answersSlowly(to userId: String?) {
+        lock.withLock { slowUser = userId }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host() == host }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else { return }
+        let userId = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first { $0.name.lowercased() == "userid" }?.value
+            ?? url.path().split(separator: "/").dropFirst().first.map(String.init) ?? ""
+        let body: String
+        if url.path().hasSuffix("UserItems/Resume") {
+            let name = userId == "alex" ? "Alex's Movie" : "Sam's Movie"
+            body = #"{"Items":[{"Id":"movie-\#(userId)","Name":"\#(name)","Type":"Movie","RunTimeTicks":60000000000,"UserData":{"PlaybackPositionTicks":6000000000,"PlayedPercentage":10}}],"TotalRecordCount":1}"#
+        } else {
+            body = #"{"Items":[],"TotalRecordCount":0}"#
+        }
+        if Self.lock.withLock({ Self.slowUser == userId }) { Thread.sleep(forTimeInterval: 0.6) }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+#endif
+
+// MARK: Now Playing
+
+struct NowPlayingChapterTests {
+    /// Listed in the order the server gave them, which isn't always the order they play.
+    private let chapters = ChapterMark.of(Samples.item("""
+    {"Id":"m1","Name":"Big Test Movie","Type":"Movie","Chapters":[
+     {"StartPositionTicks":6000000000,"Name":"The Storm"},
+     {"StartPositionTicks":0,"Name":"Arrival"},
+     {"StartPositionTicks":12000000000,"Name":"Morning"}]}
+    """)) { _, _ in nil }
+
+    @Test func numbersTheChapterPlayingFromZeroInTheOrderTheyPlay() {
+        #expect(chapters.map(\.name) == ["Arrival", "The Storm", "Morning"])
+        #expect(PlayerModel.nowPlayingChapterNumber(in: chapters, at: 0) == 0)
+        #expect(PlayerModel.nowPlayingChapterNumber(in: chapters, at: 599) == 0)
+        #expect(PlayerModel.nowPlayingChapterNumber(in: chapters, at: 600) == 1)
+        #expect(PlayerModel.nowPlayingChapterNumber(in: chapters, at: 5000) == 2)
+    }
+
+    @Test func numbersNoChapterBeforeTheFirstOrWithoutChapters() {
+        let late = Array(chapters.dropFirst())
+        #expect(PlayerModel.nowPlayingChapterNumber(in: late, at: 10) == nil)
+        #expect(PlayerModel.nowPlayingChapterNumber(in: late, at: 700) == 0)
+        #expect(PlayerModel.nowPlayingChapterNumber(in: [], at: 10) == nil)
+    }
+}
+
 // MARK: SharePlay
 
 struct WatchTogetherSignInTests {

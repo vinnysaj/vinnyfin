@@ -894,6 +894,14 @@ struct PlayerView: View {
 
     /// While the sound plays with no picture: a lighter way to play the title, or waiting on.
     private func pictureOfferCard(_ offer: PictureOffer) -> some View {
+        StatusCard {
+            pictureOffer(offer)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.pictureOffer")
+    }
+
+    private func pictureOffer(_ offer: PictureOffer) -> some View {
         VStack(spacing: 14) {
             Image(systemName: "video.slash").font(.largeTitle).foregroundStyle(.secondary)
                 .accessibilityHidden(true)
@@ -915,11 +923,6 @@ struct PlayerView: View {
             .focusSection()
             #endif
         }
-        .padding(30)
-        .platformGlass(in: .rect(cornerRadius: 28))
-        .padding()
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("player.pictureOffer")
     }
 
     private enum PictureCover: Equatable {
@@ -1083,6 +1086,13 @@ struct PlayerView: View {
     /// Why the playback failed, while it has; through a try again's first moment
     /// (`PlayerModel.isRetrying`) it says it's trying again, with a spinner in place of its symbol.
     private func failureCard(_ message: String) -> some View {
+        StatusCard {
+            failure(message)
+        }
+        .accessibilityIdentifier("player.failure")
+    }
+
+    private func failure(_ message: String) -> some View {
         VStack(spacing: 14) {
             // The spinner takes the symbol's place, and its room, so the card keeps its size.
             Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
@@ -1113,10 +1123,6 @@ struct PlayerView: View {
             }
             #endif
         }
-        .padding(30)
-        .platformGlass(in: .rect(cornerRadius: 28))
-        .padding()
-        .accessibilityIdentifier("player.failure")
     }
 
     /// Tries to play again by `attempt`, once at a time.
@@ -1479,6 +1485,30 @@ private struct WindowButtons: NSViewRepresentable {
     }
 }
 #endif
+
+/// A card over the picture saying what's wrong, with the ways on. Taller than the screen, as at
+/// the largest text sizes on a phone on its side or with a long message from the server, it
+/// scrolls rather than cut off its buttons.
+private struct StatusCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            card
+            ScrollView {
+                card.frame(maxWidth: .infinity)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    private var card: some View {
+        content
+            .padding(30)
+            .platformGlass(in: .rect(cornerRadius: 28))
+            .padding()
+    }
+}
 
 /// A brief word over the picture, such as a move to a lower quality, below the controls' top
 /// bar while they show, with a symbol for what it's about.

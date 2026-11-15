@@ -517,6 +517,9 @@ struct PlayerControls: View {
                 }
                 #endif
                 Spacer()
+                #if os(macOS) || os(visionOS)
+                VolumeControl(model: model, onInteraction: onInteraction)
+                #endif
                 episodeButtons
                 #if os(iOS)
                 Button {
@@ -697,6 +700,84 @@ struct PlayerControls: View {
         #endif
     }
 }
+
+#if os(macOS) || os(visionOS)
+/// The player's volume, along the bottom bar: a speaker that mutes and unmutes, which opens into
+/// a slider beside it while the pointer is over it, or on Vision Pro while it's looked at. The
+/// iPhone and iPad have their own buttons for the volume, and Apple TV its remote.
+private struct VolumeControl: View {
+    let model: PlayerModel
+    /// Called on every use, so the controls stay up meanwhile.
+    let onInteraction: () -> Void
+    #if os(macOS)
+    @State private var isOpen = false
+    #endif
+
+    private static let sliderWidth: CGFloat = 110
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if showsSlider {
+                Slider(value: level, in: 0...1)
+                    .frame(width: Self.sliderWidth)
+                    .padding(.horizontal, 14)
+                    .frame(maxHeight: .infinity)
+                    .platformGlass(in: .capsule)
+                    .accessibilityLabel("Volume")
+                    .accessibilityIdentifier("player.volume")
+                    #if os(macOS)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    #endif
+            }
+            Button {
+                model.toggleMute()
+                onInteraction()
+            } label: {
+                Image(systemName: model.volume.symbol, variableValue: Double(model.volume.level))
+                    .font(.headline)
+                    .frame(width: 22, height: 22)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.platformGlass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel(model.volume.isMuted ? "Unmute" : "Mute")
+            .accessibilityShowsLargeContentViewer()
+            .accessibilityIdentifier("player.mute")
+            .playerHelp(PlayerCommand.mute.tooltip(model.volume.isMuted ? "Unmute" : "Mute"))
+        }
+        // As tall as the speaker, the slider's glass with it.
+        .fixedSize(horizontal: false, vertical: true)
+        #if os(macOS)
+        .onHover { isOpen = $0 }
+        .animation(.snappy, value: isOpen)
+        #else
+        // Laid out open, and shown open only while looked at: where the eyes are stays private,
+        // so the system draws the change.
+        .hoverEffect { effect, isActive, proxy in
+            effect.clipShape(.capsule.size(width: isActive ? proxy.size.width : proxy.size.height,
+                                           height: proxy.size.height, anchor: .trailing))
+        }
+        #endif
+    }
+
+    private var showsSlider: Bool {
+        #if os(macOS)
+        isOpen
+        #else
+        true
+        #endif
+    }
+
+    private var level: Binding<Double> {
+        Binding {
+            Double(model.volume.output)
+        } set: { level in
+            model.setVolume(Float(level))
+            onInteraction()
+        }
+    }
+}
+#endif
 
 /// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
 /// that the server is transcoding. With `action`, a button that opens the Quality panel, there

@@ -207,3 +207,28 @@ struct VisionPlayerWindowTests {
         #expect(PlayerWindowFrame.visionSize(from: CGSize(width: 1280, height: 720), aspect: 0) == CGSize(width: 1280, height: 720))
     }
 }
+
+/// The volume slider on the Mac and Vision Pro sets the level, and the speaker beside it says
+/// whether anything plays.
+struct VolumeSliderTests {
+    @Test func theSliderSetsTheLevelWithinRangeAndUnmutes() {
+        var volume = PlayerVolume(level: 0.5)
+        volume.toggleMute()
+        volume.set(0.3)
+        #expect(!volume.isMuted)
+        #expect(volume.output == 0.3)
+        volume.set(1.4)
+        #expect(volume.level == 1)
+        volume.set(-0.2)
+        #expect(volume.level == 0)
+    }
+
+    @Test func theSpeakerIsStruckThroughWhileNothingPlays() {
+        var volume = PlayerVolume(level: 0.5)
+        #expect(volume.symbol == "speaker.wave.3.fill")
+        volume.toggleMute()
+        #expect(volume.symbol == "speaker.slash.fill")
+        volume.set(0)
+        #expect(volume.symbol == "speaker.slash.fill")
+    }
+}

@@ -24,6 +24,9 @@ struct VinnyfinApp: App {
         WindowGroup {
             RootView()
                 .withAppEnvironment(appDelegate)
+                #if os(macOS)
+                .background(DockMenuWindows(dockMenu: appDelegate.dockMenu))
+                #endif
         }
         #if os(macOS)
         .defaultSize(width: 1200, height: 800)
@@ -182,6 +185,9 @@ final class AppDelegate: NSObject {
     #endif
     #if os(macOS)
     private(set) lazy var portableTV = PortableTV(accounts: accounts, player: player, socket: socket)
+    private(set) lazy var dockMenu = DockMenu(accounts: accounts, downloads: downloads, links: links) { [unowned self] in
+        openFilePanel()
+    }
     #elseif os(iOS)
     private(set) lazy var tvRemote = TVRemote(accounts: accounts)
     #endif
@@ -240,6 +246,11 @@ final class AppDelegate: NSObject {
         AppDependencyManager.shared.add(dependency: widgetDownloads as any DownloadsRunning)
         Task { await widgetDownloads.run() }
         #endif
+        #if os(macOS)
+        let dockMenu = dockMenu
+        Task { await dockMenu.followDownloads() }
+        Task { await dockMenu.refreshTitles() }
+        #endif
         #if os(iOS) || os(visionOS)
         backgroundDownloads.registerLaunchHandlers()
         let backgroundDownloads = backgroundDownloads
@@ -266,9 +277,16 @@ extension AppDelegate: NSApplicationDelegate {
         launched()
     }
 
-    /// The desktop's widgets come into view as another app takes over.
+    /// The desktop's widgets come into view as another app takes over, and the Dock's menu is
+    /// in reach.
     func applicationDidResignActive(_ notification: Notification) {
         UpNextWidgets.reload()
+        let dockMenu = dockMenu
+        Task { await dockMenu.refreshTitles() }
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        dockMenu.menu()
     }
 }
 #else

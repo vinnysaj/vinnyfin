@@ -86,3 +86,55 @@ struct NowPlayingLanguagesTests {
                                             among: subtitles) == nil)
     }
 }
+
+struct ReplaySubtitlesTests {
+    private let tracks = [
+        track(3, "eng", forced: true),
+        track(4, "eng"),
+        track(5, "eng", captions: true),
+        track(6, "fre"),
+        track(7, "jpn"),
+    ]
+
+    @Test func withSubtitlesOffASkipBackShowsTheSubtitleLanguages() {
+        #expect(ReplaySubtitles.track(in: tracks, showing: nil, language: "eng", audioLanguage: "jpn", captions: false) == 4)
+        #expect(ReplaySubtitles.track(in: tracks, showing: nil, language: "fre", audioLanguage: "eng", captions: false) == 6)
+    }
+
+    @Test func forcedSubtitlesGiveWayToFullOnesInTheirLanguage() {
+        #expect(ReplaySubtitles.track(in: tracks, showing: 3, language: "fre", audioLanguage: "eng", captions: false) == 4)
+    }
+
+    @Test func fullSubtitlesShowingAlreadyChangeNothing() {
+        #expect(ReplaySubtitles.track(in: tracks, showing: 6, language: "eng", audioLanguage: "eng", captions: false) == nil)
+    }
+
+    @Test func withClosedCaptionsOnCaptionsComeFirst() {
+        #expect(ReplaySubtitles.track(in: tracks, showing: nil, language: "eng", audioLanguage: "eng", captions: true) == 5)
+    }
+
+    @Test func noSubtitleLanguageFallsBackOnTheAudios() {
+        #expect(ReplaySubtitles.track(in: tracks, showing: nil, language: "", audioLanguage: "jpn", captions: false) == 7)
+        #expect(ReplaySubtitles.track(in: tracks, showing: nil, language: "ger", audioLanguage: "ita", captions: false) == nil)
+        #expect(ReplaySubtitles.track(in: [track(3, "eng", forced: true)], showing: nil, language: "eng", audioLanguage: "eng",
+                                      captions: false) == nil)
+    }
+
+    @Test func theSubtitlesGoOnceThePlayheadIsBackWhereItWas() {
+        var replay = ReplaySubtitles(until: 100, before: nil, shown: 4)
+        // Before the skip back lands, the playhead still reads where it skipped from.
+        let ends = [100.2, 90, 99.5, 100.1].map { replay.playhead(at: $0) }
+        #expect(ends == [false, false, false, true])
+    }
+
+    @Test func aRunOfSkipsBackShowsThemUntilBackWhereTheFirstBegan() {
+        var replay = ReplaySubtitles(until: 100, before: 3, shown: 4)
+        let first = replay.playhead(at: 91)
+        replay.skippedBack(from: 91)
+        #expect(replay.until == 100)
+        let ends = [85, 99, 100].map { replay.playhead(at: $0) }
+        #expect(!first)
+        #expect(ends == [false, false, true])
+        #expect(replay.before == 3)
+    }
+}

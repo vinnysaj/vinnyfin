@@ -301,6 +301,8 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private let subtitleOffsets = SubtitleOffsets()
     /// The subtitle track last shown, which the subtitle key turns back on.
     @ObservationIgnored private var lastSubtitle: Int?
+    /// Subtitles shown for what plays again after a skip back, until it's back where it was.
+    @ObservationIgnored private var replaySubtitles: ReplaySubtitles?
     @ObservationIgnored private var appliedSubtitlePreference = false
     /// The engine's load returned, so its track lists are complete.
     @ObservationIgnored private var isLoaded = false
@@ -654,6 +656,7 @@ final class PlayerModel: Identifiable {
         // A version standing in for another keeps that one's tracks, whatever the request asked.
         if tracks != nil { askedStreams = nil }
         appliedSubtitlePreference = false
+        replaySubtitles = nil
         isLoaded = false
         isPresenting = false
         showedPicture = false
@@ -880,6 +883,7 @@ final class PlayerModel: Identifiable {
             self.prepareNextEpisodeIfDue(at: time)
             self.followEnding(at: time)
             self.skipIntroIfDue(at: time)
+            self.endReplaySubtitlesIfDue(at: time)
         }
         .store(in: &subscriptions)
         engine.clock.$sourceTime.dropFirst().receive(on: RunLoop.main).sink { [weak self] time in
@@ -1201,6 +1205,47 @@ final class PlayerModel: Identifiable {
         seek(to: clock.time + seconds)
     }
 
+    /// Skips back `seconds` and shows subtitles for what plays again, until the playhead is back
+    /// where it was (`ReplaySubtitles`), as Apple TV's player does for a skip back.
+    func skipBackShowingSubtitles(by seconds: Double) {
+        let from = clock.time
+        skip(by: -seconds)
+        showSubtitlesForReplay(from: from)
+    }
+
+    private func showSubtitlesForReplay(from time: Double) {
+        // A transcode carries its subtitles in its stream, which a change of them replaces.
+        guard isLoaded, !isTranscoding, status != .ended else { return }
+        if replaySubtitles != nil {
+            replaySubtitles?.skippedBack(from: time)
+            return
+        }
+        let audioLanguage = engine.audioTracks.first { $0.id == engine.activeAudioTrackIndex }?.language
+        guard let track = ReplaySubtitles.track(in: engine.subtitleTracks.map(TrackChooser.Candidate.init), showing: selectedSubtitle,
+                                                language: settings.subtitleLanguage, audioLanguage: audioLanguage,
+                                                captions: AccessibleMedia.prefersCaptions) else { return }
+        replaySubtitles = ReplaySubtitles(until: time, before: selectedSubtitle, shown: track)
+        // Not a pick of the viewer's (`pick`): the subtitles go back as they were.
+        engine.selectSubtitleTrack(index: track)
+    }
+
+    /// Puts the subtitles back as they were before a skip back showed some, once the playhead is
+    /// back where it was, unless the viewer has chosen others meanwhile.
+    private func endReplaySubtitlesIfDue(at time: Double) {
+        guard var replay = replaySubtitles else { return }
+        guard replay.playhead(at: time) else {
+            replaySubtitles = replay
+            return
+        }
+        replaySubtitles = nil
+        guard selectedSubtitle == replay.shown else { return }
+        if let before = replay.before {
+            engine.selectSubtitleTrack(index: before)
+        } else {
+            engine.clearSubtitle()
+        }
+    }
+
     /// Plays the title that ended again from `position`, with the audio and subtitles it had: the
     /// engine's ended session can be neither moved nor resumed (`.ended` is terminal), so the
     /// title loads again. Nothing plays from the very end.
@@ -1384,6 +1429,8 @@ final class PlayerModel: Identifiable {
 
     /// Nil turns subtitles off.
     func chooseSubtitle(_ id: Int?) {
+        // The viewer's choice holds past a replay's end.
+        replaySubtitles = nil
         if let id {
             if let picked = subtitleCandidate(id) { pick { $0.subtitles = .track(TrackPicks.Track(picked)) } }
         } else {
@@ -2561,7 +2608,13 @@ final class PlayerModel: Identifiable {
                 return .success
             }
             add(center.skipBackwardCommand) { [weak self] event in
-                self?.skip(by: -((event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval))
+                let interval = (event as? MPSkipIntervalCommandEvent)?.interval ?? Self.skipInterval
+                #if os(tvOS)
+                // As the remote's click back does, and as Apple TV's player does for Siri's skips back.
+                self?.skipBackShowingSubtitles(by: interval)
+                #else
+                self?.skip(by: -interval)
+                #endif
                 return .success
             }
             #if os(tvOS)

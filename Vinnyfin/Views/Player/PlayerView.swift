@@ -616,10 +616,17 @@ struct PlayerView: View {
             if undoesSwipe, let swipeStart { model.scrubbing.position = swipeStart }
             model.scrub(by: ScrubMotion.circle(turn, duration: duration))
         case .click(let forward):
-            // Playing, a click skips. Paused, or moving the timeline already, it steps the
-            // timeline, for a click on the timeline or Play to jump there.
+            // Playing, a click skips, back with subtitles for what plays again. Paused, or moving
+            // the timeline already, it steps the timeline, for a click on the timeline or Play to
+            // jump there.
             let seconds = forward ? PlayerModel.skipInterval : -PlayerModel.skipInterval
-            if model.scrubbing.isActive || !model.isPlaying { model.scrub(by: seconds) } else { model.skip(by: seconds) }
+            if model.scrubbing.isActive || !model.isPlaying {
+                model.scrub(by: seconds)
+            } else if forward {
+                model.skip(by: seconds)
+            } else {
+                model.skipBackShowingSubtitles(by: PlayerModel.skipInterval)
+            }
             dropPositionWhenLeft()
         case .holdBegan(let forward):
             model.beginScan(forward: forward)

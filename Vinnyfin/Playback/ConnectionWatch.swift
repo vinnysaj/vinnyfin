@@ -83,6 +83,14 @@ nonisolated struct ConnectionWatch {
         self = ConnectionWatch(isTranscode: isTranscode)
     }
 
+    /// Whether the player's watches sample the stream. Not in the background with the picture
+    /// nowhere, where the engine plays the sound alone and a stall of that says nothing about the
+    /// connection, nor while the picture the background took away is rebuilt: what they'd do
+    /// there, a step down or a lesson for the device's quality, would be for nothing.
+    static func samples(inBackground: Bool, pictureShownOutside: Bool, restoringPicture: Bool) -> Bool {
+        (!inBackground || pictureShownOutside) && !restoringPicture
+    }
+
     /// Takes the next sample. Returns why the stream needs to get cheaper, or nil while it's fine.
     mutating func observe(_ sample: Sample) -> Reason? {
         defer { last = sample }

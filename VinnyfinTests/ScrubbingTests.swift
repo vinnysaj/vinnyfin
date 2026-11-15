@@ -20,9 +20,22 @@ struct ScrubMotionTests {
     }
 
     @Test func aFullCircleMovesAFiftiethOfTheTitleWithinLimits() {
-        #expect(ScrubMotion.circle(2 * .pi, duration: 2 * 3600) == 120)
-        #expect(ScrubMotion.circle(2 * .pi, duration: 22 * 60) == 30)
-        #expect(ScrubMotion.circle(-.pi, duration: 75 * 60) == -45)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 1, duration: 2 * 3600) == 120)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 1, duration: 22 * 60) == 30)
+        #expect(ScrubMotion.circle(-.pi, speed: 1, duration: 75 * 60) == -45)
+    }
+
+    @Test func aQuickCircleGoesFurtherUpToThreeTimes() {
+        let film = 2 * 3600.0
+        // Up to a turn a second, a turn is a turn's worth; a circle's first turn has no speed yet.
+        #expect(ScrubMotion.circle(2 * .pi, speed: 0, duration: film) == 120)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 0.6, duration: film) == 120)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 2, duration: film) == 240)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 3, duration: film) == 360)
+        #expect(ScrubMotion.circle(2 * .pi, speed: 8, duration: film) == 360)
+        #expect(ScrubMotion.circle(-2 * .pi, speed: 3, duration: film) == -360)
+        // Crossing an hour at full speed takes ten turns, not thirty.
+        #expect(3600 / ScrubMotion.circle(2 * .pi, speed: 3, duration: film) == 10)
     }
 
     @Test func holdingScansFasterTheLongerItsHeld() {
@@ -124,6 +137,297 @@ struct RingTurnTests {
         let turn = ring.update(nil)
         #expect(turn == nil)
         #expect(!ring.isTurning)
+    }
+
+    // MARK: Arming
+
+    @Test func aFingerRestingOnTheRingArmsIt() {
+        var ring = RingTurn()
+        _ = ring.update(SIMD2(0.85, 0))
+        let armed = ring.arm()
+        #expect(armed)
+        #expect(ring.isArmed)
+        #expect(ring.reading == .armed)
+    }
+
+    @Test func aFingerInTheMiddleDoesntArmIt() {
+        var ring = RingTurn()
+        _ = ring.update(SIMD2(0.2, 0.1))
+        let armed = ring.arm()
+        #expect(!armed)
+        #expect(ring.reading == .none)
+        // Nor does one that has lifted.
+        var lifted = RingTurn()
+        _ = lifted.update(SIMD2(0.85, 0))
+        _ = lifted.update(nil)
+        let armed2 = lifted.arm()
+        #expect(!armed2)
+    }
+
+    @Test func armedTheRingTurnsOnceTheFingerGoesPastItsDrift() {
+        var ring = RingTurn()
+        // Resting at 3 o'clock, then round clockwise, down the side.
+        let points = circle(from: 0, through: -40, step: 1)
+        _ = ring.update(points[0])
+        let armed = ring.arm()
+        #expect(armed)
+        var turns: [Double] = []
+        for point in points.dropFirst() {
+            if let turn = ring.update(point) { turns.append(turn) }
+        }
+        #expect(ring.isTurning)
+        // The first turn comes at the drift's end, far short of the 52 degrees an unarmed circle
+        // needs, and catches up on it; the turns add up to the whole way round.
+        let drift = RingTurn.armedStartingSweep
+        #expect(abs(turns[0] - drift) < 0.02)
+        let total: Double = turns.reduce(0, +)
+        let round: Double = 40 * .pi / 180
+        #expect(abs(total - round) < 0.01)
+    }
+
+    @Test func armedADriftShortOfItTurnsNothing() {
+        var ring = RingTurn()
+        let points = circle(from: 90, through: -5, step: 1)
+        _ = ring.update(points[0])
+        let armed = ring.arm()
+        #expect(armed)
+        let turns = points.dropFirst().compactMap { ring.update($0) }
+        #expect(turns.isEmpty)
+        #expect(ring.reading == .armed)
+    }
+
+    @Test func leavingTheRingDisarmsIt() {
+        var ring = RingTurn()
+        _ = ring.update(SIMD2(0, 0.85))
+        let armed = ring.arm()
+        #expect(armed)
+        for y in stride(from: 0.8, through: 0.2, by: -0.1) { _ = ring.update(SIMD2(0, y)) }
+        #expect(!ring.isArmed)
+        #expect(ring.reading == .none)
+    }
+
+    @Test func theTimelineGoingDisarmsTheRing() {
+        var ring = RingTurn()
+        _ = ring.update(SIMD2(-0.85, 0))
+        let armed = ring.arm()
+        #expect(armed)
+        ring.disarm()
+        #expect(!ring.isArmed)
+        // And it tells a circle by its curve again.
+        let turns = circle(from: 180, through: 20, step: 1).compactMap { ring.update($0) }
+        #expect(turns.isEmpty)
+    }
+
+    // MARK: Reading, for the moves up and down it holds back
+
+    @Test func aCircleStartingDownTheSideMayBeOne() {
+        // At 3 o'clock going down: the focus engine takes it for a swipe down.
+        var ring = RingTurn()
+        for point in circle(from: 0, through: -25) { _ = ring.update(point) }
+        #expect(!ring.isTurning)
+        #expect(ring.reading == .possible)
+        for point in circle(from: -25, through: -60) { _ = ring.update(point) }
+        #expect(ring.reading == .turning)
+    }
+
+    @Test func aStraightSwipeDownTheSideIsntACircle() {
+        var ring = RingTurn()
+        for y in stride(from: 0.3, through: -0.4, by: -0.02) { _ = ring.update(SIMD2(0.85, y)) }
+        #expect(ring.reading == .none)
+    }
+
+    @Test func aClickOnTheRingIsntACircle() {
+        var ring = RingTurn()
+        // A finger landing at the bottom and barely moving as it clicks.
+        for x in [0.0, 0.01, 0.015] { _ = ring.update(SIMD2(x, -0.85)) }
+        #expect(ring.reading == .none)
+    }
+
+    @Test func aSwipeDownThroughTheMiddleIsntACircle() {
+        var ring = RingTurn()
+        for y in stride(from: 0.9, through: -0.9, by: -0.05) { _ = ring.update(SIMD2(0.05, y)) }
+        #expect(ring.reading == .none)
+    }
+}
+
+struct VerticalMoveTests {
+    @Test func aMoveGoesUnlessTheFingerMayBeCircling() {
+        #expect(VerticalMove.verdict(ring: .none, isSwiping: false, pressed: false) == .go)
+        #expect(VerticalMove.verdict(ring: .possible, isSwiping: false, pressed: false) == .wait)
+        #expect(VerticalMove.verdict(ring: .turning, isSwiping: false, pressed: false) == .drop)
+        #expect(VerticalMove.verdict(ring: .armed, isSwiping: false, pressed: false) == .drop)
+    }
+
+    @Test func aSidewaysSwipeKeepsTheTimeline() {
+        #expect(VerticalMove.verdict(ring: .none, isSwiping: true, pressed: false) == .drop)
+    }
+
+    @Test func aClickOnTheRingsTopOrBottomAlwaysGoes() {
+        for ring: RingTurn.Reading in [.none, .possible, .armed, .turning] {
+            #expect(VerticalMove.verdict(ring: ring, isSwiping: false, pressed: true) == .go)
+            #expect(VerticalMove.verdict(ring: ring, isSwiping: true, pressed: true) == .go)
+        }
+    }
+}
+
+struct SwipeUndoTests {
+    @Test func aCircleGoesBackToWhereTheSwipeBeforeItStarted() {
+        var swipe = SwipeUndo()
+        swipe.swiped(from: 100)
+        swipe.swiped(from: 115)
+        #expect(swipe.isSwiping)
+        let back = swipe.circleBegan(undoesSwipe: true)
+        #expect(back == 100)
+        #expect(!swipe.isSwiping)
+    }
+
+    @Test func aSecondCircleInOneTouchGoesBackOnlyToItsOwnSwipe() {
+        var swipe = SwipeUndo()
+        swipe.swiped(from: 100)
+        let back = swipe.circleBegan(undoesSwipe: true)
+        #expect(back == 100)
+        // The first circle takes the timeline to 220; the finger slides through the middle,
+        // which reads as a swipe again, from there, then circles again.
+        swipe.swiped(from: 220)
+        swipe.swiped(from: 226)
+        let back2 = swipe.circleBegan(undoesSwipe: true)
+        #expect(back2 == 220)
+        // Straight from one circle into another, nothing is undone.
+        let back3 = swipe.circleBegan(undoesSwipe: true)
+        #expect(back3 == nil)
+    }
+
+    @Test func anArmedCircleUndoesNothing() {
+        var swipe = SwipeUndo()
+        swipe.swiped(from: 100)
+        let back = swipe.circleBegan(undoesSwipe: false)
+        #expect(back == nil)
+        #expect(swipe.isSwiping)
+    }
+
+    @Test func liftingEndsTheSwipe() {
+        var swipe = SwipeUndo()
+        swipe.swiped(from: 100)
+        swipe.lifted()
+        #expect(!swipe.isSwiping)
+        let back = swipe.circleBegan(undoesSwipe: true)
+        #expect(back == nil)
+    }
+}
+
+struct RingSpeedTests {
+    /// Turns of `step` radians every hundredth of a second, at `turnsPerSecond`, for `seconds`.
+    private func speed(turnsPerSecond: Double, for seconds: Double) -> Double {
+        var speed = RingSpeed()
+        let step = turnsPerSecond * 2 * .pi / 100
+        var last = 0.0
+        for tick in 1...Int(seconds * 100) { last = speed.note(step, at: Double(tick) / 100) }
+        return last
+    }
+
+    @Test func readsHowManyTurnsASecond() {
+        #expect(abs(speed(turnsPerSecond: 1, for: 1) - 1) < 0.1)
+        #expect(abs(speed(turnsPerSecond: 3, for: 1) - 3) < 0.25)
+    }
+
+    @Test func aCircleStartsOutSlow() {
+        // A tenth of a second in, at three turns a second, it reads slower than it goes.
+        #expect(speed(turnsPerSecond: 3, for: 0.1) < 2.5)
+    }
+
+    @Test func turningToAndFroReadsSlow() {
+        var speed = RingSpeed()
+        var last = 0.0
+        for tick in 1...60 { last = speed.note(tick % 2 == 0 ? 0.2 : -0.2, at: Double(tick) / 100) }
+        #expect(last < 0.5)
+    }
+
+    @Test func resettingForgetsTheTurns() {
+        var speed = RingSpeed()
+        _ = speed.note(1, at: 0)
+        speed.reset()
+        let turnsASecond = speed.note(0, at: 0.01)
+        #expect(turnsASecond == 0)
+    }
+}
+
+struct TouchRestTests {
+    @Test func aFingerDriftingLittleRestsFromWhereItStopped() {
+        var rest = TouchRest()
+        let restsAnew = rest.moved(to: SIMD2(0.2, 0.1), at: 10)
+        #expect(restsAnew)
+        let restsAnew2 = rest.moved(to: SIMD2(0.23, 0.12), at: 10.2)
+        #expect(!restsAnew2)
+        #expect(rest.hasRested(for: TouchRest.peek, at: 10.31))
+        #expect(!rest.hasRested(for: TouchRest.arming, at: 10.31))
+        #expect(rest.hasRested(for: TouchRest.arming, at: 10.41))
+    }
+
+    @Test func movingOnRestsAgainFromTheNextStop() {
+        var rest = TouchRest()
+        _ = rest.moved(to: SIMD2(0, 0), at: 10)
+        let restsAnew = rest.moved(to: SIMD2(0.3, 0), at: 10.5)
+        #expect(restsAnew)
+        #expect(rest.since == 10.5)
+        #expect(!rest.hasRested(for: TouchRest.peek, at: 10.7))
+    }
+
+    @Test func liftingEndsTheRest() {
+        var rest = TouchRest()
+        _ = rest.moved(to: SIMD2(0.5, 0.5), at: 10)
+        let restsAnew = rest.moved(to: nil, at: 11)
+        #expect(!restsAnew)
+        #expect(!rest.hasRested(for: TouchRest.peek, at: 12))
+        let restsAnew2 = rest.moved(to: SIMD2(0.5, 0.5), at: 12)
+        #expect(restsAnew2)
+    }
+
+    @Test func thePeekComesBeforeTheRingArms() {
+        #expect(TouchRest.peek < TouchRest.arming)
+        #expect(RemotePeek.lingers == .seconds(3))
+    }
+}
+
+struct RemoteRosterTests {
+    private final class Remote {}
+
+    @Test func listsARemoteOnceHoweverOftenItConnects() {
+        var roster = RemoteRoster<Remote>()
+        let remote = Remote()
+        roster.connected(remote)
+        roster.connected(remote)
+        #expect(roster.remotes.count == 1)
+    }
+
+    @Test func aRemoteThatDisconnectsIsLetGo() {
+        var roster = RemoteRoster<Remote>()
+        let siri = Remote(), controlCenter = Remote()
+        roster.connected(siri)
+        roster.connected(controlCenter)
+        let wasTouched = roster.disconnected(controlCenter)
+        #expect(!wasTouched)
+        #expect(roster.remotes.count == 1)
+        #expect(roster.remotes.first === siri)
+    }
+
+    @Test func theTouchEndsWithTheRemoteItWasOn() {
+        var roster = RemoteRoster<Remote>()
+        let siri = Remote(), other = Remote()
+        roster.connected(siri)
+        roster.connected(other)
+        roster.touched(siri)
+        // Another remote going leaves the touch as it was.
+        let wasTouched = roster.disconnected(other)
+        #expect(!wasTouched)
+        // The Apple TV sleeping takes the remote, and the finger on it.
+        let wasTouched2 = roster.disconnected(siri)
+        #expect(wasTouched2)
+        #expect(roster.remotes.isEmpty)
+        // Connected again as it wakes, it's followed afresh.
+        roster.connected(siri)
+        #expect(roster.remotes.count == 1)
+        let wasTouched3 = roster.disconnected(siri)
+        #expect(!wasTouched3)
     }
 }
 

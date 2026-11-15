@@ -135,6 +135,8 @@ struct CinemaSpace: View {
             }
         }
         .preferredSurroundingsEffect(.dark)
+        // The Home indicator stays out of the picture until it's asked for.
+        .persistentSystemOverlays(.hidden)
         .onAppear {
             player.isInCinema = true
             Self.setSoundStage(.large)
@@ -163,24 +165,30 @@ private struct CinemaStage: View {
     @State private var player: AVPlayer?
     @State private var screenSize: SIMD2<Float> = .zero
     @State private var subscriptions: [EventSubscription] = []
+    /// How many points the space's views take for a meter, the overlay's among them.
+    @PhysicalMetric(from: .meters) private var pointsPerMeter = 1
 
     /// The middle of the screen: a little above eye level, twelve meters away.
     private static let screenCenter = SIMD3<Float>(0, 2.8, -12)
     /// The largest picture the screen shows, about 44 degrees across at 16:9.
     private static let screenBounds = SIMD2<Float>(9.6, 5.4)
+    private static let overlay = "overlay"
 
     var body: some View {
-        RealityView { content in
+        // Read here, so the stage updates as the picture's shape comes in.
+        let aspect = Float(ScreenOverlay.aspect(of: model))
+        let pointsPerMeter = Float(pointsPerMeter)
+        RealityView { content, attachments in
             content.add(Theater.room(screenCenter: Self.screenCenter, screenBounds: Self.screenBounds))
             let screen = Entity()
             screen.name = "screen"
             screen.position = Self.screenCenter
             content.add(screen)
-            let overlay = Entity()
-            overlay.name = "overlay"
-            overlay.position = Self.screenCenter + SIMD3(0, 0, 0.02)
-            overlay.components.set(ViewAttachmentComponent(rootView: ScreenOverlay(model: model)))
-            content.add(overlay)
+            if let overlay = attachments.entity(for: Self.overlay) {
+                overlay.name = "overlay"
+                overlay.position = Self.screenCenter + SIMD3(0, 0, 0.02)
+                content.add(overlay)
+            }
             // What a pinch on the picture lands on, in front of it, sized to it in `update`.
             let target = Entity()
             target.name = "target"
@@ -195,13 +203,16 @@ private struct CinemaStage: View {
                     coordinator.pictureIsStereo = event.contentType == .stereo
                 },
             ]
-        } update: { content in
+        } update: { content, _ in
             guard let screen = content.entities.first(where: { $0.name == "screen" }),
                   let overlay = content.entities.first(where: { $0.name == "overlay" }),
                   let target = content.entities.first(where: { $0.name == "target" }) else { return }
             if let player {
                 if screen.components[VideoPlayerComponent.self]?.avPlayer !== player {
-                    screen.components.set(VideoPlayerComponent(avPlayer: player))
+                    var video = VideoPlayerComponent(avPlayer: player)
+                    // The picture's light falls on the room the Digital Crown lets back in.
+                    video.isPassthroughTintingEnabled = true
+                    screen.components.set(video)
                 }
             } else {
                 screen.components.remove(VideoPlayerComponent.self)
@@ -209,13 +220,20 @@ private struct CinemaStage: View {
             if screenSize.x > 0, screenSize.y > 0 {
                 screen.scale = SIMD3(repeating: min(Self.screenBounds.x / screenSize.x, Self.screenBounds.y / screenSize.y))
             }
-            let aspect = Float(ScreenOverlay.aspect(of: model))
             let width = min(Self.screenBounds.x, Self.screenBounds.y * aspect)
-            // The overlay is laid out at a fixed width, so one scale fits it to the picture.
-            if let bounds = overlay.components[ViewAttachmentComponent.self]?.bounds, bounds.extents.x > 0 {
-                overlay.scale = SIMD3(repeating: width / bounds.extents.x)
-            }
+            // The overlay is laid out at a fixed width in points, so one scale from the space's
+            // points per meter fits it to the picture. Its measured bounds would do as well, but
+            // they come in after the first update, and nothing calls for another once they have:
+            // the picture could stay a seventh of the screen's width.
+            overlay.scale = SIMD3(repeating: width / (Float(ScreenOverlay.width) / pointsPerMeter))
             target.components.set(CollisionComponent(shapes: [.generateBox(width: width, height: width / aspect, depth: 0.02)]))
+        } attachments: {
+            // In SwiftUI's own hierarchy, so the picture's surface is made with the stage. Given
+            // to an entity through `ViewAttachmentComponent` instead, it could wait for the next
+            // update of the space to be made, the cinema black until then.
+            Attachment(id: Self.overlay) {
+                ScreenOverlay(model: model)
+            }
         }
         // The window in front is clear here, so the screen is what's looked at and pinched.
         .gesture(TapGesture().targetedToAnyEntity().onEnded { _ in coordinator.screenTaps += 1 })
@@ -230,7 +248,7 @@ private struct ScreenOverlay: View {
     @State private var drawsPicture = false
 
     /// The width it's laid out at, in points.
-    private static let width: CGFloat = 1920
+    static let width: CGFloat = 1920
 
     /// The picture's shape, 16:9 until the video says.
     static func aspect(of model: PlayerModel) -> CGFloat {

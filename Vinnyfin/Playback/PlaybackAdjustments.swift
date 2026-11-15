@@ -86,6 +86,40 @@ nonisolated struct SoundOptions: Equatable, Codable {
                      compressor: reducesLoudSounds ? .night : nil)
     }
 
+    /// The tools on, by name: "Boost Dialogue", "Boost Dialogue and Reduce Loud Sounds"; nil
+    /// with both off.
+    var namesOn: String? {
+        let on = [boostsDialogue ? "Boost Dialogue" : nil, reducesLoudSounds ? "Reduce Loud Sounds" : nil].compactMap(\.self)
+        return on.isEmpty ? nil : on.joined(separator: " and ")
+    }
+
+    // Shaping needs decoded sound, so the engine decodes a track it otherwise passes on as made
+    // while a tool is on: Dolby Atmos (E-AC-3 with its objects) reaches the receiver as its
+    // surround channels alone then.
+
+    /// What the tools cost a track, said under them whether they're on or not, so turning one on
+    /// for a film doesn't quietly take the Atmos of every one after it. Nil for a track they cost
+    /// nothing.
+    static func atmosNote(isAtmos: Bool, channels: Int) -> String? {
+        guard isAtmos else { return nil }
+        return "While either is on, Dolby Atmos plays as \(bed(channels))"
+    }
+
+    /// What the tools on are doing to a track: nil with them off, or for a track they cost nothing.
+    func atmosEffect(isAtmos: Bool, channels: Int) -> String? {
+        guard isAtmos, let on = namesOn else { return nil }
+        return "Without Atmos, as \(Self.bed(channels)), while \(on) \(boostsDialogue && reducesLoudSounds ? "are" : "is") on"
+    }
+
+    /// The surround an Atmos track's channels make on their own.
+    private static func bed(_ channels: Int) -> String {
+        switch channels {
+        case 6: "5.1 surround"
+        case 8: "7.1 surround"
+        default: "surround sound"
+        }
+    }
+
     private static let key = "soundOptions"
 
     static func saved(in defaults: UserDefaults = .standard) -> SoundOptions {
@@ -124,5 +158,17 @@ nonisolated struct PlayerVolume: Equatable {
 
     mutating func toggleMute() {
         isMuted.toggle()
+    }
+
+    /// To `level`, as a slider sets it; unmutes.
+    mutating func set(_ level: Float) {
+        isMuted = false
+        self.level = min(max(level, 0), 1)
+    }
+
+    /// The speaker it shows: struck through while nothing plays, else with as many waves lit as
+    /// the level (`Image(systemName:variableValue:)`).
+    var symbol: String {
+        output == 0 ? "speaker.slash.fill" : "speaker.wave.3.fill"
     }
 }

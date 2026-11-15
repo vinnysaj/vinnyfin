@@ -29,9 +29,8 @@ struct PlayElsewhereButton: View {
             } label: {
                 Label(PlayElsewhereSheet.title, systemImage: PlayElsewhereSheet.symbol(sharePlay))
             }
-            .buttonStyle(.platformGlass)
-            .controlSize(.large)
-            .labelStyle(.iconOnly)
+            .titleActionStyle()
+            .actionCaption(PlayElsewhereSheet.caption)
             .help(PlayElsewhereSheet.title)
             .accessibilityIdentifier("playElsewhere")
             .sheet(isPresented: $isShowing) {
@@ -64,8 +63,11 @@ struct PlayElsewhereSheet: View {
 
     #if os(iOS) || os(macOS)
     static let title = "Play On or SharePlay"
+    /// Under its button on a title's page.
+    static let caption = "Play On"
     #else
     static let title = "SharePlay"
+    static let caption = "SharePlay"
     #endif
 
     static func isOffered(_ sharePlay: SharePlay) -> Bool {
@@ -107,6 +109,11 @@ struct PlayElsewhereSheet: View {
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 380)
+        #elseif os(visionOS)
+        // SharePlay's section, with room for the rows of a group under way, in a sheet fitted to
+        // it rather than a tall one over the picture: a list has no height of its own to fit to.
+        .frame(width: 540, height: 400)
+        .presentationSizing(.fitted)
         #endif
         #if os(iOS) || os(macOS)
         .task { await refreshWhileOpen() }

@@ -63,18 +63,115 @@ struct VersionPicker: View {
     }
 }
 
-extension MediaSource {
-    /// "1080p H264 SDR · AAC 5.1 +1 · 4.2 GB · MKV"
-    var detailLine: String {
+/// The version a title's page plays and downloads, as a chip among its buttons that shows the one
+/// picked, "4K", over its caption; it opens a menu of them all, each by its name and size over
+/// what's in it. The pick holds for the page alone: everywhere else, and back on the page later,
+/// playback starts with the version closest to the quality settings.
+struct VersionMenu: View {
+    let sources: [MediaSource]
+    @Binding var selection: String?
+
+    var body: some View {
+        let names = VersionNames(sources)
+        let picked = selection.flatMap { id in sources.first { $0.id == id } }.map(names.name)
+        Menu {
+            // Toggles rather than a picker's options: a menu reads the second text of a toggle's
+            // label as a line under the first, where a picker makes each text an option of its own.
+            Section("For Plays and Downloads from This Page") {
+                ForEach(sources) { source in
+                    Toggle(isOn: Binding(get: { selection == source.id }, set: { if $0 { selection = source.id } })) {
+                        Text(names.title(of: source))
+                        Text(source.detailLine(withSize: false))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(picked ?? "Version")
+                Image(systemName: "chevron.up.chevron.down")
+                    .imageScale(.small)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .buttonStyle(.platformGlass)
+        .controlSize(.large)
+        .actionCaption("Version")
+        .help("Version")
+        .accessibilityLabel("Version")
+        .accessibilityValue(picked ?? "")
+        .accessibilityIdentifier("detail.version")
+    }
+}
+
+/// What a title's versions are called, each in a word or two from its picture: "4K", "1080p HDR",
+/// "4K Dolby Vision". Where the picture says nothing, the server's name for it; and where two
+/// would be called the same, each with the server's name after, "1080p · Director's Cut", or
+/// failing that its place, "1080p · 2".
+nonisolated struct VersionNames {
+    private let names: [String: String]
+
+    init(_ sources: [MediaSource]) {
+        let plain = sources.map(Self.plainName)
+        var names: [String: String] = [:]
+        for (index, source) in sources.enumerated() {
+            let name = plain[index]
+            guard plain.filter({ $0 == name }).count > 1 else {
+                names[source.id] = name
+                continue
+            }
+            let own = source.name.flatMap { $0.isEmpty || $0 == name || $0 == "Default" ? nil : $0 }
+            names[source.id] = "\(name) · \(own ?? String(index + 1))"
+        }
+        self.names = names
+    }
+
+    /// "4K"
+    func name(_ source: MediaSource) -> String {
+        names[source.id] ?? Self.plainName(source)
+    }
+
+    /// The version's name with its size, as the menu lists it: "4K · 40.5 MB".
+    func title(of source: MediaSource) -> String {
+        [name(source), source.plausibleSize?.formatted(.byteCount(style: .file))].compactMap(\.self).joined(separator: " · ")
+    }
+
+    /// From the picture's size and range, else the server's name, else "Version".
+    static func plainName(_ source: MediaSource) -> String {
+        let picture = [VersionTraits(source).resolutionClass.map(VersionTraits.label(forResolution:)), source.dynamicRangeName]
+            .compactMap(\.self)
+        if !picture.isEmpty { return picture.joined(separator: " ") }
+        return source.name.flatMap { $0.isEmpty || $0 == "Default" ? nil : $0 } ?? "Version"
+    }
+}
+
+nonisolated extension MediaSource {
+    /// "1080p H264 SDR · AAC 5.1 +1 · 4.2 GB · MKV", with or without the size.
+    func detailLine(withSize: Bool) -> String {
         var parts: [String] = []
         if let video = videoStream?.displayTitle { parts.append(video) }
         if let audio = audioStreams.first?.displayTitle {
             parts.append(audioStreams.count > 1 ? "\(audio) +\(audioStreams.count - 1)" : audio)
         }
         if !subtitleStreams.isEmpty { parts.append("\(subtitleStreams.count) subtitles") }
-        if let size = plausibleSize { parts.append(size.formatted(.byteCount(style: .file))) }
+        if withSize, let size = plausibleSize { parts.append(size.formatted(.byteCount(style: .file))) }
         if let ext = fileExtension { parts.append(ext.uppercased()) }
         return parts.joined(separator: " · ")
+    }
+
+    /// "1080p H264 SDR · AAC 5.1 +1 · 4.2 GB · MKV"
+    var detailLine: String { detailLine(withSize: true) }
+
+    /// The picture's high dynamic range, by the video stream's range or the version's name:
+    /// "Dolby Vision", "HDR10+", "HDR" or "HLG"; nil for standard range.
+    var dynamicRangeName: String? {
+        let range = videoStream?.videoRangeType?.uppercased() ?? ""
+        let name = (name ?? "").uppercased()
+        if range.hasPrefix("DOVI") || name.contains("DOLBY VISION") || name.contains(" DV") { return "Dolby Vision" }
+        if range.contains("HDR10PLUS") || name.contains("HDR10+") { return "HDR10+" }
+        if range.contains("HDR") || name.contains("HDR") { return "HDR" }
+        if range.contains("HLG") { return "HLG" }
+        return nil
     }
 
     /// Words of the name and video description, for matching versions across episodes.

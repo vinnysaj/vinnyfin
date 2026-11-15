@@ -58,6 +58,8 @@ struct PlayerView: View {
     #endif
     #if os(macOS)
     @State private var isFullScreen = false
+    /// The window floats above other windows, as Playback › Float on Top has it.
+    @State private var floatsOnTop = false
     #endif
     /// Where the controls' bottom bar starts, in global coordinates.
     @State private var bottomBarTop: CGFloat?
@@ -79,6 +81,10 @@ struct PlayerView: View {
     #if os(macOS)
     @State private var pointerIsOver = false
     #endif
+    #if os(iOS)
+    /// An iPad's pointer rests on the controls' bars, which keeps them up.
+    @State private var pointerIsOnControls = false
+    #endif
     #if os(tvOS)
     @FocusState private var focus: PlayerFocus?
     /// Try Again over a playback that failed, which takes focus from the controls as it appears.
@@ -89,15 +95,23 @@ struct PlayerView: View {
     /// The controls show just the timeline, as the remote moves it while they were hidden.
     @State private var controlsCompact = false
     @State private var touchSurface = TouchSurface()
-    /// Where the timeline was when the swipe under way started moving it, which a circle that
-    /// began as the swipe goes back to.
-    @State private var swipeStart: Double?
+    /// The sideways swipe under way, which a circle that began as it goes back to.
+    @State private var swipe = SwipeUndo()
     /// Drops a position chosen while playing that's been left alone (`StraySwipe`).
     @State private var strayTask: Task<Void, Never>?
+    /// An up or down move held back while it's unclear whether the finger is starting round the
+    /// ring (`VerticalMove`).
+    @State private var heldMove: HeldMove?
+    /// The timeline is up only because a finger rested on the remote with the controls hidden
+    /// (`RemotePeek`): it goes soon after the finger lifts, unless something else used it.
+    @State private var controlsByPeek = false
+    /// The finger that brought the timeline up rests on still, which keeps it up.
+    @State private var peekIsHeld = false
     #else
     @FocusState private var hasKeyboardFocus: Bool
     #endif
     #if os(iOS)
+    @Environment(AppSettings.self) private var settings
     @State private var orientationLock = PlayerOrientationLock()
     /// The fold across the screen of an iPhone Duo standing half open, in window coordinates.
     @State private var fold: CGRect?
@@ -154,7 +168,7 @@ struct PlayerView: View {
                     .focused($focus, equals: .picture)
                     .onTapGesture { pictureClicked() }
                     .onMoveCommand { direction in
-                        if direction == .up || direction == .down { showControls() }
+                        if direction == .up || direction == .down { moveVertically(direction, fromTimeline: false) }
                     }
                     .accessibilityLabel("Video")
                     .accessibilityHint("Shows the controls")
@@ -204,7 +218,8 @@ struct PlayerView: View {
                                bottomBarTop: $bottomBarTop, topBarBottom: $topBarBottom,
                                onClose: onClose, onInteraction: scheduleHide, pictureInPicture: nil, playElsewhere: nil,
                                focus: $focus, isCompact: controlsCompact,
-                               onTimelineSelect: timelineClicked, onTimelineMove: timelineMoved)
+                               onTimelineSelect: timelineClicked, onTimelineMove: timelineMoved,
+                               holdsFocusOnTimeline: timelineHoldsFocus)
                     .transition(.opacity)
             }
             #else
@@ -288,12 +303,12 @@ struct PlayerView: View {
                 .frame(width: 0, height: 0)
                 .sheet(isPresented: episodesSheet) { episodesSheetContent }
             #endif
-            if panel == .quality {
+            if panel == .quality, !PlayerPanel.quality.opensInPopover {
                 placed(.quality, opensFrom: Self.qualityButtonIsAtTop ? .top : .bottom) { room in
                     QualityPanel(model: model, room: room) { closePanel() }
                 }
             }
-            if let panel, panel.isTrackPanel {
+            if let panel, panel.isTrackPanel, !panel.opensInPopover {
                 placed(panel, opensFrom: .bottom) { room in
                     TrackPanel(model: model, panel: panel, room: room) { closePanel() }
                 }
@@ -338,6 +353,9 @@ struct PlayerView: View {
             controlsOrnament
         }
         .preferredSurroundingsEffect(model.isPlaying && showsPicture ? .dark : nil)
+        // The window's grab bar and close button go with the controls, off the picture and out
+        // of the dark theater, as the system player's do.
+        .persistentSystemOverlays(controlsVisible ? .automatic : .hidden)
         // A new picture is flat until the screen showing it finds otherwise.
         .onReceive(model.engine.$currentAVPlayer.removeDuplicates { $0 === $1 }) { _ in coordinator.pictureIsStereo = false }
         .onChange(of: coordinator.screenTaps) { toggleControls() }
@@ -347,8 +365,27 @@ struct PlayerView: View {
         .animation(.smooth, value: fold)
         .environment(orientationLock)
         .onHingeChange { _, context in orientationLock.hingeChanged(isHalfOpen: context.hinge?.status == .partiallyOpen) }
-        .onAppear { orientationLock.start() }
+        .onAppear {
+            orientationLock.start(landscapeTitles: settings.playsVideosInLandscape)
+            if let pictureShape { orientationLock.pictureShaped(pictureShape) }
+        }
         .onDisappear { orientationLock.stop() }
+        .onChange(of: pictureShape) { _, shape in
+            if let shape { orientationLock.pictureShaped(shape) }
+        }
+        // An iPad's pointer brings the controls up as it moves over the picture, and keeps them up
+        // while it rests on their bars.
+        .onContinuousHover(coordinateSpace: .global) { phase in
+            switch phase {
+            case .active(let location):
+                pointerIsOnControls = controlsVisible
+                    && PlayerLayout.isOnBars(y: location.y, topBarBottom: topBarBottom, bottomBarTop: bottomBarTop)
+                showControls(autoHide: !pointerIsOnControls)
+            case .ended:
+                pointerIsOnControls = false
+                scheduleHide()
+            }
+        }
         #endif
         #if os(macOS)
         .onContinuousHover { phase in
@@ -362,24 +399,39 @@ struct PlayerView: View {
         }
         // The window's close, minimize and zoom buttons go with the controls, off the picture.
         .background(WindowButtons(areHidden: !controlsVisible))
-        .background(PlayerWindowShape(videoSize: model.videoSize) { isFullScreen = $0 })
+        .background(PlayerWindowShape(videoSize: model.videoSize, floatsOnTop: floatsOnTop,
+                                      onWindow: { if let window = $0 { coordinator.playerWindow = window } }) { isFullScreen = $0 })
         .environment(\.playerIsFullScreen, isFullScreen)
         #endif
         #if os(tvOS)
         .background {
-            RemoteInput(surface: touchSurface, isActive: remoteDrivesTimeline,
-                        swipeThreshold: StraySwipe.threshold(controlsHidden: !controlsVisible, isScrubbing: model.scrubbing.isActive),
+            // A timeline a resting finger brought up guards against a thumb on the surface as one
+            // hidden does.
+            RemoteInput(surface: touchSurface, isActive: remoteDrivesTimeline, ringArms: controlsVisible,
+                        swipeThreshold: StraySwipe.threshold(controlsHidden: !controlsVisible || controlsByPeek,
+                                                             isScrubbing: model.scrubbing.isActive),
                         onGesture: remote)
         }
+        .onChange(of: touchSurface.reading) { _, reading in
+            model.scrubbing.isOnRing = reading == .armed || reading == .turning
+            settleHeldMove()
+        }
         .onPlayPauseCommand {
-            // Moving the timeline, Play jumps there and plays.
-            if model.scrubbing.isActive {
-                model.commitScrub()
-                model.play()
-            } else {
-                model.togglePlayPause()
-            }
+            // Moving the timeline, Play jumps there and plays (`PlayerModel.togglePlayPause`).
+            model.togglePlayPause()
             showControls()
+        }
+        // Leaving the timeline leaves the position chosen on it, as Back does: playback stays
+        // where it is, and the controls can go.
+        .onChange(of: focus) { old, new in
+            guard old == .timeline, new != .timeline else { return }
+            if new != nil, new != .picture { controlsByPeek = false }
+            if model.scrubbing.isActive { model.cancelScrub() }
+        }
+        // A position chosen while paused, the playback started some other way, as the group
+        // watching together can: left alone, it goes as one chosen while playing does.
+        .onChange(of: model.isPlaying) { _, playing in
+            if playing { dropPositionWhenLeft() }
         }
         .onExitCommand {
             if model.scrubbing.isActive {
@@ -443,6 +495,7 @@ struct PlayerView: View {
             return .handled
         }
         .focusedValue(\.player, PlayerCommandTarget(model: model, fillsScreen: fillsScreen, isFullScreen: isWindowFullScreen,
+                                                    floatsOnTop: isFloatingOnTop, pictureInPicture: pictureInPictureAction,
                                                     perform: perform))
         .handoffPlayback(model)
         #endif
@@ -499,9 +552,9 @@ struct PlayerView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await model.restoreAfterBackground() }
-            // Back from the background the picture can take a while to return; the controls show
-            // meanwhile that playback carries on.
-            if model.isPlaying { showControls() }
+            // Back from the background the picture can take a while to return, and the playback
+            // can be waiting on its buffer: the controls show meanwhile that it's still there.
+            if model.current != nil { showControls() }
         }
         .onChange(of: model.notice) { _, notice in
             if let notice { announce(notice.text) }
@@ -575,7 +628,13 @@ struct PlayerView: View {
         strayTask?.cancel()
         switch gesture {
         case .lift:
-            swipeStart = nil
+            swipe.lifted()
+            settleHeldMove()
+            if peekIsHeld {
+                // The timeline the resting finger brought up goes soon (`RemotePeek`).
+                peekIsHeld = false
+                scheduleHide()
+            }
             dropPositionWhenLeft()
             return
         case .holdEnded:
@@ -584,30 +643,114 @@ struct PlayerView: View {
             model.commitScan()
             scheduleHide()
             return
+        case .rest:
+            peek()
+            return
         default:
             break
         }
         guard remoteDrivesTimeline else { return }
+        // Moving the timeline, the remote is in use: the controls go by the usual rules.
+        controlsByPeek = false
+        peekIsHeld = false
         let duration = model.duration
         switch gesture {
         case .swipe(let distance, let speed):
-            if swipeStart == nil { swipeStart = model.scrubbing.position ?? model.clock.time }
+            swipe.swiped(from: model.scrubbing.position ?? model.clock.time)
             model.scrub(by: ScrubMotion.swipe(distance, speed: speed, duration: duration))
-        case .circle(let turn, let undoesSwipe):
-            if undoesSwipe, let swipeStart { model.scrubbing.position = swipeStart }
-            model.scrub(by: ScrubMotion.circle(turn, duration: duration))
+            settleHeldMove()
+        case .circle(let turn, let speed, let undoesSwipe):
+            if let start = swipe.circleBegan(undoesSwipe: undoesSwipe) { model.scrubbing.position = start }
+            model.scrub(by: ScrubMotion.circle(turn, speed: speed ?? 0, duration: duration))
         case .click(let forward):
-            // Playing, a click skips. Paused, or moving the timeline already, it steps the
-            // timeline, for a click on the timeline or Play to jump there.
+            // Playing, a click skips, back with subtitles for what plays again. Paused, or moving
+            // the timeline already, it steps the timeline, for a click on the timeline or Play to
+            // jump there.
             let seconds = forward ? PlayerModel.skipInterval : -PlayerModel.skipInterval
-            if model.scrubbing.isActive || !model.isPlaying { model.scrub(by: seconds) } else { model.skip(by: seconds) }
+            if model.scrubbing.isActive || !model.isPlaying {
+                model.scrub(by: seconds)
+            } else if forward {
+                model.skip(by: seconds)
+            } else {
+                model.skipBackShowingSubtitles(by: PlayerModel.skipInterval)
+            }
             dropPositionWhenLeft()
         case .holdBegan(let forward):
             model.beginScan(forward: forward)
-        case .lift, .holdEnded:
+        case .lift, .holdEnded, .rest:
             break
         }
         revealTimeline()
+    }
+
+    /// With the controls hidden, a finger resting on the remote brings up the timeline, without
+    /// moving it, until a moment after it lifts, as Apple TV's player shows its controls.
+    private func peek() {
+        guard !controlsVisible, remoteDrivesTimeline, !showsEndScreen else { return }
+        controlsByPeek = true
+        peekIsHeld = true
+        controlsCompact = true
+        controlsVisible = true
+        hideTask?.cancel()
+    }
+
+    // An up or down move command, from the picture or the timeline.
+
+    private struct HeldMove {
+        let direction: MoveCommandDirection
+        let fromTimeline: Bool
+    }
+
+    /// Moves on up or down, unless the move may be the start of a circle round the ring, which the
+    /// focus engine reads as a swipe up or down (`VerticalMove`): then it waits to see, or is
+    /// dropped.
+    private func moveVertically(_ direction: MoveCommandDirection, fromTimeline: Bool) {
+        let move = HeldMove(direction: direction, fromTimeline: fromTimeline)
+        heldMove = nil
+        switch verticalMove(pressed: touchSurface.verticalPressCame) {
+        case .go: make(move, held: false)
+        case .wait: heldMove = move
+        case .drop: break
+        }
+    }
+
+    /// The finger on the remote may be going round the ring, or swipes the timeline: nothing but the
+    /// timeline takes focus. The focus engine moves focus before the move command comes, so a
+    /// circle starting at the ring's side would otherwise take focus off the timeline it's moving.
+    private var timelineHoldsFocus: Bool {
+        focus == .timeline && (touchSurface.reading != .none || swipe.isSwiping)
+    }
+
+    private func verticalMove(pressed: Bool) -> VerticalMove.Verdict {
+        VerticalMove.verdict(ring: touchSurface.reading, isSwiping: swipe.isSwiping, pressed: pressed)
+    }
+
+    /// Makes the move held back once the finger shows it wasn't circling, or drops it once it shows
+    /// it was.
+    private func settleHeldMove() {
+        guard let move = heldMove else { return }
+        switch verticalMove(pressed: false) {
+        case .go:
+            heldMove = nil
+            make(move, held: true)
+        case .drop:
+            heldMove = nil
+        case .wait:
+            break
+        }
+    }
+
+    /// An up or down move, where it was made: from the timeline it puts focus where the move goes,
+    /// wherever the focus engine took it; over the picture it brings up the controls. One `held`
+    /// back goes only from where it was made.
+    private func make(_ move: HeldMove, held: Bool) {
+        if move.fromTimeline {
+            guard !held || focus == .timeline else { return }
+            moveFromTimeline(move.direction)
+        } else {
+            guard !controlsVisible else { return }
+            showControls()
+        }
     }
 
     /// A position chosen while playing goes, and the timeline with it, once the remote has been
@@ -653,9 +796,14 @@ struct PlayerView: View {
 
     /// Up from the timeline goes to the skip button or up-next card, down to the buttons; either
     /// brings the title and buttons back when the timeline showed alone. A swipe moving the
-    /// timeline stays on it.
+    /// timeline, and a circle round the ring, stay on it (`moveVertically`).
     private func timelineMoved(_ direction: MoveCommandDirection) {
-        guard swipeStart == nil else { return }
+        guard direction == .up || direction == .down else { return }
+        moveVertically(direction, fromTimeline: true)
+    }
+
+    private func moveFromTimeline(_ direction: MoveCommandDirection) {
+        controlsByPeek = false
         switch direction {
         case .up:
             if shownAction(at: model.clock.time) != nil {
@@ -785,8 +933,7 @@ struct PlayerView: View {
     /// A panel over the controls, by the button that opened it: above a button along the bottom,
     /// growing upward over the timeline and below the top bar, or below one in the top bar, down
     /// to the bottom bar; where the band between the bars is short, as far as the screen goes.
-    /// Without its button's place, as on Vision Pro, whose controls are below the window, it
-    /// keeps to the band between the bars at the trailing edge.
+    /// Without its button's place it keeps to the band between the bars at the trailing edge.
     ///
     /// - Parameters:
     ///   - edge: The edge it grows from as it opens: its button's.
@@ -899,6 +1046,14 @@ struct PlayerView: View {
 
     /// While the sound plays with no picture: a lighter way to play the title, or waiting on.
     private func pictureOfferCard(_ offer: PictureOffer) -> some View {
+        StatusCard {
+            pictureOffer(offer)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("player.pictureOffer")
+    }
+
+    private func pictureOffer(_ offer: PictureOffer) -> some View {
         VStack(spacing: 14) {
             Image(systemName: "video.slash").font(.largeTitle).foregroundStyle(.secondary)
                 .accessibilityHidden(true)
@@ -920,25 +1075,27 @@ struct PlayerView: View {
             .focusSection()
             #endif
         }
-        .padding(30)
-        .platformGlass(in: .rect(cornerRadius: 28))
-        .padding()
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("player.pictureOffer")
     }
 
     private enum PictureCover: Equatable {
         case starting
         case airPlay(receiver: String)
+        /// The Mac's Picture in Picture window has the video. The player window goes off screen
+        /// meanwhile (`PlayerCoordinator`); this is what it shows as it goes and as it comes back.
+        case pictureInPicture
     }
 
     /// Why the title's picture stands in for the video, when it does: the title is starting, or
-    /// AirPlay has the video on another screen.
+    /// its picture is being rebuilt after the background, which looks the same; AirPlay has the
+    /// video on another screen; or on the Mac Picture in Picture has it.
     private var pictureCover: PictureCover? {
         #if os(iOS) || os(macOS)
         if externalPlayback.isActive { return .airPlay(receiver: externalPlayback.receiverName) }
         #endif
-        return isStartingTitle ? .starting : nil
+        #if os(macOS)
+        if coordinator.pictureInPicture.isActive { return .pictureInPicture }
+        #endif
+        return isStartingTitle || model.isRestoringPicture ? .starting : nil
     }
 
     @ViewBuilder private func coverCaption(_ cover: PictureCover) -> some View {
@@ -953,6 +1110,16 @@ struct PlayerView: View {
                 #if os(iOS) || os(macOS)
                 AirPlayCaption(receiverName: receiver)
                 #endif
+            case .pictureInPicture:
+                Label {
+                    Text("Playing in Picture in Picture")
+                        .font(.title3.weight(.semibold))
+                } icon: {
+                    Image(systemName: "pip").font(.title)
+                }
+                .foregroundStyle(.white)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("player.pictureInPicture.cover")
             }
         }
         .padding(.trailing, captionPlace.trailingInset)
@@ -1027,6 +1194,14 @@ struct PlayerView: View {
             .frame
     }
 
+    /// The picture's shape as soon as it's known, for the player to turn to it: the version's, as
+    /// the server lists it, until the stream's own.
+    private var pictureShape: CGSize? {
+        if let size = model.videoSize { return size }
+        guard let video = model.current?.mediaSource?.videoStream, let width = video.width, let height = video.height else { return nil }
+        return CGSize(width: width, height: height)
+    }
+
     /// Spreading two fingers fills the screen, cutting the picture's edges; pinching fits it.
     private func pinched(_ magnification: CGFloat) {
         if magnification > 1.15 {
@@ -1087,6 +1262,13 @@ struct PlayerView: View {
     /// Why the playback failed, while it has; through a try again's first moment
     /// (`PlayerModel.isRetrying`) it says it's trying again, with a spinner in place of its symbol.
     private func failureCard(_ message: String) -> some View {
+        StatusCard {
+            failure(message)
+        }
+        .accessibilityIdentifier("player.failure")
+    }
+
+    private func failure(_ message: String) -> some View {
         VStack(spacing: 14) {
             // The spinner takes the symbol's place, and its room, so the card keeps its size.
             Image(systemName: "exclamationmark.triangle.fill").font(.largeTitle).foregroundStyle(.yellow)
@@ -1117,10 +1299,6 @@ struct PlayerView: View {
             }
             #endif
         }
-        .padding(30)
-        .platformGlass(in: .rect(cornerRadius: 28))
-        .padding()
-        .accessibilityIdentifier("player.failure")
     }
 
     /// Tries to play again by `attempt`, once at a time.
@@ -1150,8 +1328,9 @@ struct PlayerView: View {
                 actionView(action, form: PlayerLayout.upNextForm(controlsVisible: clearsControls, isShort: controlsAreShort),
                            width: geometry.size.width)
                     #if os(tvOS)
-                    // Focus stays in an open panel, as the controls' bottom bar leaves it there.
-                    .disabled(panel != nil)
+                    // Focus stays in an open panel, as the controls' bottom bar leaves it there, and on
+                    // the timeline while the remote may be moving it (`timelineHoldsFocus`).
+                    .disabled(panel != nil || timelineHoldsFocus)
                     #endif
                     .padding(.horizontal, Metrics.playerInset)
                     .padding(.bottom, bottom)
@@ -1253,9 +1432,26 @@ struct PlayerView: View {
             model.skip(by: -PlayerModel.skipInterval)
         case .skipForward:
             model.skip(by: PlayerModel.skipInterval)
+        case .previousEpisode:
+            guard model.item?.isEpisode == true else { return }
+            Task { await model.playPreviousEpisode() }
         case .nextEpisode:
             guard let next = model.nextEpisode else { return }
             Task { await model.play(next) }
+        case .previousChapter:
+            guard !model.chapters.isEmpty else { return }
+            model.seek(to: ChapterMark.previous(in: model.chapters, before: model.clock.time)?.start ?? 0)
+        case .nextChapter:
+            guard let next = ChapterMark.next(in: model.chapters, after: model.clock.time) else { return }
+            model.seek(to: next.start)
+        case .pictureInPicture:
+            pictureInPictureAction?.toggle()
+            return
+        case .floatOnTop:
+            #if os(macOS)
+            floatsOnTop.toggle()
+            #endif
+            return
         case .episodes:
             guard model.item?.isEpisode == true, fold == nil else { return }
             panel = panel == .episodes ? nil : .episodes
@@ -1298,6 +1494,14 @@ struct PlayerView: View {
     private var isWindowFullScreen: Bool {
         #if os(macOS)
         isFullScreen
+        #else
+        false
+        #endif
+    }
+
+    private var isFloatingOnTop: Bool {
+        #if os(macOS)
+        floatsOnTop
         #else
         false
         #endif
@@ -1401,6 +1605,8 @@ struct PlayerView: View {
         if holding { holdsControls = true }
         #if os(tvOS)
         controlsCompact = false
+        controlsByPeek = false
+        peekIsHeld = false
         #endif
         controlsVisible = true
         #if os(macOS)
@@ -1416,6 +1622,9 @@ struct PlayerView: View {
         guard explicit ? hasPicture : model.isPlaying, !model.scrubbing.isActive, panel == nil, fold == nil else { return }
         controlsVisible = false
         holdsControls = false
+        #if os(tvOS)
+        controlsByPeek = false
+        #endif
         #if os(macOS)
         // The pointer goes with them, until it moves: over the picture only, and only with the
         // app in front, as it would vanish over another app's window too.
@@ -1433,13 +1642,24 @@ struct PlayerView: View {
     }
 
     /// Hides the controls in a few seconds, unless they're held or VoiceOver or Switch Control is
-    /// on: those move through the controls one at a time, which takes longer.
+    /// on: those move through the controls one at a time, which takes longer. On Apple TV the
+    /// timeline a resting finger brought up stays while it rests, and goes sooner once it lifts,
+    /// paused too, as it was hidden before. On iPad the controls stay while the pointer is on them.
     private func scheduleHide() {
         hideTask?.cancel()
         guard !holdsControls, !voiceOverEnabled, !switchControlEnabled else { return }
+        #if os(tvOS)
+        guard !peekIsHeld else { return }
+        let byPeek = controlsByPeek
+        #else
+        let byPeek = false
+        #endif
+        #if os(iOS)
+        guard !pointerIsOnControls else { return }
+        #endif
         hideTask = Task {
-            try? await Task.sleep(for: .seconds(4))
-            if !Task.isCancelled { hideControls() }
+            try? await Task.sleep(for: byPeek ? RemotePeek.lingers : .seconds(4))
+            if !Task.isCancelled { hideControls(explicit: byPeek) }
         }
     }
 }
@@ -1483,6 +1703,30 @@ private struct WindowButtons: NSViewRepresentable {
     }
 }
 #endif
+
+/// A card over the picture saying what's wrong, with the ways on. Taller than the screen, as at
+/// the largest text sizes on a phone on its side or with a long message from the server, it
+/// scrolls rather than cut off its buttons.
+private struct StatusCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            card
+            ScrollView {
+                card.frame(maxWidth: .infinity)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+    }
+
+    private var card: some View {
+        content
+            .padding(30)
+            .platformGlass(in: .rect(cornerRadius: 28))
+            .padding()
+    }
+}
 
 /// A brief word over the picture, such as a move to a lower quality, below the controls' top
 /// bar while they show, with a symbol for what it's about.

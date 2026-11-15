@@ -36,6 +36,16 @@ private struct Playback {
 }
 
 struct ConnectionWatchTests {
+    @Test func samplesOnlyWhileThePictureIsWatched() {
+        #expect(ConnectionWatch.samples(inBackground: false, pictureShownOutside: false, restoringPicture: false))
+        // In the background the engine plays the sound alone, unless Picture in Picture or
+        // AirPlay shows the picture.
+        #expect(!ConnectionWatch.samples(inBackground: true, pictureShownOutside: false, restoringPicture: false))
+        #expect(ConnectionWatch.samples(inBackground: true, pictureShownOutside: true, restoringPicture: false))
+        // Back, the rebuild of the picture the background took is no measure of the connection.
+        #expect(!ConnectionWatch.samples(inBackground: false, pictureShownOutside: false, restoringPicture: true))
+    }
+
     @Test func leavesHealthyPlaybackAlone() {
         var playback = Playback().started()
         #expect(playback.run(300) == nil)

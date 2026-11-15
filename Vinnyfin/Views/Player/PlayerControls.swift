@@ -50,6 +50,10 @@ struct PlayerControls: View {
     let onTimelineSelect: () -> Void
     /// A swipe or an arrow up or down from the timeline; sideways is the remote's own (`RemoteInput`).
     let onTimelineMove: (MoveCommandDirection) -> Void
+    /// The finger on the remote may be going round the ring, or swipes the timeline: nothing but the
+    /// timeline takes focus, which the focus engine would move up or down as a circle starts at the
+    /// ring's side, before the move command comes (`VerticalMove`).
+    var holdsFocusOnTimeline = false
     #endif
     @Environment(SharePlay.self) private var sharePlay
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -137,8 +141,9 @@ struct PlayerControls: View {
                 topBar
                     .opacity(showsOnlyTimeline ? 0 : 1)
                     .accessibilityHidden(showsOnlyTimeline)
-                    #if os(macOS)
-                    // The window's own buttons keep the corner, beside the bar.
+                    #if os(macOS) || os(iOS)
+                    // The window's own buttons keep the corner, beside the bar: the Mac's, and an
+                    // iPad window's, which take a tap there even while they're hidden.
                     .containerCornerOffset(.leading, sizeToFit: true)
                     #endif
                 Spacer()
@@ -154,6 +159,7 @@ struct PlayerControls: View {
                     #if os(tvOS)
                     if !showsOnlyTimeline {
                         PlayerTabs(model: model, panel: $panel, focus: focus, onInteraction: onInteraction)
+                            .disabled(holdsFocusOnTimeline)
                             .padding(.top, 20)
                     }
                     #endif
@@ -193,19 +199,45 @@ struct PlayerControls: View {
 
     #if os(visionOS)
     private var underWindow: some View {
-        VStack(spacing: 18) {
-            VStack(spacing: 14) {
-                topBar
-                if !isFailed { bottomBar }
-            }
-            .padding(.horizontal, 28)
-            if let item = model.item, item.isEpisode {
-                EpisodeStrip(model: model, playing: item, onInteraction: onInteraction)
-            }
+        VStack(spacing: 14) {
+            topBar
+            if !isFailed { bottomBar }
         }
+        .padding(.horizontal, 28)
         .padding(.vertical, 22)
         .frame(width: 920)
         .glassBackgroundEffect(in: .rect(cornerRadius: 40))
+    }
+
+    /// Opens `kind`'s panel in a popover from its button (`PlayerPanel.opensInPopover`), which
+    /// closes it as it's dismissed.
+    private func popover(_ kind: PlayerPanel) -> Binding<Bool> {
+        Binding {
+            panel == kind
+        } set: { isPresented in
+            guard !isPresented, panel == kind else { return }
+            panel = nil
+            onInteraction()
+        }
+    }
+
+    @ViewBuilder private func panelContent(_ kind: PlayerPanel) -> some View {
+        let close = {
+            panel = nil
+            onInteraction()
+        }
+        switch kind {
+        case .audioAndSubtitles, .speed, .chapters:
+            TrackPanel(model: model, panel: kind, room: .infinity, onClose: close)
+        case .quality:
+            QualityPanel(model: model, room: .infinity, onClose: close)
+        case .episodes:
+            if let item = model.item {
+                EpisodesPanel(model: model, playing: item, form: .drawer, onInteraction: onInteraction, onClose: close)
+            }
+        case .info:
+            EmptyView()
+        }
     }
     #endif
 
@@ -238,6 +270,7 @@ struct PlayerControls: View {
                         .accessibilityLabel(PlayElsewhereSheet.title)
                         .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("player.playElsewhere")
+                        .playerHelp(PlayElsewhereSheet.title)
                     }
                     #if os(iOS) || os(macOS)
                     RoutePicker()
@@ -256,6 +289,7 @@ struct PlayerControls: View {
                         .accessibilityLabel(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                         .accessibilityShowsLargeContentViewer()
                         .accessibilityIdentifier("player.pictureInPicture")
+                        .playerHelp(pictureInPicture.isActive ? "Exit Picture in Picture" : "Picture in Picture")
                     }
                     #endif
                     #if os(iOS)
@@ -289,6 +323,9 @@ struct PlayerControls: View {
             panel = panel == .quality ? nil : .quality
             onInteraction()
         }
+        #if os(visionOS)
+        .popover(isPresented: popover(.quality)) { panelContent(.quality) }
+        #endif
     }
     #endif
 
@@ -345,6 +382,8 @@ struct PlayerControls: View {
         .accessibilityLabel("Close")
         .accessibilityShowsLargeContentViewer()
         .accessibilityIdentifier("player.close")
+        // As File › Close's.
+        .playerHelp("Close (⌘W)")
         .dynamicTypeSize(...Self.largestControlSize)
     }
     #endif
@@ -366,15 +405,18 @@ struct PlayerControls: View {
                 model.skip(by: -PlayerModel.skipInterval)
             }
             .overlay(alignment: .top) { skipTally(back: true) }
+            .playerHelp(PlayerCommand.skipBack.tooltip("Back 10 Seconds"))
             transportButton(playPauseSymbol, label: playPauseLabel, size: 44 * scale, showsProgress: isWaiting) {
                 model.togglePlayPause()
             }
             .accessibilityIdentifier("player.playPause")
+            .playerHelp(PlayerCommand.playPause.tooltip(playPauseLabel))
             transportButton("goforward.10", label: "Forward 10 Seconds", size: 30 * scale,
                             turn: .rotate.clockwise.byLayer, turns: forwardSkips) {
                 model.skip(by: PlayerModel.skipInterval)
             }
             .overlay(alignment: .top) { skipTally(back: false) }
+            .playerHelp(PlayerCommand.skipForward.tooltip("Forward 10 Seconds"))
         }
         .animation(.snappy, value: model.scrubbing.skipRun)
     }
@@ -481,6 +523,9 @@ struct PlayerControls: View {
                 }
                 #endif
                 Spacer()
+                #if os(macOS) || os(visionOS)
+                VolumeControl(model: model, onInteraction: onInteraction)
+                #endif
                 episodeButtons
                 #if os(iOS)
                 Button {
@@ -501,7 +546,7 @@ struct PlayerControls: View {
                 }
                 .buttonStyle(.platformGlass)
                 .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Full Screen")
-                .help(isFullScreen ? "Exit Full Screen" : "Full Screen")
+                .help(PlayerCommand.fullScreen.tooltip(isFullScreen ? "Exit Full Screen" : "Full Screen"))
                 #endif
                 #if os(visionOS)
                 CinemaButton(onUse: onInteraction)
@@ -515,6 +560,9 @@ struct PlayerControls: View {
             // sends it, which shows them first. Disabled, they couldn't take it as they reappear.
             .opacity(showsOnlyTimeline ? 0 : 1)
             .accessibilityHidden(showsOnlyTimeline)
+            #if os(tvOS)
+            .disabled(holdsFocusOnTimeline)
+            #endif
             #if os(visionOS)
             // In the middle of the row, whatever is at its ends.
             .overlay { transport.controlSize(controlSize) }
@@ -558,11 +606,11 @@ struct PlayerControls: View {
         #endif
     }
 
-    /// The Episodes panel, which has Previous and Next in it, for an episode on iPhone, iPad and
-    /// the Mac. Elsewhere Next, and on Apple TV Previous too: below the fold and on Vision Pro the
-    /// episodes are on screen already, and Apple TV has them a swipe down from these buttons.
+    /// The Episodes panel, which has Previous and Next in it, for an episode. Elsewhere Next, and
+    /// on Apple TV Previous too: below the fold the episodes are on screen already, and Apple TV
+    /// has them a swipe down from these buttons.
     @ViewBuilder private var episodeButtons: some View {
-        #if os(iOS) || os(macOS)
+        #if !os(tvOS)
         if !isBelowFold, let item = model.item, item.isEpisode, item.seriesId != nil {
             panelButton(.episodes, identifier: "player.episodes", value: item.episodeCode)
         } else {
@@ -596,6 +644,9 @@ struct PlayerControls: View {
             .buttonStyle(.platformGlass)
             .accessibilityLabel("Next Episode")
             .accessibilityHint(next.name)
+            #if os(macOS)
+            .help(PlayerCommand.nextEpisode.tooltip("Next Episode"))
+            #endif
             .accessibilityShowsLargeContentViewer()
             #if os(tvOS)
             .focused(focus, equals: .next)
@@ -639,6 +690,9 @@ struct PlayerControls: View {
         .buttonBorderShape(text == nil ? .circle : .capsule)
         .accessibilityLabel(kind.title)
         .accessibilityValue(value ?? "")
+        #if os(macOS)
+        .help(kind == .episodes ? PlayerCommand.episodes.tooltip(kind.title) : kind.title)
+        #endif
         .accessibilityShowsLargeContentViewer()
         #if os(tvOS)
         .focused(focus, equals: .panel(kind))
@@ -650,8 +704,89 @@ struct PlayerControls: View {
                 Color.clear.preference(key: PanelButtonFrames.self, value: [kind: geometry.frame(in: .global)])
             }
         }
+        #if os(visionOS)
+        .popover(isPresented: popover(kind)) { panelContent(kind) }
+        #endif
     }
 }
+
+#if os(macOS) || os(visionOS)
+/// The player's volume, along the bottom bar: a speaker that mutes and unmutes, which opens into
+/// a slider beside it while the pointer is over it, or on Vision Pro while it's looked at. The
+/// iPhone and iPad have their own buttons for the volume, and Apple TV its remote.
+private struct VolumeControl: View {
+    let model: PlayerModel
+    /// Called on every use, so the controls stay up meanwhile.
+    let onInteraction: () -> Void
+    #if os(macOS)
+    @State private var isOpen = false
+    #endif
+
+    private static let sliderWidth: CGFloat = 110
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if showsSlider {
+                Slider(value: level, in: 0...1)
+                    .frame(width: Self.sliderWidth)
+                    .padding(.horizontal, 14)
+                    .frame(maxHeight: .infinity)
+                    .platformGlass(in: .capsule)
+                    .accessibilityLabel("Volume")
+                    .accessibilityIdentifier("player.volume")
+                    #if os(macOS)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    #endif
+            }
+            Button {
+                model.toggleMute()
+                onInteraction()
+            } label: {
+                Image(systemName: model.volume.symbol, variableValue: Double(model.volume.level))
+                    .font(.headline)
+                    .frame(width: 22, height: 22)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .buttonStyle(.platformGlass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel(model.volume.isMuted ? "Unmute" : "Mute")
+            .accessibilityShowsLargeContentViewer()
+            .accessibilityIdentifier("player.mute")
+            .playerHelp(PlayerCommand.mute.tooltip(model.volume.isMuted ? "Unmute" : "Mute"))
+        }
+        // As tall as the speaker, the slider's glass with it.
+        .fixedSize(horizontal: false, vertical: true)
+        #if os(macOS)
+        .onHover { isOpen = $0 }
+        .animation(.snappy, value: isOpen)
+        #else
+        // Laid out open, and shown open only while looked at: where the eyes are stays private,
+        // so the system draws the change.
+        .hoverEffect { effect, isActive, proxy in
+            effect.clipShape(.capsule.size(width: isActive ? proxy.size.width : proxy.size.height,
+                                           height: proxy.size.height, anchor: .trailing))
+        }
+        #endif
+    }
+
+    private var showsSlider: Bool {
+        #if os(macOS)
+        isOpen
+        #else
+        true
+        #endif
+    }
+
+    private var level: Binding<Double> {
+        Binding {
+            Double(model.volume.output)
+        } set: { level in
+            model.setVolume(Float(level))
+            onInteraction()
+        }
+    }
+}
+#endif
 
 /// What's on screen when it's worth saying: a speed other than 1×, 3D, Dolby Vision or HDR, or
 /// that the server is transcoding. With `action`, a button that opens the Quality panel, there
@@ -743,6 +878,11 @@ struct Scrubber: View {
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     #endif
+    #if os(iOS) || os(macOS)
+    /// Where a click would jump to, while a pointer is over the timeline, for the preview to show.
+    @State private var hoverPosition: Double?
+    @State private var width: CGFloat = 0
+    #endif
 
     var body: some View {
         @Bindable var scrubbing = model.scrubbing
@@ -753,7 +893,7 @@ struct Scrubber: View {
             TimelineBar(time: model.clock.time, buffered: model.clock.buffered, duration: duration, color: .white,
                         height: barHeight, marks: model.chapters.map(\.start), showsHead: showsHead,
                         position: $scrubbing.position, onSeek: nil)
-                .overlay { overBar(position: position, duration: duration) }
+                .overlay { overBar(position: previewPosition(position), duration: duration) }
             #if os(visionOS)
             // Tall enough to look at and pinch, and lit under the eyes as a slider is.
             .frame(height: 44)
@@ -776,12 +916,25 @@ struct Scrubber: View {
             ScrubLandmark.ticks(from: old, to: new)
         }
         #endif
+        #if os(iOS) || os(macOS)
+        // A pointer over it, or an Apple Pencil above it, previews where a click would jump to.
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let point):
+                hoverPosition = width > 0 ? TimelineDrag.tapPosition(x: point.x, width: width, duration: duration) : nil
+            case .ended:
+                hoverPosition = nil
+            }
+        }
+        #endif
         #if os(tvOS)
         .padding(.vertical, 8)
         .focusable()
         .onMoveCommand(perform: onMove)
         .onTapGesture(perform: onSelect)
         .animation(.easeOut(duration: 0.2), value: scrubbing.skipRun?.id)
+        .animation(.easeOut(duration: 0.15), value: scrubbing.isOnRing)
         .animation(.easeOut(duration: 0.15), value: position == nil)
         #endif
         .accessibilityElement()
@@ -839,7 +992,18 @@ struct Scrubber: View {
         #endif
     }
 
-    /// Over the bar: the preview while the timeline moves, and on Apple TV the run of skips.
+    /// What the preview over the bar shows: where the timeline is moved to, else where a pointer
+    /// over it would jump to.
+    private func previewPosition(_ position: Double?) -> Double? {
+        #if os(iOS) || os(macOS)
+        position ?? hoverPosition
+        #else
+        position
+        #endif
+    }
+
+    /// Over the bar: the preview while the timeline moves or a pointer is over it, and on Apple
+    /// TV the run of skips.
     private func overBar(position: Double?, duration: Double) -> some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -855,19 +1019,31 @@ struct Scrubber: View {
                     .transition(.opacity)
             }
             #if os(tvOS)
-            if position == nil, let run = model.scrubbing.skipRun {
-                let center = width * min(1, max(0, model.clock.time / duration))
-                SkipTally(seconds: run.seconds)
-                    .fixedSize()
-                    .offset(x: min(max(center, SkipTally.halfWidth), max(SkipTally.halfWidth, width - SkipTally.halfWidth)) - width / 2,
-                            y: above)
-                    .frame(width: width, height: geometry.size.height, alignment: .bottom)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
+            if position == nil, model.scrubbing.isOnRing {
+                // The ring armed by a finger resting on it, before it has moved the timeline.
+                overPlayhead(RingCue().padding(Self.ringCuePadding).platformGlass(in: .circle),
+                             width: width, height: geometry.size.height, above: above, duration: duration)
+            } else if position == nil, let run = model.scrubbing.skipRun {
+                overPlayhead(SkipTally(seconds: run.seconds).fixedSize(),
+                             width: width, height: geometry.size.height, above: above, duration: duration)
             }
             #endif
         }
         .allowsHitTesting(false)
     }
+
+    #if os(tvOS)
+    /// `content` over the playhead, `above` the bar, kept within the timeline.
+    private func overPlayhead(_ content: some View, width: CGFloat, height: CGFloat, above: CGFloat, duration: Double) -> some View {
+        let center = width * min(1, max(0, model.clock.time / duration))
+        return content
+            .offset(x: min(max(center, SkipTally.halfWidth), max(SkipTally.halfWidth, width - SkipTally.halfWidth)) - width / 2, y: above)
+            .frame(width: width, height: height, alignment: .bottom)
+            .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)))
+    }
+
+    private static let ringCuePadding: CGFloat = 10
+    #endif
 
     /// Where it is, with the chapter when there are chapters.
     private func spokenPosition(_ time: Double, of duration: Double) -> String {
@@ -949,10 +1125,10 @@ enum TimeLabel {
     }
 }
 
-/// Over the timeline while it moves: the picture at that point, when the server made scrub
-/// previews, with the chapter, the time, and how far that is from where playback is. On Apple
-/// TV, also the speed of a held side scanning; on a touchscreen, how finely a finger slid up
-/// from the bar is placing it.
+/// Over the timeline while it moves, or while a pointer is over it: the picture at that point,
+/// when the server made scrub previews, with the chapter, the time, and how far that is from where
+/// playback is. On Apple TV, also the speed of a held side scanning; on a touchscreen, how finely
+/// a finger slid up from the bar is placing it.
 private struct ScrubPreview: View {
     let model: PlayerModel
     let time: Double
@@ -976,6 +1152,8 @@ private struct ScrubPreview: View {
                 #if os(tvOS)
                 if let speed = model.scrubbing.scanSpeed {
                     scanSpeed(speed)
+                } else if model.scrubbing.isOnRing {
+                    RingCue()
                 }
                 #endif
                 Text(Scrubber.format(time)).font(.caption.weight(.semibold))
@@ -1055,6 +1233,18 @@ private struct ScrubPreview: View {
         #endif
     }
 }
+
+#if os(tvOS)
+/// The clickpad's ring, while the finger on the remote goes round it moving the timeline, or rests
+/// on it ready to, as Apple TV's player shows it.
+private struct RingCue: View {
+    var body: some View {
+        Image(systemName: "arrow.clockwise.circle")
+            .font(.callout.weight(.semibold))
+            .accessibilityHidden(true)
+    }
+}
+#endif
 
 /// The sum of the skips in a row: "+30", "−1:00". On Apple TV over the playhead, with the way it
 /// went; elsewhere over the skip button, or the side of the picture double-tapped, which show
@@ -1194,6 +1384,17 @@ struct TimelineBar: View {
         }
         #if !os(tvOS)
         .timelineDragging(duration: duration, time: time, position: $position, snapPoints: marks, onDrag: onDrag, onSeek: onSeek)
+        #endif
+    }
+}
+
+private extension View {
+    /// A control's tooltip under the Mac's pointer: its name, and its key (`PlayerCommand.tooltip`).
+    @ViewBuilder func playerHelp(_ text: String) -> some View {
+        #if os(macOS)
+        help(text)
+        #else
+        self
         #endif
     }
 }

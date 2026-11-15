@@ -429,7 +429,11 @@ struct KeyboardCommandTests {
         #expect(PlayerCommand.skipForward.shortcut == KeyboardShortcut(.rightArrow, modifiers: []))
         #expect(PlayerCommand.fullScreen.shortcut == KeyboardShortcut("f", modifiers: []))
         #expect(PlayerCommand.close.shortcut == KeyboardShortcut(.escape, modifiers: []))
-        #expect(PlayerCommand.allCases.allSatisfy { $0.shortcut.modifiers.isEmpty })
+        // But the chapters, which take QuickTime Player's Shift-Command arrows.
+        let chapters: Set<PlayerCommand> = [.previousChapter, .nextChapter]
+        #expect(PlayerCommand.allCases.filter { !chapters.contains($0) }.allSatisfy { $0.shortcut?.modifiers.isEmpty ?? true })
+        #expect(PlayerCommand.nextChapter.shortcut == KeyboardShortcut(.rightArrow, modifiers: [.shift, .command]))
+        #expect(PlayerCommand.previousChapter.shortcut == KeyboardShortcut(.leftArrow, modifiers: [.shift, .command]))
     }
 
     @Test func thePlayerFindsTheCommandForAKey() {
@@ -439,7 +443,14 @@ struct KeyboardCommandTests {
         #expect(PlayerCommand.pressed(.escape, modifiers: []) == .close)
         // ⌘F is the Go menu's Search, not full screen.
         #expect(PlayerCommand.pressed("f", modifiers: .command) == nil)
-        #expect(PlayerCommand.keys.count == PlayerCommand.allCases.count)
+        #expect(PlayerCommand.pressed("p", modifiers: []) == .previousEpisode)
+        #expect(PlayerCommand.pressed(.rightArrow, modifiers: [.shift, .command]) == .nextChapter)
+        // Every command with a key is found by it.
+        for command in PlayerCommand.allCases {
+            guard let shortcut = command.shortcut else { continue }
+            #expect(PlayerCommand.keys.contains(shortcut.key))
+            #expect(PlayerCommand.pressed(shortcut.key, modifiers: shortcut.modifiers) == command)
+        }
     }
 
     @Test func theArrowsUpAndDownSetTheVolumeAndLettersMuteAndCaption() {
@@ -465,7 +476,7 @@ struct KeyboardCommandTests {
     }
 
     @Test func noTwoCommandsShareAKey() {
-        let shortcuts = PlayerCommand.allCases.map(\.shortcut) + TabCommand.allCases.map(\.shortcut)
+        let shortcuts = PlayerCommand.allCases.compactMap(\.shortcut) + TabCommand.allCases.map(\.shortcut)
             + [TabCommandTarget.backShortcut]
         #expect(Set(shortcuts.map { "\($0.key.character)-\($0.modifiers.rawValue)" }).count == shortcuts.count)
     }

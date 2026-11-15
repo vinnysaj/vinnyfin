@@ -21,8 +21,7 @@ struct LocalFilesSection: View {
                 }
                 ForEach(localLibrary.recents) { recent in
                     fileRow(name: recent.name, key: recent.historyKey) {
-                        player.play(PlaybackRequest(source: .file(bookmark: recent.bookmark, name: recent.name),
-                                                    title: (recent.name as NSString).deletingPathExtension))
+                        player.play(recent.request)
                     }
                     .swipeActions(edge: .trailing) {
                         Button("Remove", systemImage: "minus.circle", role: .destructive) { localLibrary.remove(recent) }

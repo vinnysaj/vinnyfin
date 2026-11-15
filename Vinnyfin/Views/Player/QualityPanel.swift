@@ -84,7 +84,7 @@ struct QualityPanel: View {
         .frame(width: Self.width)
         .frame(maxHeight: min(Self.maxHeight, room))
         .fixedSize(horizontal: false, vertical: true)
-        .platformGlass(in: .rect(cornerRadius: 24))
+        .panelGlass(in: .rect(cornerRadius: 24), for: .quality)
         #if os(tvOS)
         .focusSection()
         .onAppear { focusedRow = sections.flatMap(\.rows).first { $0.option == chosen }?.id }

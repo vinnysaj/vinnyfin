@@ -89,17 +89,12 @@ struct HomeView: View {
             // On Apple TV, focus moves into Home at launch, and with nothing focusable there the
             // remote would do nothing at all; Check Again takes it.
             .overlay { if feed.hasNoTitles { noTitles } }
-            .overlay(alignment: .bottom) {
-                if let removal = feed.removal {
-                    RemovalToast(removal: removal) { undo(removal) } expire: { feed.settleRemoval(removal) }
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+            // The app's toast offers to put a title taken out of Continue Watching back; it goes
+            // as the removal does, as when the server turns it down.
+            .onChange(of: feed.removal) { old, new in
+                if let old, old.id != new?.id { messages.withdrawUndo(old.id) }
+                if let new, new.id != old?.id { offerUndo(new) }
             }
-            .animation(.snappy, value: feed.removal?.id)
-            #if os(tvOS)
-            // Undo, while the toast says so; the card the press was meant for is gone.
-            .onPlayPauseCommand(perform: feed.removal.map { removal in { undo(removal) } })
-            #endif
             .pageBackground()
             .screenTitle("Home")
             .onAppear { isOnScreen = true }
@@ -278,8 +273,14 @@ struct HomeView: View {
         }
     }
 
-    private func undo(_ removal: ContinueWatchingRemoval) {
-        feed.undo(removal) { messages.show($0) }
+    private func offerUndo(_ removal: ContinueWatchingRemoval) {
+        let name = removal.item.titleName
+        messages.offerUndo(UndoOffer(id: removal.id, title: "Removed from Continue Watching", detail: name,
+                                     announcement: "Removed \(name) from Continue Watching") {
+            feed.undo(removal) { messages.show($0) }
+        } expire: {
+            feed.settleRemoval(removal)
+        })
     }
 
     private func load(reshuffling: Bool = false) async {
@@ -351,52 +352,6 @@ private struct HomeRowView: View {
     private func problemRow(_ problem: String) -> some View {
         LoadFailureNotice(LoadFailure("Couldn't Load \(row.list.title)", message: problem)) { feed.retry(row.id) }
             .padding(.horizontal, Metrics.edge)
-    }
-}
-
-/// Says a title left Continue Watching, and offers to put it back for a few seconds; on Apple
-/// TV, with the Play/Pause button, as the card it came from is gone.
-private struct RemovalToast: View {
-    let removal: ContinueWatchingRemoval
-    let undo: () -> Void
-    /// The time to put it back is over.
-    let expire: () -> Void
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
-
-    /// How long the toast stays; long enough to reach Undo with VoiceOver too.
-    private var duration: Duration { .seconds(voiceOverEnabled ? 15 : 6) }
-
-    var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Removed from Continue Watching").font(.subheadline.weight(.semibold))
-                Text(removal.item.titleName).font(.caption).foregroundStyle(.secondary)
-            }
-            .lineLimit(1)
-            #if os(tvOS)
-            Label("Undo", systemImage: "playpause.fill")
-                .font(.subheadline.weight(.semibold))
-                .accessibilityLabel("Play/Pause to undo")
-            #else
-            Button("Undo", action: undo)
-                .font(.subheadline.weight(.semibold))
-                .buttonStyle(.platformGlass)
-                .accessibilityIdentifier("home.undoRemove")
-            #endif
-        }
-        .padding(.leading, 20)
-        .padding(.trailing, 10)
-        .padding(.vertical, 10)
-        .platformGlass(in: .capsule)
-        .padding(.horizontal, Metrics.edge)
-        .padding(.bottom, 12)
-        .accessibilityElement(children: .contain)
-        .task(id: removal.id) {
-            AccessibilityNotification.Announcement("Removed \(removal.item.titleName) from Continue Watching").post()
-            try? await Task.sleep(for: duration)
-            guard !Task.isCancelled else { return }
-            expire()
-        }
     }
 }
 
@@ -897,7 +852,7 @@ private struct HeroBanner: View {
     /// episode, "Play Again" for a movie watched, or "Play".
     private func playLabel(for item: JellyfinItem) -> String {
         if item.isSeries {
-            return feed.featuredEpisodes[item.id].flatMap(LandscapeCard.shortCode).map { "Play \($0)" } ?? "Play"
+            return feed.featuredEpisodes[item.id]?.shortEpisodeCode.map { "Play \($0)" } ?? "Play"
         }
         if item.isPlayed { return "Play Again" }
         guard let resume = item.resumeSeconds else { return "Play" }

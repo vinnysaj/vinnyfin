@@ -36,9 +36,13 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
     /// The title as the screen it was picked on had it, whose picture the player shows while it
     /// asks the server for the rest. Not kept when the request is saved.
     var shownItem: JellyfinItem?
+    /// The episodes the playback goes through, in an order of their own, as a show shuffled.
+    /// Kept when the request is saved, as for the Mac's and Vision Pro's player window, whose
+    /// Next follows it there too.
+    var order: PlayOrder?
 
     private enum CodingKeys: String, CodingKey {
-        case id, source, title, startFromBeginning, startingPoint
+        case id, source, title, startFromBeginning, startingPoint, order
     }
 
     /// `continuingFrom` is where another of the person's devices had got to, for a playback it
@@ -69,7 +73,7 @@ nonisolated struct PlaybackRequest: Codable, Hashable, Identifiable, Sendable {
     /// back: from the start at 0, else from exactly there, whatever the title's resume position.
     func replaying(from position: Double, title: String) -> PlaybackRequest {
         PlaybackRequest(source: source, title: title, startFromBeginning: position <= 0,
-                        startingPoint: position > 0 ? StartingPoint(position: position) : nil)
+                        startingPoint: position > 0 ? StartingPoint(position: position) : nil, order: order)
     }
 
     /// This request tried again after a failure: from `position`, where the playback had got to,
@@ -949,5 +953,39 @@ nonisolated extension TrackChooser {
     static func ownName(of track: TrackInfo) -> String? {
         let name = track.name.trimmingCharacters(in: .whitespaces)
         return name.isEmpty || name.hasSuffix("(\(track.codec))") ? nil : name
+    }
+}
+
+/// The episodes a playback goes through in an order of their own, as a show shuffled: Next,
+/// Previous and the countdown to the next episode follow it, rather than the show's order. It
+/// ends at its last episode.
+nonisolated struct PlayOrder: Codable, Hashable, Sendable {
+    let ids: [String]
+
+    /// A show's `episodes` in the order `seed` shuffles them into (`ShuffleOrder`): those the player
+    /// goes on to from one to the next, with no specials and nothing not out yet.
+    static func shuffled(_ episodes: [JellyfinItem], seed: UInt64, now: Date) -> PlayOrder {
+        PlayOrder(ids: ShuffleOrder.sorted(episodes.filter { UpNext.canGoOn(to: $0, now: now) }.map(\.id), seed: seed))
+    }
+
+    func contains(_ id: String) -> Bool {
+        ids.contains(id)
+    }
+
+    /// The episode after `id`; nil after the last, or for an episode not in the order.
+    func id(after id: String) -> String? {
+        ids(after: id).first
+    }
+
+    /// The episodes after `id`; none for an episode not in the order.
+    func ids(after id: String) -> ArraySlice<String> {
+        guard let index = ids.firstIndex(of: id) else { return [] }
+        return ids[(index + 1)...]
+    }
+
+    /// The episode before `id`; nil before the first, or for an episode not in the order.
+    func id(before id: String) -> String? {
+        guard let index = ids.firstIndex(of: id), index > 0 else { return nil }
+        return ids[index - 1]
     }
 }

@@ -1158,7 +1158,7 @@ struct PlaybackEdgeTests {
         let history = WatchHistory(file: FileManager.default.temporaryDirectory.appending(path: "Edges-\(UUID().uuidString).json"))
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { _, _ in nil }
         return PlayerModel(request: try .file(file), engine: engine, lease: EngineLease(),
-                           resolver: resolver, accounts: accounts, history: history, settings: settings) { _ in nil }
+                           resolver: resolver, accounts: accounts, history: history, settings: settings) { _, _ in nil }
     }
 
     private static func episode(_ id: String, _ number: Int) -> JellyfinItem {
@@ -1182,8 +1182,9 @@ struct PlaybackEdgeTests {
         let history: WatchHistory
     }
 
+    /// With `order`, the episodes play in it, from its first, as a show shuffled does.
     private func makeBinge(episodes count: Int, of file: URL, segments: [MediaSegment] = [], engine: AetherEngine,
-                           firstResumesAt resume: Double? = nil, length: Double? = nil,
+                           firstResumesAt resume: Double? = nil, length: Double? = nil, order: PlayOrder? = nil,
                            settings configure: (AppSettings) -> Void = { _ in }) throws -> Binge {
         var episodes = (1...count).map { Self.episode("e\($0)", $0) }
         if let resume, let length {
@@ -1198,9 +1199,15 @@ struct PlaybackEdgeTests {
         let resolver = PlaybackResolver(accounts: accounts, settings: settings, history: history) { id, _ in
             episodes.first { $0.id == id }.map { PlaybackResolver.DownloadedCopy(url: file, item: $0, segments: segments) }
         }
-        let model = PlayerModel(request: .item(episodes[0]), engine: engine, lease: EngineLease(),
-                                resolver: resolver, accounts: accounts, history: history, settings: settings) { episode in
-            episodes.firstIndex { $0.id == episode.id }.flatMap { $0 + 1 < episodes.count ? episodes[$0 + 1] : nil }
+        var request = PlaybackRequest.item(order.flatMap { order in episodes.first { $0.id == order.ids.first } } ?? episodes[0])
+        request.order = order
+        // As the downloads find the next downloaded episode: in the order, or else the show's.
+        let model = PlayerModel(request: request, engine: engine, lease: EngineLease(),
+                                resolver: resolver, accounts: accounts, history: history, settings: settings) { episode, order in
+            if let order, order.contains(episode.id) {
+                return order.id(after: episode.id).flatMap { id in episodes.first { $0.id == id } }
+            }
+            return episodes.firstIndex { $0.id == episode.id }.flatMap { $0 + 1 < episodes.count ? episodes[$0 + 1] : nil }
         }
         return Binge(model: model, settings: settings, history: history)
     }
@@ -1288,6 +1295,45 @@ struct PlaybackEdgeTests {
         try await waitUntil(seconds: 20) { model.item?.id == "e2" && model.status == .playing }
         #expect(model.item?.id == "e2")
         #expect(model.status == .playing)
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    /// A show shuffled: the countdown goes on to the order's next episode, not the show's, and
+    /// the episode it went on to carries on in the order.
+    @Test func aShuffledShowGoesOnInItsOwnOrder() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let order = PlayOrder(ids: ["e1", "e3", "e2"])
+        let model = try makeBinge(episodes: 3, of: file, engine: try AetherEngine(), order: order).model
+        try await playToTheEnd(model)
+        #expect(model.nextEpisode?.id == "e3")
+
+        try await waitUntil(seconds: 20) { model.item?.id == "e3" && model.status == .playing }
+        #expect(model.item?.id == "e3")
+        try await waitUntil { model.nextEpisode != nil }
+        #expect(model.nextEpisode?.id == "e2")
+
+        await model.close()
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
+    }
+
+    /// The order's last episode has nothing after it, though the show does: the end screen, not
+    /// the show's next.
+    @Test func aShuffledShowEndsAtItsOrdersLastEpisode() async throws {
+        let file = try await GeneratedVideo.write(seconds: 4)
+        let order = PlayOrder(ids: ["e2", "e1"])
+        let model = try makeBinge(episodes: 2, of: file, engine: try AetherEngine(), order: order).model
+        await model.start()
+        try await waitUntil { model.status == .playing && model.nextEpisode != nil }
+        #expect(model.item?.id == "e2")
+        #expect(model.nextEpisode?.id == "e1")
+
+        await model.playNextEpisode()
+        try await waitUntil { model.item?.id == "e1" && model.status == .playing }
+        try await waitUntil { model.status == .ended }
+        #expect(model.nextEpisode == nil)
+        #expect(model.showsEndScreen)
 
         await model.close()
         try? FileManager.default.removeItem(at: file.deletingLastPathComponent())

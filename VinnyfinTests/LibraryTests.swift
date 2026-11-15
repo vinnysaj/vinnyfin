@@ -546,11 +546,13 @@ struct SearchTests {
     }
 
     @Test func numbersAnEpisodeShortForItsSearchCard() {
-        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#))
+        #expect(Samples.item(#"{"Id":"e","Name":"The Night Ferry","Type":"Episode","ParentIndexNumber":1,"IndexNumber":1}"#).shortEpisodeCode
             == "S1, E1")
-        #expect(LandscapeCard.shortCode(of: Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#))
+        #expect(Samples.item(#"{"Id":"e","Name":"Two","Type":"Episode","ParentIndexNumber":2,"IndexNumber":2,"IndexNumberEnd":3}"#).shortEpisodeCode
             == "S2, E2–3")
-        #expect(LandscapeCard.shortCode(of: Samples.movie) == nil)
+        #expect(Samples.item(#"{"Id":"e","Name":"Behind the Scenes","Type":"Episode","ParentIndexNumber":0,"IndexNumber":1}"#).shortEpisodeCode
+            == "Specials, E1")
+        #expect(Samples.movie.shortEpisodeCode == nil)
     }
 
     // MARK: Hints

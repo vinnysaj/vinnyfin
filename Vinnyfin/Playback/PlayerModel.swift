@@ -259,8 +259,9 @@ final class PlayerModel: Identifiable {
     @ObservationIgnored private let accounts: AccountStore
     @ObservationIgnored private let history: WatchHistory
     @ObservationIgnored private let settings: AppSettings
-    /// Finds a downloaded episode to play next when the server can't be reached.
-    @ObservationIgnored private let downloadedEpisode: (_ after: JellyfinItem) -> JellyfinItem?
+    /// Finds a downloaded episode to play next when the server can't be reached: the next of the
+    /// order the playback goes through, when it has one, else of the show's.
+    @ObservationIgnored private let downloadedEpisode: (_ after: JellyfinItem, _ order: PlayOrder?) -> JellyfinItem?
     /// Told when playback starts or stops being underway; a new model starts out underway.
     @ObservationIgnored var onUnderwayChanged: ((Bool) -> Void)?
     /// Told once, when the player closes for good.
@@ -366,7 +367,7 @@ final class PlayerModel: Identifiable {
         accounts: AccountStore,
         history: WatchHistory,
         settings: AppSettings,
-        downloadedEpisode: @escaping (JellyfinItem) -> JellyfinItem?
+        downloadedEpisode: @escaping (JellyfinItem, PlayOrder?) -> JellyfinItem?
     ) {
         self.request = request
         self.engine = engine
@@ -452,13 +453,15 @@ final class PlayerModel: Identifiable {
         await switchTo(episode, inARow: episode.id == nextEpisode?.id)
     }
 
-    /// `inARow`: it's the next episode, moved on to from this one.
+    /// `inARow`: it's the next episode, moved on to from this one. An episode of the order the
+    /// playback goes through carries on in it, from that episode's place.
     private func switchTo(_ episode: JellyfinItem, inARow: Bool) async {
         finishSession(status == .ended ? .reachedEnd : .left(toNextEpisode: episode.id == nextEpisode?.id))
         startsPaused = false
         startedInARow = inARow
         var next = PlaybackRequest.item(episode)
         if preparedNext?.id == episode.id { next.loadedItem = preparedNext }
+        if let order = request.order, order.contains(episode.id) { next.order = order }
         // Holds the last picture until the episode's first, where the engine can.
         engine.prepareForItemReplacement()
         await load(next)
@@ -734,6 +737,7 @@ final class PlayerModel: Identifiable {
     private func loadExtras(for resolved: ResolvedPlayback, includingNextEpisode: Bool) async {
         guard let item = resolved.item else { return }
         let version = resolved.mediaSource?.versionItemId ?? item.id
+        let order = request.order.flatMap { $0.contains(item.id) ? $0 : nil }
         var missing: [String] = []
         var foundNext = false
         var nextFailed = false
@@ -766,7 +770,11 @@ final class PlayerModel: Identifiable {
             }
             if includingNextEpisode, item.isEpisode, let seriesId = item.seriesId {
                 do {
-                    let next = try await client.episode(after: item.id, seriesId: seriesId, userId: account.userId)
+                    let next = if let order {
+                        try await Self.episode(order.id(after: item.id), client: client, userId: account.userId)
+                    } else {
+                        try await client.episode(after: item.id, seriesId: seriesId, userId: account.userId)
+                    }
                     if current?.historyKey == resolved.historyKey { nextEpisode = next }
                     foundNext = true
                 } catch is CancellationError {
@@ -779,7 +787,7 @@ final class PlayerModel: Identifiable {
         }
         guard isPlaying(resolved), includingNextEpisode else { return }
         if item.isEpisode, !foundNext {
-            nextEpisode = downloadedEpisode(item)
+            nextEpisode = downloadedEpisode(item, order)
             if nextEpisode == nil, nextFailed { missing.append("the next episode") }
         }
         lookedForNextEpisode = true
@@ -1417,7 +1425,8 @@ final class PlayerModel: Identifiable {
         await play(nextEpisode)
     }
 
-    /// The episode before this one; the start of this one when there's none before it.
+    /// The episode before this one, in the order the playback goes through when it has one, else
+    /// in the show's; the start of this one when there's none before it.
     func playPreviousEpisode() async {
         guard let item, item.isEpisode, let seriesId = item.seriesId, let client = accounts.client,
               let account = accounts.account else {
@@ -1425,7 +1434,12 @@ final class PlayerModel: Identifiable {
             return
         }
         do {
-            if let previous = try await client.episode(before: item.id, seriesId: seriesId, userId: account.userId) {
+            let previous = if let order = request.order, order.contains(item.id) {
+                try await Self.episode(order.id(before: item.id), client: client, userId: account.userId)
+            } else {
+                try await client.episode(before: item.id, seriesId: seriesId, userId: account.userId)
+            }
+            if let previous {
                 await play(previous)
             } else {
                 seek(to: 0)
@@ -1435,6 +1449,14 @@ final class PlayerModel: Identifiable {
             Self.log.notice("Couldn't find the episode before \(item.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             show("Couldn't find the previous episode.", .info, for: 6)
         }
+    }
+
+    /// The episode `id` of an order, as lists have it; nil for none.
+    private static func episode(_ id: String?, client: JellyfinClient, userId: String) async throws -> JellyfinItem? {
+        guard let id else { return nil }
+        var query = JellyfinClient.ItemQuery(types: ["Episode"])
+        query.fields = JellyfinClient.listFields
+        return try await client.items(userId: userId, query, inOrder: [id]).first
     }
 
     // MARK: Picture outside the app

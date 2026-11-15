@@ -67,6 +67,7 @@ struct ItemDetailView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(ServerReachability.self) private var reachability
     #if !os(tvOS)
     @Environment(DownloadManager.self) private var downloads
     #endif
@@ -136,7 +137,7 @@ struct ItemDetailView: View {
                     if isGone {
                         TitleGoneNotice(playsDownload: isDownloaded)
                             .padding(.horizontal, Metrics.edge)
-                    } else if let loadError {
+                    } else if let loadError, !reachability.isOutOfReach {
                         LoadFailureNotice(loadError) { Task { await load() } }
                             .padding(.horizontal, Metrics.edge)
                     }
@@ -214,6 +215,10 @@ struct ItemDetailView: View {
         // Siri knows which title the page is about: "play this", "download this".
         .appEntityIdentifier(EntityIdentifier.title(page))
         .task(id: page.id) { await load() }
+        // The server answering again, after it was out of reach.
+        .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+            if !isOutOfReach { Task { await load() } }
+        }
         // A playback that ended moved where the title resumes, or finished it.
         .onChange(of: player.endedPlayback) {
             related.similar = player.endedPlayback.applied(to: related.similar)
@@ -368,11 +373,17 @@ struct ItemDetailView: View {
     }
 
     /// The details and what's around the title: titles like it, its genres and its collections.
-    /// Refreshing asks for both again, and has the season row reload its episodes.
+    /// Refreshing asks for both again, and has the season row reload its episodes. While the server
+    /// is out of reach the page keeps what it shows, and loads once the server answers; refreshing
+    /// asks it whether it does.
     private func load(refreshing: Bool = false) async {
+        guard !reachability.isOutOfReach else {
+            if refreshing { await reachability.check() }
+            return
+        }
         if refreshing { reloads += 1 }
         await loadDetail()
-        guard let session, !isGone, refreshing || related.titleId != page.titleId else { return }
+        guard let session, !isGone, !reachability.isOutOfReach, refreshing || related.titleId != page.titleId else { return }
         do {
             related = try await RelatedTitles.load(for: detail ?? page, client: session.client, userId: session.userId,
                                                    length: MoreLikeThisShelf.length)
@@ -384,7 +395,7 @@ struct ItemDetailView: View {
     }
 
     private func loadDetail() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         let id = page.id
         // Only this title's details, so a load that fails can't leave another title's actions.
         if detail?.id != id { detail = nil }
@@ -402,6 +413,8 @@ struct ItemDetailView: View {
         } catch {
             guard !error.isCancellation, id == page.id else { return }
             loadError = LoadFailure("Couldn't Load the Details", error: error)
+            // Out of reach, the page says so under Play rather than this.
+            await reachability.check()
         }
     }
 }

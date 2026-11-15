@@ -14,6 +14,7 @@ struct SeriesView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AppMessages.self) private var messages
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(ServerReachability.self) private var reachability
     #if !os(tvOS)
     @Environment(SmartDownloads.self) private var smartDownloads
     @Environment(DownloadManager.self) private var downloads
@@ -82,7 +83,7 @@ struct SeriesView: View {
                     if isGone {
                         TitleGoneNotice()
                             .padding(.horizontal, Metrics.edge)
-                    } else if let loadError {
+                    } else if let loadError, !reachability.isOutOfReach {
                         LoadFailureNotice(loadError) { Task { await retry() } }
                             .padding(.horizontal, Metrics.edge)
                     }
@@ -150,6 +151,10 @@ struct SeriesView: View {
         .appEntityIdentifier(EntityIdentifier.title(series))
         .task(id: series.id) { await load() }
         .task(id: seasonId) { await loadEpisodes() }
+        // The server answering again, after it was out of reach.
+        .onChange(of: reachability.isOutOfReach) { _, isOutOfReach in
+            if !isOutOfReach { Task { await retry() } }
+        }
         .onChange(of: player.endedPlayback) {
             related.similar = player.endedPlayback.applied(to: related.similar)
             Task { await reloadWatchState() }
@@ -349,6 +354,12 @@ struct SeriesView: View {
             #if os(tvOS)
             .focusSection()
             #endif
+        } else if reachability.isOutOfReach {
+            Label("The episodes show when vinnyfin can reach \(session?.account.serverTitle ?? "the server") again.",
+                  systemImage: "wifi.slash")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, Metrics.edge)
         } else if loadError == nil {
             ProgressView().frame(maxWidth: .infinity)
         }
@@ -381,8 +392,9 @@ struct SeriesView: View {
 
     // MARK: Loading
 
+    /// While the server is out of reach, the page keeps what it shows, and loads once it answers.
     private func load() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         loadError = nil
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
@@ -405,6 +417,9 @@ struct SeriesView: View {
         } catch {
             guard !error.isCancellation else { return }
             loadError = LoadFailure("Couldn't Load the Show", error: error)
+            // Out of reach, the page waits for the server rather than say this.
+            await reachability.check()
+            if reachability.isOutOfReach { return }
         }
         do {
             related = try await RelatedTitles.load(for: detail ?? series, client: session.client, userId: session.userId,
@@ -419,7 +434,7 @@ struct SeriesView: View {
     /// The season picked's episodes: at once if they loaded before, then as they are now. Until
     /// they come, the last season's stay listed, dimmed, so the page keeps its place.
     private func loadEpisodes() async {
-        guard let session, let seasonId else { return }
+        guard let session, let seasonId, !reachability.isOutOfReach else { return }
         selection.removeAll()
         if episodesSeasonId != seasonId, let known = loaded[seasonId] { show(known, of: seasonId) }
         do {
@@ -448,7 +463,7 @@ struct SeriesView: View {
     /// state, where it goes on, the seasons' watched states, and the season's episodes, kept on
     /// screen and selected as they are while they load.
     private func reloadWatchState() async {
-        guard let session else { return }
+        guard let session, !reachability.isOutOfReach else { return }
         do {
             async let detail = session.client.item(id: series.id, userId: session.userId)
             async let nextUp = session.client.upNext(seriesId: series.id, userId: session.userId)
@@ -488,8 +503,13 @@ struct SeriesView: View {
         if seasonId == self.seasonId { show(found, of: seasonId) }
     }
 
-    /// Pulled down: all of the page again, the season's episodes as they are now too.
+    /// Pulled down: all of the page again, the season's episodes as they are now too. While the
+    /// server is out of reach, whether it answers now.
     private func refresh() async {
+        guard !reachability.isOutOfReach else {
+            await reachability.check()
+            return
+        }
         await load()
         guard let session, !isGone else { return }
         do {

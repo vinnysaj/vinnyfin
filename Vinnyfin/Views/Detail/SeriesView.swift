@@ -714,7 +714,7 @@ private struct EpisodeRow: View {
                         } icon: {
                             Image(systemName: "circle.fill")
                                 .imageScale(.small)
-                                .foregroundStyle(.tint)
+                                .foregroundStyle(.accentMark)
                                 .accessibilityHidden(true)
                         }
                         .labelStyle(.titleAndIcon)

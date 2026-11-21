@@ -46,7 +46,7 @@ struct DetailHero<Actions: View>: View {
             }
             .heroWords()
             .padding(.horizontal, Metrics.edge)
-            .padding(.bottom, 8 + HeroBackdrop.blendHeight(in: colorScheme))
+            .padding(.bottom, 8 + HeroBackdrop.blendHeight(in: colorScheme) + HeroBackdrop.glassRoom)
             .frame(maxWidth: Self.columnWidth, alignment: .leading)
             // Taller than the artwork's height when the title and actions need it, so none of them
             // is squeezed, or goes under the bars over the page's top.
@@ -271,9 +271,10 @@ private struct CrossfadingPicture: View {
 /// A hero's picture, the page's width and the hero's height, under a fade that keeps the words
 /// over it legible in either appearance: down into the dark the page has in dark appearance,
 /// behind the title, facts and buttons. In light appearance that dark meets the page's own color
-/// at the hero's foot, under the words, in the `blendHeight(in:)` the hero leaves there. On Vision
-/// Pro the picture fades into the window's glass instead. Pulled down past the top of the page,
-/// the picture stretches up from its foot to fill the space. Another picture fades in over it.
+/// at the hero's foot, under the words, in the `blendHeight(in:)` the hero leaves there. On Apple
+/// TV the dark holds behind the buttons and goes solid only in the `glassRoom` under them. On
+/// Vision Pro the picture fades into the window's glass instead. Pulled down past the top of the
+/// page, the picture stretches up from its foot to fill the space. Another picture fades in over it.
 struct HeroBackdrop: View {
     let url: URL?
     /// Gray stands in, under the fade, for a picture that's loading or can't load; with no symbol
@@ -281,7 +282,8 @@ struct HeroBackdrop: View {
     var fillsEmpty = true
     /// Where the fade starts, as a share of the height.
     var start: Double
-    /// How dark it is at `location`, as a share of the height; at the foot it's solid.
+    /// How dark it is at `location`, as a share of the height; at the foot it's solid. On Apple TV
+    /// it stays this dark down to the `glassRoom`, which takes it to solid.
     var middle: Double
     var location: Double
 
@@ -305,6 +307,10 @@ struct HeroBackdrop: View {
             .overlay {
                 VStack(spacing: 0) {
                     fade(Color.pageBackground).environment(\.colorScheme, .dark)
+                    #if os(tvOS)
+                    foot(Color.pageBackground).environment(\.colorScheme, .dark)
+                        .frame(height: Self.glassRoom)
+                    #endif
                     blend.frame(height: Self.blendHeight(in: colorScheme))
                 }
             }
@@ -335,9 +341,10 @@ struct HeroBackdrop: View {
             }
     }
 
-    /// Clear down to `start`, `middle` of `stage` at `location`, then `stage`. With Increase
-    /// Contrast it starts sooner and goes all but solid behind the words, so they read on the
-    /// dark rather than on the picture. On Vision Pro the same shape fades the picture out.
+    /// Clear down to `start`, `middle` of `stage` at `location`, then `stage`; on Apple TV, still
+    /// `middle` at the bottom, behind the buttons, for the `foot` under them to finish. With
+    /// Increase Contrast it starts sooner and goes all but solid behind the words, so they read on
+    /// the dark rather than on the picture. On Vision Pro the same shape fades the picture out.
     private func fade(_ stage: Color) -> LinearGradient {
         let stops: [Gradient.Stop]
         #if os(visionOS)
@@ -358,10 +365,29 @@ struct HeroBackdrop: View {
         ] : [
             .init(color: .clear, location: start),
             .init(color: stage.opacity(middle), location: location),
-            .init(color: stage, location: 1),
+            .init(color: Self.glassRoom > 0 ? stage.opacity(middle) : stage, location: 1),
         ]
         #endif
         return LinearGradient(stops: stops, startPoint: .top, endPoint: .bottom)
+    }
+
+    #if os(tvOS)
+    /// The `glassRoom`: the dark going on from where the fade leaves it to `stage`, which it
+    /// already is with Increase Contrast.
+    private func foot(_ stage: Color) -> some View {
+        LinearGradient(colors: [stage.opacity(contrast == .increased ? 1 : middle), stage], startPoint: .top, endPoint: .bottom)
+    }
+    #endif
+
+    /// The picture a hero leaves under its buttons on Apple TV, for their Liquid Glass to show
+    /// through. With the buttons at the foot, on the solid dark the fade ends in, the glass has
+    /// nothing to show and reads as a flat gray platter.
+    static var glassRoom: CGFloat {
+        #if os(tvOS)
+        100
+        #else
+        0
+        #endif
     }
 
     /// The room a hero leaves at its foot, under its words, for its dark to meet the page's color:

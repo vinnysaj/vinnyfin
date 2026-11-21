@@ -602,7 +602,7 @@ private struct HeroBanner: View {
             .environment(\.colorScheme, .dark)
             .heroWords()
             .padding(.horizontal, Metrics.edge)
-            .padding(.bottom, 6 + HeroBackdrop.blendHeight(in: colorScheme))
+            .padding(.bottom, 6 + HeroBackdrop.blendHeight(in: colorScheme) + HeroBackdrop.glassRoom)
             // Taller than the artwork's height when the words need it, so none of them is
             // squeezed, or goes under the bars over the page's top.
             .fixedSize(horizontal: false, vertical: true)
@@ -1164,7 +1164,7 @@ private struct HeroPlaceholder: View {
         Color.clear
             .frame(height: 1)
             .heroWords()
-            .padding(.bottom, HeroBackdrop.blendHeight(in: colorScheme))
+            .padding(.bottom, HeroBackdrop.blendHeight(in: colorScheme) + HeroBackdrop.glassRoom)
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(fullHeight, visible: visibleHeight), alignment: .bottom)
             .background {
                 HeroBackdrop(url: nil, fillsEmpty: false, from: 0.3, middle: 0.7, at: 0.72)

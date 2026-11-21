@@ -125,6 +125,20 @@ struct PlatformGlassProminentButtonStyle: PrimitiveButtonStyle {
     }
 }
 
+extension ShapeStyle where Self == AnyShapeStyle {
+    /// The accent green, for the few marks kept in it: the state a title's Watched and Favorite
+    /// show, and the episode up next. Apple TV has no app-wide accent, so its text and controls
+    /// stay white as across the system and green shows only here. Elsewhere this is the tint,
+    /// which on the Mac can be the person's own accent color.
+    static var accentMark: AnyShapeStyle {
+        #if os(tvOS)
+        AnyShapeStyle(Color("AccentColor"))
+        #else
+        AnyShapeStyle(.tint)
+        #endif
+    }
+}
+
 extension PrimitiveButtonStyle where Self == PlatformGlassButtonStyle {
     static var platformGlass: Self {
         #if os(visionOS)

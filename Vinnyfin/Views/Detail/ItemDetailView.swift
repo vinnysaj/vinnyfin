@@ -712,7 +712,7 @@ private struct StateSymbol: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .foregroundStyle(isOn ? AnyShapeStyle(.tint) : AnyShapeStyle(.foreground))
+            .foregroundStyle(isOn ? .accentMark : AnyShapeStyle(.foreground))
             .opacity(isEnabled ? 1 : 0.45)
     }
 }

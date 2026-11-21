@@ -298,7 +298,7 @@ struct HomeView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
+        .noticeBackground()
         .padding(.horizontal, Metrics.edge)
     }
 
@@ -1167,8 +1167,14 @@ private struct HeroPlaceholder: View {
             .padding(.bottom, HeroBackdrop.blendHeight(in: colorScheme) + HeroBackdrop.glassRoom)
             .frame(maxWidth: .infinity, minHeight: HeroBackdrop.height(fullHeight, visible: visibleHeight), alignment: .bottom)
             .background {
+                #if os(tvOS)
+                // The gray in the picture, which fades out at its foot into the page: under it,
+                // the gray would stop short at the foot instead.
+                HeroBackdrop(url: nil, from: 0.3, middle: 0.7, at: 0.72)
+                #else
                 HeroBackdrop(url: nil, fillsEmpty: false, from: 0.3, middle: 0.7, at: 0.72)
                     .background(.quaternary.opacity(0.5))
+                #endif
             }
             .onGeometryChange(for: CGFloat.self) { $0.bounds(of: .scrollView)?.height ?? 0 } action: { visibleHeight = $0 }
             .accessibilityHidden(true)

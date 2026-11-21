@@ -57,8 +57,8 @@ extension SeasonPicker where Menu == EmptyView {
     }
 }
 
-/// A season's chip. On Apple TV the white platter is focus's alone, as across the system, and
-/// the season chosen has its name in bold over a dot. Elsewhere the season chosen is filled.
+/// A season's chip. On Apple TV it's glass, white glass being focus's alone, as across the system,
+/// and the season chosen has its name in bold over a dot. Elsewhere the season chosen is filled.
 /// Either way the mark slides to the chip chosen.
 struct SeasonChipStyle: ButtonStyle {
     let isSelected: Bool
@@ -74,23 +74,18 @@ struct SeasonChipStyle: ButtonStyle {
             .font(.subheadline.weight(isSelected ? .bold : .medium))
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            // Focused, the page's color on the platter's.
-            .foregroundStyle(isFocused ? AnyShapeStyle(Color.pageBackground) : AnyShapeStyle(.primary))
-            .background {
-                if isFocused {
-                    Capsule().fill(.primary)
-                } else {
-                    Color.clear.platformGlass(in: .capsule)
-                }
-            }
+            .foregroundStyle(isFocused ? AnyShapeStyle(.black) : AnyShapeStyle(.primary))
+            .glassEffect(isFocused ? .focused : .regular, in: .capsule)
             .overlay(alignment: .bottom) {
                 if isSelected {
+                    // The page's text color, not the chip's, which goes dark on its glass under focus.
                     Circle()
-                        .fill(.primary)
+                        .fill(Color.primary)
                         .frame(width: 8, height: 8)
                         .matchedGeometryEffect(id: "selected", in: mark)
-                        // Under the chip, clear of it as focus lifts it.
-                        .alignmentGuide(.bottom) { $0[.top] - 10 }
+                        // Under the chip, clear of it as focus lifts it: an alignment guide here
+                        // goes unheeded, and the dot sits on the chip's edge, under its glass.
+                        .offset(y: 18)
                 }
             }
             // With Reduce Motion, focus lifts it with its shadow alone.

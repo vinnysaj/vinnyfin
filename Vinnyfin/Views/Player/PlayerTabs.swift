@@ -71,7 +71,8 @@ struct PlayerTabs: View {
     }
 }
 
-/// A tab's name, lit with focus and marked while it's open, as the system player's are.
+/// A tab's name, on white glass with focus and on clear glass while it's open, as the system
+/// player's are.
 private struct TabStyle: ButtonStyle {
     let isOpen: Bool
     @Environment(\.isFocused) private var isFocused
@@ -83,8 +84,7 @@ private struct TabStyle: ButtonStyle {
             .padding(.horizontal, 22)
             .padding(.vertical, 10)
             .foregroundStyle(isFocused ? AnyShapeStyle(.black) : isOpen ? AnyShapeStyle(.white) : AnyShapeStyle(.white.opacity(0.6)))
-            .background(isFocused ? AnyShapeStyle(.white) : isOpen ? AnyShapeStyle(.white.opacity(0.2)) : AnyShapeStyle(.clear),
-                        in: .capsule)
+            .glassEffect(isFocused ? .focused : isOpen ? .regular : .identity, in: .capsule)
             .scaleEffect(isFocused && !reduceMotion ? 1.06 : 1)
             .animation(.easeOut(duration: 0.15), value: isFocused)
     }

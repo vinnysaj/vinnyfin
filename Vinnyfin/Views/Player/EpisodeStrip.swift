@@ -122,6 +122,8 @@ struct EpisodeStrip<Accessory: View>: View {
                 .buttonStyle(.borderless)
                 .menuIndicator(.hidden)
                 .fixedSize()
+                #elseif os(tvOS)
+                .buttonStyle(.platformGlass)
                 #endif
                 .accessibilityIdentifier("episodes.season")
             } else {

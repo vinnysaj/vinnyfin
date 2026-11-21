@@ -148,7 +148,7 @@ struct SeriesView: View {
         }
         #endif
         .refreshable { await refresh() }
-        .pageBackground()
+        .titlePageBackground()
         .screenTitle(series.name)
         .inlineNavigationTitle()
         .heroScrollEdge()

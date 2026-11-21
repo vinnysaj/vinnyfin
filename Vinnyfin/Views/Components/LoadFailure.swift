@@ -81,7 +81,7 @@ struct LoadFailureNotice<More: View>: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
+        .noticeBackground()
         .accessibilityElement(children: .contain)
         #if os(tvOS)
         // Focus moving down the page lands on its buttons from anywhere across it.

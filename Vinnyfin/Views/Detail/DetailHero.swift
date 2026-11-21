@@ -70,6 +70,9 @@ struct DetailHero<Actions: View>: View {
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.bounds(of: .scrollView)?.height ?? 0 } action: { visibleHeight = $0 }
+        #if os(tvOS)
+        .preference(key: PageArtworkKey.self, value: backdropURL)
+        #endif
     }
 
     /// At the accessibility sizes the facts and actions go under the artwork rather than over it,
@@ -272,9 +275,11 @@ private struct CrossfadingPicture: View {
 /// over it legible in either appearance: down into the dark the page has in dark appearance,
 /// behind the title, facts and buttons. In light appearance that dark meets the page's own color
 /// at the hero's foot, under the words, in the `blendHeight(in:)` the hero leaves there. On Apple
-/// TV the dark holds behind the buttons and goes solid only in the `glassRoom` under them. On
-/// Vision Pro the picture fades into the window's glass instead. Pulled down past the top of the
-/// page, the picture stretches up from its foot to fill the space. Another picture fades in over it.
+/// TV the dark holds behind the buttons, and in the `glassRoom` under them the picture fades out
+/// into what's behind the page: its color, or on a title's page the backdrop blurred
+/// (`titlePageBackground()`). On Vision Pro the picture fades into the window's glass instead.
+/// Pulled down past the top of the page, the picture stretches up from its foot to fill the space.
+/// Another picture fades in over it.
 struct HeroBackdrop: View {
     let url: URL?
     /// Gray stands in, under the fade, for a picture that's loading or can't load; with no symbol
@@ -283,7 +288,7 @@ struct HeroBackdrop: View {
     /// Where the fade starts, as a share of the height.
     var start: Double
     /// How dark it is at `location`, as a share of the height; at the foot it's solid. On Apple TV
-    /// it stays this dark down to the `glassRoom`, which takes it to solid.
+    /// it stays this dark down to the foot.
     var middle: Double
     var location: Double
 
@@ -303,14 +308,26 @@ struct HeroBackdrop: View {
             .clipped()
             #if os(visionOS)
             .mask { fade(Color.black).environment(\.colorScheme, .dark) }
+            #elseif os(tvOS)
+            .overlay {
+                VStack(spacing: 0) {
+                    fade(Color.pageBackground)
+                    Color.pageBackground.opacity(contrast == .increased ? 1 : middle)
+                        .frame(height: footHeight)
+                }
+                .environment(\.colorScheme, .dark)
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: footHeight)
+                }
+            }
             #else
             .overlay {
                 VStack(spacing: 0) {
                     fade(Color.pageBackground).environment(\.colorScheme, .dark)
-                    #if os(tvOS)
-                    foot(Color.pageBackground).environment(\.colorScheme, .dark)
-                        .frame(height: Self.glassRoom)
-                    #endif
                     blend.frame(height: Self.blendHeight(in: colorScheme))
                 }
             }
@@ -342,9 +359,9 @@ struct HeroBackdrop: View {
     }
 
     /// Clear down to `start`, `middle` of `stage` at `location`, then `stage`; on Apple TV, still
-    /// `middle` at the bottom, behind the buttons, for the `foot` under them to finish. With
-    /// Increase Contrast it starts sooner and goes all but solid behind the words, so they read on
-    /// the dark rather than on the picture. On Vision Pro the same shape fades the picture out.
+    /// `middle` at the bottom, behind the buttons, above the foot. With Increase Contrast it starts
+    /// sooner and goes all but solid behind the words, so they read on the dark rather than on the
+    /// picture. On Vision Pro the same shape fades the picture out.
     private func fade(_ stage: Color) -> LinearGradient {
         let stops: [Gradient.Stop]
         #if os(visionOS)
@@ -372,10 +389,10 @@ struct HeroBackdrop: View {
     }
 
     #if os(tvOS)
-    /// The `glassRoom`: the dark going on from where the fade leaves it to `stage`, which it
-    /// already is with Increase Contrast.
-    private func foot(_ stage: Color) -> some View {
-        LinearGradient(colors: [stage.opacity(contrast == .increased ? 1 : middle), stage], startPoint: .top, endPoint: .bottom)
+    /// Where the picture fades out on Apple TV: the `glassRoom` under the buttons, and in light
+    /// appearance the room for the dark to meet the page's color.
+    private var footHeight: CGFloat {
+        Self.glassRoom + Self.blendHeight(in: colorScheme)
     }
     #endif
 
@@ -411,6 +428,59 @@ struct HeroBackdrop: View {
         #endif
     }
 }
+
+extension View {
+    /// The page's color behind a title's page, as `pageBackground()`. On Apple TV the title's
+    /// backdrop is under it too, blurred and darkened, staying put as the page scrolls, as in the
+    /// system's TV app: the page's glass has its colors to show through, where over the page's
+    /// black it would read as flat gray. The hero names the backdrop; with Increase Contrast
+    /// there's none, so text below the hero reads on the page's color.
+    func titlePageBackground() -> some View {
+        #if os(tvOS)
+        modifier(TitlePageBackground())
+        #else
+        pageBackground()
+        #endif
+    }
+}
+
+#if os(tvOS)
+/// The backdrop a title's hero shows, for the page behind it (`titlePageBackground()`).
+private struct PageArtworkKey: PreferenceKey {
+    static let defaultValue: URL? = nil
+
+    static func reduce(value: inout URL?, nextValue: () -> URL?) {
+        value = value ?? nextValue()
+    }
+}
+
+private struct TitlePageBackground: ViewModifier {
+    /// The last backdrop the hero named. It names none while it waits to know whether an episode's
+    /// still will do, and none once it has scrolled out of a lazy stack, and the page keeps its
+    /// picture through both.
+    @State private var artwork: URL?
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        content
+            .onPreferenceChange(PageArtworkKey.self) { url in
+                if let url { artwork = url }
+            }
+            .background {
+                ZStack {
+                    Color.pageBackground
+                    if contrast != .increased {
+                        CrossfadingPicture(url: artwork, fillsEmpty: false)
+                            .clipped()
+                            .blur(radius: 60, opaque: true)
+                            .overlay(Color.pageBackground.opacity(0.7))
+                    }
+                }
+                .ignoresSafeArea()
+            }
+    }
+}
+#endif
 
 /// "S01E02 · 2024 · PG-13 · 52 min · ★ 7.8 · Drama", each fact whole on a line, and where the
 /// line breaks no dot or comma at either end of it. On a narrow screen, only the first genre.
@@ -609,7 +679,7 @@ struct OverviewText: View {
                 #if os(tvOS)
                 if isTruncated {
                     Button { showsAll = true } label: { text(overview) }
-                        .buttonStyle(.plain)
+                        .buttonStyle(OverviewButtonStyle())
                         .accessibilityHint("Shows all of it")
                         .sheet(isPresented: $showsAll) { FullOverview(item: item, overview: overview) }
                 } else {
@@ -685,6 +755,29 @@ struct OverviewText: View {
 }
 
 #if os(tvOS)
+/// The overview cut short, as the button that opens the rest: bare until focus, then on white
+/// glass, lifted a little, as the system's glass buttons are. The glass reaches past the text, which
+/// stays where it is, in line with what's around it.
+private struct OverviewButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(Self.margin)
+            .foregroundStyle(isFocused ? AnyShapeStyle(.black) : AnyShapeStyle(.primary))
+            .glassEffect(isFocused ? .focused : .identity, in: .rect(cornerRadius: 24))
+            .padding(-Self.margin)
+            // With Reduce Motion, focus shows in the glass and its shadow alone.
+            .scaleEffect(configuration.isPressed ? 0.99 : isFocused && !reduceMotion ? 1.03 : 1)
+            .shadow(color: .black.opacity(isFocused ? 0.3 : 0), radius: 12, y: 6)
+            .animation(.easeOut(duration: 0.15), value: isFocused)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+
+    private static var margin: CGFloat { 20 }
+}
+
 /// All of a title's overview, over its page.
 private struct FullOverview: View {
     let item: JellyfinItem

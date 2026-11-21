@@ -41,6 +41,10 @@ struct SpeedChips: View {
                 chip(rate)
             }
         }
+        #if os(tvOS)
+        // Room for the dot under the speed playing.
+        .padding(.bottom, 18)
+        #endif
         .dynamicTypeSize(...DynamicTypeSize.large)
     }
 
@@ -90,7 +94,8 @@ struct SpeedChips: View {
 
 /// A speed's chip, lit when it's the speed, like a season's chip on a show's page but closer cut,
 /// so every speed fits across a phone held upright. A finger's height to tap, though drawn shorter.
-/// The subtitles' timing steps are chips too.
+/// On Apple TV it's glass, white glass being focus's alone as on a season's chip, and the speed
+/// playing is in bold over a dot. The subtitles' timing steps are chips too.
 struct SpeedChipStyle: ButtonStyle {
     let isSelected: Bool
     #if os(tvOS)
@@ -99,32 +104,43 @@ struct SpeedChipStyle: ButtonStyle {
     #endif
 
     func makeBody(configuration: Configuration) -> some View {
+        #if os(tvOS)
+        configuration.label
+            .font(.subheadline.weight(isSelected ? .bold : .semibold))
+            .monospacedDigit()
+            .padding(.horizontal, Self.padding)
+            .padding(.vertical, 8)
+            .foregroundStyle(isFocused ? AnyShapeStyle(.black) : AnyShapeStyle(.primary))
+            .glassEffect(isFocused ? .focused : .regular, in: .capsule)
+            .overlay(alignment: .bottom) {
+                if isSelected {
+                    // White, not the chip's title color, which goes dark on its glass under focus;
+                    // nor `Color.primary`, which on the panel's glass comes out a dim gray.
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 8, height: 8)
+                        // Under the chip, clear of it as focus lifts it: an alignment guide here
+                        // goes unheeded, and the dot sits on the chip's edge, under its glass.
+                        .offset(y: 18)
+                }
+            }
+            // With Reduce Motion, focus lifts it with its shadow alone.
+            .scaleEffect(isFocused && !reduceMotion ? 1.12 : 1)
+            .shadow(radius: isFocused ? 12 : 0)
+            .animation(.easeOut(duration: 0.15), value: isFocused)
+            .opacity(configuration.isPressed ? 0.7 : 1)
+        #else
         configuration.label
             .font(.subheadline.weight(.semibold))
             .monospacedDigit()
             .padding(.horizontal, Self.padding)
             .padding(.vertical, 8)
             .foregroundStyle(isSelected ? AnyShapeStyle(.black) : AnyShapeStyle(.primary))
-            .background(fill, in: .capsule)
-            #if os(tvOS)
-            // With Reduce Motion, focus lifts it with its shadow alone.
-            .scaleEffect(isFocused && !reduceMotion ? 1.12 : 1)
-            .shadow(radius: isFocused ? 12 : 0)
-            .animation(.easeOut(duration: 0.15), value: isFocused)
-            #else
+            .background(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.quaternary), in: .capsule)
             .padding(.vertical, 4)
             .contentShape(.rect)
-            #endif
             .opacity(configuration.isPressed ? 0.7 : 1)
-    }
-
-    /// The speed lit white; on Apple TV the chip with focus brighter than the rest.
-    private var fill: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(.white) }
-        #if os(tvOS)
-        if isFocused { return AnyShapeStyle(.white.opacity(0.35)) }
         #endif
-        return AnyShapeStyle(.quaternary)
     }
 
     private static var padding: CGFloat {

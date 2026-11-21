@@ -49,6 +49,9 @@ struct SearchLanding: View {
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Button("Clear", action: forgetAll)
+                    #if os(tvOS)
+                    .buttonStyle(.platformGlass)
+                    #endif
                     .accessibilityLabel("Clear Recent Searches")
                     .accessibilityIdentifier("search.clearRecents")
             }

@@ -153,7 +153,25 @@ extension PrimitiveButtonStyle where Self == PlatformGlassProminentButtonStyle {
     static var platformGlassProminent: Self { PlatformGlassProminentButtonStyle() }
 }
 
+#if os(tvOS)
+extension Glass {
+    /// The glass of a control with focus that the app draws itself: white, as the system's glass
+    /// buttons turn under focus, with the control's title dark on it.
+    static var focused: Glass { .regular.tint(.white) }
+}
+#endif
+
 extension View {
+    /// The panel behind a notice in a page, such as a load failure: glass on Apple TV, as its
+    /// controls are, and a light gray elsewhere.
+    func noticeBackground() -> some View {
+        #if os(tvOS)
+        glassEffect(.regular, in: .rect(cornerRadius: Metrics.noticeRadius))
+        #else
+        background(.quaternary.opacity(0.5), in: .rect(cornerRadius: Metrics.noticeRadius))
+        #endif
+    }
+
     func platformGlass(in shape: some InsettableShape) -> some View {
         #if os(visionOS)
         glassBackgroundEffect(in: shape)

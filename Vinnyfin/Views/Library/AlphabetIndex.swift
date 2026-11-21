@@ -202,7 +202,7 @@ private struct IndexLetterStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(isFocused ? AnyShapeStyle(.white) : AnyShapeStyle(.clear), in: .rect(cornerRadius: 8))
+            .glassEffect(isFocused ? .focused : .identity, in: .rect(cornerRadius: 8))
             .foregroundStyle(isFocused ? .black : .primary)
             .scaleEffect(isFocused && !reduceMotion ? 1.25 : 1)
             .animation(.easeOut(duration: 0.15), value: isFocused)

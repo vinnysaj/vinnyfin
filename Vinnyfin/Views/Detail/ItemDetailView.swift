@@ -218,7 +218,7 @@ struct ItemDetailView: View {
         .scrollPosition($scrollPosition)
         #endif
         .refreshable { await load(refreshing: true) }
-        .pageBackground()
+        .titlePageBackground()
         .screenTitle(shown.name)
         .inlineNavigationTitle()
         .heroScrollEdge()
@@ -440,7 +440,7 @@ struct TitleGoneNotice: View {
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 16))
+        .noticeBackground()
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("detail.gone")
     }

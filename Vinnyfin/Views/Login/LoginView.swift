@@ -346,6 +346,9 @@ struct LoginView: View {
                     if let problem = knownServers.problem {
                         Text(problem).foregroundStyle(.orange)
                         Button("Dismiss") { knownServers.problem = nil }
+                            #if os(tvOS)
+                            .buttonStyle(.platformGlass)
+                            #endif
                     }
                 }
             }

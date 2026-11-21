@@ -714,7 +714,7 @@ private struct SeeAllCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear
                 .aspectRatio(style == .poster ? 2.0 / 3.0 : 16.0 / 9.0, contentMode: .fit)
-                .background(.quaternary, in: .rect(cornerRadius: Metrics.cardRadius))
+                .glassEffect(.regular, in: .rect(cornerRadius: Metrics.cardRadius))
                 .overlay {
                     Image(systemName: "chevron.right.circle.fill")
                         .font(.system(size: 56))

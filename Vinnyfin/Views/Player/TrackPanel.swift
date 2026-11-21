@@ -492,8 +492,8 @@ private struct SubtitleTiming: View {
 }
 
 #if os(tvOS)
-/// A panel row with focus: on a rounded card inside the panel's glass, lifted a little, rather than
-/// the plain style's square lift from edge to edge over the rows beside it.
+/// A panel row with focus: on a rounded card of white glass inside the panel's glass, lifted a
+/// little, rather than the plain style's square lift from edge to edge over the rows beside it.
 struct PanelRowStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -501,7 +501,7 @@ struct PanelRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(isFocused ? .black : .white)
-            .background(.white.opacity(isFocused ? 1 : 0), in: .rect(cornerRadius: 12))
+            .glassEffect(isFocused ? .focused : .identity, in: .rect(cornerRadius: 12))
             // With Reduce Motion, focus shows in the card and its shadow alone.
             .scaleEffect(configuration.isPressed ? 0.98 : isFocused && !reduceMotion ? 1.02 : 1)
             .shadow(color: .black.opacity(isFocused ? 0.3 : 0), radius: 8, y: 4)

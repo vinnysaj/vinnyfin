@@ -129,7 +129,7 @@ struct TitleInformation: View {
             }
             #if os(tvOS)
             .padding(Self.highlightMargin)
-            .background(.quaternary.opacity(isFocused ? 0.6 : 0), in: .rect(cornerRadius: Metrics.noticeRadius))
+            .glassEffect(isFocused ? .regular : .identity, in: .rect(cornerRadius: Metrics.noticeRadius))
             .padding(-Self.highlightMargin)
             .focusable()
             .focused($isFocused)

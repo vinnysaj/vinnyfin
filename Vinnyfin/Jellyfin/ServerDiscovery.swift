@@ -48,10 +48,12 @@ nonisolated struct DiscoveredServer: Hashable, Identifiable, Sendable {
 /// "who is JellyfinServer?" to UDP port 7359, which each server answers with its name, id and
 /// address.
 ///
-/// iPhone, iPad, Apple TV and Vision Pro send a broadcast only for an app Apple has granted the
-/// multicast networking entitlement (`com.apple.developer.networking.multicast`); for any other,
-/// the system refuses to send it, and discovery is unavailable (`isAvailable`), leaving the
-/// address to type. The Mac needs no entitlement. It asks this device as well, for a server
+/// iPhone, iPad and Vision Pro send a broadcast only for an app Apple has granted the multicast
+/// networking entitlement (`com.apple.developer.networking.multicast`), which the app's
+/// entitlements for them carry. Without it, or until the person lets the app onto the local
+/// network, the system refuses to send it, and discovery is unavailable (`isAvailable`), leaving
+/// the address to type. Apple TV and the Mac have no such entitlement and need none; on Apple TV
+/// Xcode drops it from the signature without a word. It asks this device as well, for a server
 /// running on it, which a Mac and the Simulator can have.
 @Observable
 final class ServerDiscovery {
@@ -195,8 +197,9 @@ final class ServerDiscovery {
     }
 }
 
-/// The system sent the discovery broadcast nowhere: on iPhone, iPad, Apple TV and Vision Pro, as
-/// for an app without the multicast networking entitlement, or with no network to send it on.
+/// The system sent the discovery broadcast nowhere: on iPhone, iPad and Vision Pro, as for an app
+/// without the multicast networking entitlement or not yet let onto the local network, or with no
+/// network to send it on.
 nonisolated struct DiscoveryRefused: LocalizedError {
     let code: Int32
 
